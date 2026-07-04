@@ -35,14 +35,15 @@ type Runner struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
-	SSHPath        string
-	ConfigPath     string
-	Exec           func(context.Context, string, []string) error
-	ExecInput      func(context.Context, string, []string, io.Reader) error
-	ExecOutput     func(context.Context, string, []string) ([]byte, error)
-	DownloadBinary func(context.Context, string, string) (string, error)
-	StartBridge    func(context.Context, string, []string) (func(), error)
-	EnsureResolver func(context.Context, config.DomainsFeature) error
+	SSHPath         string
+	ConfigPath      string
+	RemoteHostsPath string
+	Exec            func(context.Context, string, []string) error
+	ExecInput       func(context.Context, string, []string, io.Reader) error
+	ExecOutput      func(context.Context, string, []string) ([]byte, error)
+	DownloadBinary  func(context.Context, string, string) (string, error)
+	StartBridge     func(context.Context, string, []string, string) (func(), error)
+	EnsureResolver  func(context.Context, config.DomainsFeature) error
 
 	commandPolicy config.CommandPolicy
 	commandBridge bool
@@ -56,14 +57,15 @@ func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
 		configPath = override
 	}
 	r := &Runner{
-		Stdin:      stdin,
-		Stdout:     stdout,
-		Stderr:     stderr,
-		SSHPath:    "ssh",
-		ConfigPath: configPath,
-		Exec:       defaultExec,
-		ExecInput:  defaultExecInput,
-		ExecOutput: defaultExecOutput,
+		Stdin:           stdin,
+		Stdout:          stdout,
+		Stderr:          stderr,
+		SSHPath:         "ssh",
+		ConfigPath:      configPath,
+		RemoteHostsPath: defaultRemoteHostsPath(),
+		Exec:            defaultExec,
+		ExecInput:       defaultExecInput,
+		ExecOutput:      defaultExecOutput,
 	}
 	r.DownloadBinary = defaultDownloadBinary
 	r.StartBridge = r.defaultStartBridge
@@ -125,6 +127,16 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 		fmt.Fprintf(r.Stderr, "sshx: version state skipped: %v\n", err)
 	}
 	sshArgs := baseSSHArgs(parsed)
+	remoteID, err := remoteIDForTarget(r.RemoteHostsPath, parsed.Target)
+	if err != nil {
+		if cfg.Strict {
+			fmt.Fprintf(r.Stderr, "sshx: remote state unavailable for %s: %v\n", parsed.Target, err)
+			return 1
+		}
+		fmt.Fprintf(r.Stderr, "sshx: remote state skipped for %s: %v\n", parsed.Target, err)
+		return r.execSSH(ctx, parsed.Args)
+	}
+	remoteHome := remoteServerHome(remoteID)
 	r.commandPolicy = cfg.Commands
 	r.commandBridge = features.CommandBridge
 	r.forwardPorts = features.Ports.Auto || features.Domains.Enabled
@@ -138,21 +150,28 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			fmt.Fprintf(r.Stderr, "sshx: resolver setup skipped: %v\n", err)
 		}
 	}
-	if err := r.ensureRemoteServer(ctx, sshArgs, features); err != nil {
+	remoteReady := false
+	if err := r.ensureRemoteServer(ctx, sshArgs, features, remoteHome); err != nil {
 		if cfg.Strict {
 			fmt.Fprintf(r.Stderr, "sshx: remote server unavailable for %s: %v\n", parsed.Target, err)
 			return 1
 		}
 	} else if features.CommandBridge || r.forwardPorts {
-		stopBridge, err := r.StartBridge(ctx, parsed.Target, sshArgs)
+		stopBridge, err := r.StartBridge(ctx, parsed.Target, sshArgs, remoteHome)
 		if err != nil {
 			if cfg.Strict {
 				fmt.Fprintf(r.Stderr, "sshx: command bridge unavailable for %s: %v\n", parsed.Target, err)
 				return 1
 			}
 		} else {
+			remoteReady = true
 			defer stopBridge()
 		}
+	} else {
+		remoteReady = true
+	}
+	if remoteReady {
+		return r.execSSH(ctx, sessionSSHArgs(parsed, remoteHome))
 	}
 	return r.execSSH(ctx, parsed.Args)
 }
@@ -342,12 +361,12 @@ func readLocalBridgeStdin(stdin io.Reader) ([]byte, error) {
 	return io.ReadAll(stdin)
 }
 
-func (r *Runner) ensureRemoteServer(ctx context.Context, sshArgs []string, features config.Features) error {
+func (r *Runner) ensureRemoteServer(ctx context.Context, sshArgs []string, features config.Features, remoteHome string) error {
 	if !features.Enabled() {
 		return nil
 	}
 	targetVersion := clientVersion()
-	probe, err := r.probeRemote(ctx, sshArgs)
+	probe, err := r.probeRemote(ctx, sshArgs, remoteHome)
 	if err != nil {
 		return err
 	}
@@ -359,17 +378,27 @@ func (r *Runner) ensureRemoteServer(ctx context.Context, sshArgs []string, featu
 		if err != nil {
 			return err
 		}
-		if err := r.installRemoteBinary(ctx, sshArgs, localBinary); err != nil {
+		if err := r.installRemoteBinary(ctx, sshArgs, localBinary, remoteHome); err != nil {
 			return err
 		}
 	}
-	start := "mkdir -p \"$HOME/.sshx/bin\" \"$HOME/.sshx/run\" && rm -f \"$HOME/.sshx/sock\" \"$HOME/.sshx/server-info\" && nohup \"$HOME/.sshx/bin/sshx\" server --socket \"$HOME/.sshx/sock\" --server-info \"$HOME/.sshx/server-info\" >/tmp/sshx-server.log 2>&1 &"
+	start := strings.Join([]string{
+		remoteServerEnvScript(remoteHome),
+		"mkdir -p \"$SSHX_SERVER_HOME\"",
+		"rm -f \"$SSHX_SERVER_HOME/sock\" \"$SSHX_SERVER_HOME/server-info\"",
+		"nohup \"$SSHX_SERVER_HOME/sshx\" server --socket \"$SSHX_SERVER_HOME/sock\" --server-info \"$SSHX_SERVER_HOME/server-info\" >\"$SSHX_SERVER_HOME/server.log\" 2>&1 &",
+	}, "; ")
 	startCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := r.Exec(startCtx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(start))); err != nil {
 		return err
 	}
-	verify := "i=0; while [ $i -lt 20 ]; do test -S ~/.sshx/sock && test -f ~/.sshx/server-info && exit 0; i=$((i+1)); sleep 0.1; done; exit 1"
+	verify := strings.Join([]string{
+		remoteServerEnvScript(remoteHome),
+		"i=0",
+		"while [ $i -lt 20 ]; do test -S \"$SSHX_SERVER_HOME/sock\" && test -f \"$SSHX_SERVER_HOME/server-info\" && exit 0; i=$((i+1)); sleep 0.1; done",
+		"exit 1",
+	}, "; ")
 	return r.Exec(startCtx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(verify)))
 }
 
@@ -385,16 +414,17 @@ func (p remoteProbe) AssetName() string {
 	return "sshx-" + p.OS + "-" + p.Arch
 }
 
-func (r *Runner) probeRemote(ctx context.Context, sshArgs []string) (remoteProbe, error) {
+func (r *Runner) probeRemote(ctx context.Context, sshArgs []string, remoteHome string) (remoteProbe, error) {
 	script := strings.Join([]string{
+		remoteServerEnvScript(remoteHome),
 		"os=$(uname -s 2>/dev/null || true)",
 		"arch=$(uname -m 2>/dev/null || true)",
 		"ver=",
-		"if test -x \"$HOME/.sshx/bin/sshx\"; then ver=$(\"$HOME/.sshx/bin/sshx\" --version 2>/dev/null | awk '{print $2}' || true); fi",
+		"if test -x \"$SSHX_SERVER_HOME/sshx\"; then ver=$(\"$SSHX_SERVER_HOME/sshx\" --version 2>/dev/null | awk '{print $2}' || true); fi",
 		"server_ver=",
-		"if test -f \"$HOME/.sshx/server-info\"; then server_ver=$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$HOME/.sshx/server-info\" | head -n 1 || true); fi",
+		"if test -f \"$SSHX_SERVER_HOME/server-info\"; then server_ver=$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$SSHX_SERVER_HOME/server-info\" | head -n 1 || true); fi",
 		"running=0",
-		"if test -S \"$HOME/.sshx/sock\" && test -f \"$HOME/.sshx/server-info\"; then running=1; fi",
+		"if test -S \"$SSHX_SERVER_HOME/sock\" && test -f \"$SSHX_SERVER_HOME/server-info\"; then running=1; fi",
 		"printf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$ver\" \"$server_ver\" \"$running\"",
 	}, "; ")
 	out, err := r.ExecOutput(ctx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(script)))
@@ -429,7 +459,7 @@ func (r *Runner) probeRemote(ctx context.Context, sshArgs []string) (remoteProbe
 	}, nil
 }
 
-func (r *Runner) installRemoteBinary(ctx context.Context, sshArgs []string, localPath string) error {
+func (r *Runner) installRemoteBinary(ctx context.Context, sshArgs []string, localPath string, remoteHome string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return err
@@ -437,11 +467,12 @@ func (r *Runner) installRemoteBinary(ctx context.Context, sshArgs []string, loca
 	defer f.Close()
 	script := strings.Join([]string{
 		"set -eu",
-		"mkdir -p \"$HOME/.sshx/bin\" \"$HOME/.sshx/run\"",
-		"tmp=\"$HOME/.sshx/bin/sshx.$$.tmp\"",
+		remoteServerEnvScript(remoteHome),
+		"mkdir -p \"$SSHX_SERVER_HOME\"",
+		"tmp=\"$SSHX_SERVER_HOME/sshx.$$.tmp\"",
 		"cat > \"$tmp\"",
 		"chmod 755 \"$tmp\"",
-		"mv \"$tmp\" \"$HOME/.sshx/bin/sshx\"",
+		"mv \"$tmp\" \"$SSHX_SERVER_HOME/sshx\"",
 	}, "; ")
 	return r.ExecInput(ctx, r.SSHPath, sshCommandArgs(sshArgs, remoteShell(script)), f)
 }
@@ -536,8 +567,8 @@ func defaultDownloadBinary(ctx context.Context, targetVersion, assetName string)
 	return cachePath, nil
 }
 
-func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs []string) (func(), error) {
-	token, err := r.fetchRemoteToken(ctx, sshArgs)
+func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs []string, remoteHome string) (func(), error) {
+	token, err := r.fetchRemoteToken(ctx, sshArgs, remoteHome)
 	if err != nil {
 		return nil, err
 	}
@@ -551,7 +582,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	cmd := exec.CommandContext(
 		bridgeCtx,
 		r.SSHPath,
-		sshCommandArgs(sshArgs, remoteShell("exec ~/.sshx/bin/sshx socket-proxy --socket ~/.sshx/sock"))...,
+		sshCommandArgs(sshArgs, remoteShell(remoteServerEnvScript(remoteHome)+"; exec \"$SSHX_SERVER_HOME/sshx\" socket-proxy --socket \"$SSHX_SERVER_HOME/sock\""))...,
 	)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -634,8 +665,8 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	return stop, nil
 }
 
-func (r *Runner) fetchRemoteToken(ctx context.Context, sshArgs []string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell("cat ~/.sshx/server-info"))...)
+func (r *Runner) fetchRemoteToken(ctx context.Context, sshArgs []string, remoteHome string) (string, error) {
+	cmd := exec.CommandContext(ctx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(remoteServerEnvScript(remoteHome)+"; cat \"$SSHX_SERVER_HOME/server-info\""))...)
 	b, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -762,12 +793,179 @@ func sshCommandArgs(sshArgs []string, remoteCommand string) []string {
 	return args
 }
 
+func sessionSSHArgs(parsed sshcompat.Parsed, remoteHome string) []string {
+	args := baseSSHArgs(parsed)
+	if len(args) == 0 {
+		return append([]string(nil), parsed.Args...)
+	}
+	if len(parsed.RemoteCommand) == 0 {
+		if hasSSHSessionlessFlag(args) {
+			return append([]string(nil), parsed.Args...)
+		}
+		if !hasSSHDisableTTYFlag(args) && !hasSSHForceTTYFlag(args) {
+			args = append([]string{"-t"}, args...)
+		}
+		return append(args, remoteLoginShell(remoteHome))
+	}
+	return append(args, remoteExecShell(remoteHome, parsed.RemoteCommand))
+}
+
+func remoteLoginShell(remoteHome string) string {
+	script := strings.Join([]string{
+		remoteServerEnvScript(remoteHome),
+		"if [ -n \"${SHELL:-}\" ]; then exec \"$SHELL\" -l; fi",
+		"exec sh -l",
+	}, "; ")
+	return remoteShell(script)
+}
+
+func remoteExecShell(remoteHome string, argv []string) string {
+	parts := []string{
+		"sh",
+		"-lc",
+		remoteServerEnvScript(remoteHome) + "; exec \"$@\"",
+		"sh",
+	}
+	parts = append(parts, argv...)
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		quoted = append(quoted, shellQuote(part))
+	}
+	return strings.Join(quoted, " ")
+}
+
 func remoteShell(script string) string {
 	return "sh -lc " + shellQuote(script)
 }
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func hasSSHSessionlessFlag(args []string) bool {
+	for _, arg := range args {
+		if shortOptionClusterContains(arg, 'N') || shortOptionClusterContains(arg, 'W') {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSSHDisableTTYFlag(args []string) bool {
+	for _, arg := range args {
+		if shortOptionClusterContains(arg, 'T') {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSSHForceTTYFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-t" || arg == "-tt" {
+			return true
+		}
+	}
+	return false
+}
+
+func shortOptionClusterContains(arg string, flag byte) bool {
+	if len(arg) < 2 || arg[0] != '-' || arg == "--" {
+		return false
+	}
+	if strings.HasPrefix(arg, "-o") || strings.HasPrefix(arg, "-O") {
+		return false
+	}
+	for i := 1; i < len(arg); i++ {
+		if arg[i] == flag {
+			return true
+		}
+	}
+	return false
+}
+
+type remoteHostsState struct {
+	Targets map[string]remoteHostState `json:"targets"`
+}
+
+type remoteHostState struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func remoteIDForTarget(path, target string) (string, error) {
+	if strings.TrimSpace(target) == "" {
+		return "", errors.New("remote target is required")
+	}
+	var state remoteHostsState
+	if b, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(b, &state); err != nil {
+			return "", err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if state.Targets == nil {
+		state.Targets = make(map[string]remoteHostState)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if entry := state.Targets[target]; entry.ID != "" {
+		entry.UpdatedAt = now
+		state.Targets[target] = entry
+		if err := writeRemoteHostsState(path, state); err != nil {
+			return "", err
+		}
+		return entry.ID, nil
+	}
+	id, err := generateUUID()
+	if err != nil {
+		return "", err
+	}
+	state.Targets[target] = remoteHostState{ID: id, CreatedAt: now, UpdatedAt: now}
+	if err := writeRemoteHostsState(path, state); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func writeRemoteHostsState(path string, state remoteHostsState) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	tmpPath := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	if err := os.WriteFile(tmpPath, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func generateUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	s := hex.EncodeToString(b[:])
+	return s[0:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:32], nil
+}
+
+func remoteServerHome(id string) string {
+	return "$HOME/.sshx_server/" + id
+}
+
+func remoteServerEnvScript(remoteHome string) string {
+	return "SSHX_SERVER_HOME=\"" + strings.ReplaceAll(remoteHome, `"`, `\"`) + "\"; export SSHX_SERVER_HOME; PATH=\"$SSHX_SERVER_HOME:$PATH\"; export PATH"
 }
 
 type versionState struct {
@@ -894,6 +1092,9 @@ func splitHostPortDefault(addr, defaultPort string) (string, string, error) {
 }
 
 func defaultSocketPath() string {
+	if serverHome := os.Getenv("SSHX_SERVER_HOME"); serverHome != "" {
+		return filepath.Join(serverHome, "sock")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return filepath.Join(os.TempDir(), "sshx.sock")
@@ -923,6 +1124,9 @@ func defaultCacheRoot() string {
 }
 
 func defaultVersionStatePath() string {
+	if serverHome := os.Getenv("SSHX_SERVER_HOME"); serverHome != "" {
+		return filepath.Join(serverHome, "version-state.json")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return filepath.Join(os.TempDir(), "sshx-version-state.json")
@@ -930,7 +1134,21 @@ func defaultVersionStatePath() string {
 	return filepath.Join(home, ".sshx", "version-state.json")
 }
 
+func defaultRemoteHostsPath() string {
+	if override := os.Getenv("SSHX_REMOTE_HOSTS"); override != "" {
+		return override
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "sshx-remote-hosts.json")
+	}
+	return filepath.Join(home, ".sshx", "remote-hosts.json")
+}
+
 func defaultServerInfoPath() string {
+	if serverHome := os.Getenv("SSHX_SERVER_HOME"); serverHome != "" {
+		return filepath.Join(serverHome, "server-info")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return filepath.Join(os.TempDir(), "sshx-server-info")

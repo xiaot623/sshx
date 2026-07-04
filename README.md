@@ -65,7 +65,7 @@ sshx first tries to use the same local port as the remote listener. If that loca
 
 ### 🏗️ Shared Server Architecture
 
-- One **server daemon** per remote host per user, shared across all concurrent SSH sessions.
+- One **server daemon** per client target alias, installed under `~/.sshx_server/<uuid>` on the remote and shared by that client's concurrent SSH sessions.
 - Client connects via a hidden `socket-proxy` SSH channel.
 - Server manages port sniffing, forwarding state, and command bridge routing centrally.
 - Server stays alive through brief disconnects, exiting after an idle timeout with no clients.
@@ -220,7 +220,7 @@ commands:
 └─────────────────────────────────┘     └─────────────────────────────────┘
 ```
 
-1. **Connection**: `sshx remote` opens a normal SSH session and starts (or connects to) a shared `sshx server` on the remote.
+1. **Connection**: `sshx remote` opens a normal SSH session and starts (or connects to) the client-target `sshx server` under `~/.sshx_server/<uuid>`.
 2. **Bridge channel**: A hidden `socket-proxy` SSH channel links the local daemon to the remote server.
 3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback listeners.
 4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using `ssh -W`.

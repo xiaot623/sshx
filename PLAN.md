@@ -29,7 +29,7 @@ sshx local uname -a         # Errors immediately on the client — "local" is re
 
 ### Matched SSH Hosts
 
-- sshx connects to a **shared Server daemon** on the remote host (one Server per user per remote host, shared across all client terminals).
+- sshx connects to a **shared Server daemon** on the remote host (one Server per client target alias, shared across that client's concurrent terminals).
 - If no Server is running, the first client installs and starts it.
 - The user-visible SSH session remains an ordinary OpenSSH connection.
 - The Server centrally manages binary installation, the command bridge, remote port sniffing, forwarding, and local domain routing — all client sessions share this state.
@@ -45,7 +45,7 @@ sshx local uname -a         # Errors immediately on the client — "local" is re
 
 ## Architecture: Single Server, Multiple Clients
 
-sshx uses one long-running Server daemon per remote host, shared by all concurrent client terminals.
+sshx uses one long-running Server daemon per client target alias, shared by that client's concurrent terminals.
 
 ```
 ┌──────────────────────────────┐     ┌──────────────────────────────┐
@@ -64,7 +64,7 @@ sshx uses one long-running Server daemon per remote host, shared by all concurre
 
 - **Server lifecycle**: The first matched `sshx <host>` starts the Server on the remote. The Server stays alive after clients disconnect (configurable idle timeout, e.g., exit after 10 minutes with no connected clients).
 - **Port forwarding**: Centrally managed by the Server — no port conflicts across concurrent terminals.
-- **Discovery**: The Server writes connection info to `~/.sshx/server-info` (Unix socket path or localhost port + auth token). Each new client reads this file to connect.
+- **Discovery**: The client maintains a stable target-alias → UUID mapping locally. The remote Server writes connection info under `~/.sshx_server/<uuid>/server-info` (Unix socket path + auth token). Each new client terminal for that alias reads this isolated file to connect.
 
 ## Implementation Details
 
@@ -135,8 +135,8 @@ v1 uses batch stdin: all stdin data is collected and sent before the command sta
 
 ### Remote Installation
 
-- The first matched connection uploads the Go binary to `~/.sshx/bin/sshx`.
-- Per-user installation, no root required.
+- The first matched connection uploads the Go binary to `~/.sshx_server/<uuid>/sshx`, where `<uuid>` is owned by the local client state for that target alias.
+- Per-client-target installation, no root required.
 - Protocol version and checksum are verified before reuse.
 - Installation/update only occurs for hosts matching wrapper rules.
 - **v1**: Manual binary installation for testing. Production distribution via GitHub releases (v2).
@@ -158,12 +158,12 @@ v1 uses batch stdin: all stdin data is collected and sent before the command sta
 
 ## Server Discovery
 
-The Server writes connection endpoint info to `~/.sshx/server-info` on the remote host. Format:
+The Server writes connection endpoint info to `~/.sshx_server/<uuid>/server-info` on the remote host. Format:
 
 ```json
 {
   "protocol": "unix",
-  "address": "/home/xiaot/.sshx/sock",
+  "address": "/home/xiaot/.sshx_server/550e8400-e29b-41d4-a716-446655440000/sock",
   "token": "abc123..."
 }
 ```
@@ -171,7 +171,7 @@ The Server writes connection endpoint info to `~/.sshx/server-info` on the remot
 Discovery flow:
 
 1. The client opens an SSH session to the remote host.
-2. The client reads `~/.sshx/server-info` to check whether a Server exists.
+2. The client resolves the target alias to a local UUID and reads `~/.sshx_server/<uuid>/server-info` to check whether a Server exists.
 3. If a Server is running and reachable: the client connects to it.
 4. If not: the client installs the binary (if needed), starts the Server, then connects.
 
@@ -236,7 +236,7 @@ SSHX_DISABLE=1 sshx remote
 - Remote port sniffing creates forwardings and domain routes (localhost ports only).
 - Concurrent terminals to the same host share forwarding state — no port conflicts.
 - DNS suffix setup requires authorization only once; subsequent dynamic domain names work without repeated prompts.
-- The Server binary discovers the client via `SSHX_BRIDGE_SOCKET` injected into the Server process environment.
+- The user SSH session receives `SSHX_SERVER_HOME=$HOME/.sshx_server/<uuid>` and has that directory prepended to `PATH`, so `sshx local ...` resolves to the isolated remote binary and server-info for the correct client.
 
 ## Assumptions
 
@@ -244,7 +244,7 @@ SSHX_DISABLE=1 sshx remote
 - OpenSSH remains the authoritative SSH implementation.
 - Unmatched invocations are pure passthrough.
 - v1 target platforms: macOS/Linux clients, Linux servers.
-- Remote wrapper is installed per-user under `~/.sshx`.
+- Remote wrapper is installed per client target alias under `~/.sshx_server/<uuid>`.
 - Remote-to-local commands require an active Server session with a connected client on the remote.
 - v1 development: manual binary installation; v2: distribution via GitHub releases.
 - v1 command bridge supports non-interactive commands only (no PTY allocated for bridge commands).

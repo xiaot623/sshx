@@ -15,6 +15,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/locald"
+	"github.com/xiaot623/sshx/internal/sshcompat"
 	"github.com/xiaot623/sshx/internal/version"
 )
 
@@ -108,6 +109,69 @@ func TestRecordVersionStateRotatesCurrentToLast(t *testing.T) {
 	}
 }
 
+func TestRemoteIDForTargetIsStablePerAlias(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "remote-hosts.json")
+	debian1, err := remoteIDForTarget(path, "debian")
+	if err != nil {
+		t.Fatal(err)
+	}
+	debian2, err := remoteIDForTarget(path, "debian")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ubuntu, err := remoteIDForTarget(path, "ubuntu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if debian1 == "" || debian1 != debian2 {
+		t.Fatalf("debian ids = %q %q", debian1, debian2)
+	}
+	if ubuntu == "" || ubuntu == debian1 {
+		t.Fatalf("ubuntu id = %q, debian id = %q", ubuntu, debian1)
+	}
+	if got := remoteServerHome(debian1); got != "$HOME/.sshx_server/"+debian1 {
+		t.Fatalf("remote home = %q", got)
+	}
+}
+
+func TestSessionSSHArgsInjectsRemoteHomeForInteractiveShell(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"debian"})
+	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	if len(got) != 3 {
+		t.Fatalf("args = %#v", got)
+	}
+	if got[0] != "-t" || got[1] != "debian" {
+		t.Fatalf("args = %#v", got)
+	}
+	if !strings.Contains(got[2], "SSHX_SERVER_HOME=\"$HOME/.sshx_server/test-id\"") ||
+		!strings.Contains(got[2], "PATH=\"$SSHX_SERVER_HOME:$PATH\"") ||
+		!strings.Contains(got[2], "exec \"$SHELL\" -l") {
+		t.Fatalf("remote command = %q", got[2])
+	}
+}
+
+func TestSessionSSHArgsDoesNotWrapSessionlessSSH(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"-N", "debian"})
+	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	if !reflect.DeepEqual(got, []string{"-N", "debian"}) {
+		t.Fatalf("args = %#v", got)
+	}
+}
+
+func TestServerDefaultsUseSSHXServerHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SSHX_SERVER_HOME", dir)
+	if got := defaultSocketPath(); got != filepath.Join(dir, "sock") {
+		t.Fatalf("socket path = %q", got)
+	}
+	if got := defaultServerInfoPath(); got != filepath.Join(dir, "server-info") {
+		t.Fatalf("server info path = %q", got)
+	}
+	if got := defaultVersionStatePath(); got != filepath.Join(dir, "version-state.json") {
+		t.Fatalf("version state path = %q", got)
+	}
+}
+
 func TestNoWrapDelegatesToSSHWithoutNoWrapFlag(t *testing.T) {
 	t.Setenv("SSHX_CONFIG", "")
 	var calls []execCall
@@ -163,7 +227,7 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 		return nil
 	}
 
-	err := r.ensureRemoteServer(context.Background(), []string{"remote"}, config.Features{CommandBridge: true})
+	err := r.ensureRemoteServer(context.Background(), []string{"remote"}, config.Features{CommandBridge: true}, remoteServerHome("client-remote"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +239,10 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	}
 	if len(execCalls) != 2 {
 		t.Fatalf("exec calls = %#v", execCalls)
+	}
+	if !strings.Contains(strings.Join(execCalls[0].args, " "), "SSHX_SERVER_HOME") ||
+		!strings.Contains(strings.Join(execCalls[0].args, " "), ".sshx_server/client-remote") {
+		t.Fatalf("start args = %#v", execCalls[0].args)
 	}
 }
 
@@ -197,7 +265,7 @@ func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
 		return nil
 	}
 
-	err := r.ensureRemoteServer(context.Background(), []string{"remote"}, config.Features{CommandBridge: true})
+	err := r.ensureRemoteServer(context.Background(), []string{"remote"}, config.Features{CommandBridge: true}, remoteServerHome("client-remote"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,12 +428,12 @@ features:
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
 		return sameVersionRemoteProbe(), nil
 	}
-	r.StartBridge = func(context.Context, string, []string) (func(), error) {
+	r.StartBridge = func(context.Context, string, []string, string) (func(), error) {
 		bridgeStarted = true
 		return func() {}, nil
 	}
 	r.Exec = func(_ context.Context, _ string, args []string) error {
-		if strings.Contains(strings.Join(args, " "), "test -S ~/.sshx/sock") {
+		if strings.Contains(strings.Join(args, " "), "test -S \"$SSHX_SERVER_HOME/sock\"") {
 			return nil
 		}
 		return nil
@@ -397,8 +465,11 @@ features:
 		probeArgs = append([]string(nil), args...)
 		return sameVersionRemoteProbe(), nil
 	}
-	r.StartBridge = func(_ context.Context, _ string, sshArgs []string) (func(), error) {
+	r.StartBridge = func(_ context.Context, _ string, sshArgs []string, remoteHome string) (func(), error) {
 		bridgeArgs = append([]string(nil), sshArgs...)
+		if !strings.Contains(remoteHome, ".sshx_server/") {
+			t.Fatalf("remote home = %q", remoteHome)
+		}
 		return func() {}, nil
 	}
 	r.Exec = func(_ context.Context, name string, args []string) error {
@@ -422,7 +493,13 @@ features:
 	if len(probeArgs) != len(wantBase)+2 || !strings.HasPrefix(probeArgs[len(probeArgs)-1], "sh -lc ") {
 		t.Fatalf("internal ssh args = %#v", probeArgs)
 	}
-	if !reflect.DeepEqual(calls[0].args, []string{"-p", "2222", "-J", "jump", "remote", "uname", "-s"}) {
+	if !reflect.DeepEqual(calls[0].args[:len(wantBase)], wantBase) {
+		t.Fatalf("delegated ssh args = %#v", calls[0].args)
+	}
+	if len(calls[0].args) != len(wantBase)+1 ||
+		!strings.Contains(calls[0].args[len(calls[0].args)-1], "SSHX_SERVER_HOME") ||
+		!strings.Contains(calls[0].args[len(calls[0].args)-1], "exec \"$@\"") ||
+		!strings.Contains(calls[0].args[len(calls[0].args)-1], "uname") {
 		t.Fatalf("delegated ssh args = %#v", calls[0].args)
 	}
 }
@@ -444,14 +521,14 @@ features:
 		probeArgs = append([]string(nil), args...)
 		return sameVersionRemoteProbe(), nil
 	}
-	r.StartBridge = func(context.Context, string, []string) (func(), error) {
+	r.StartBridge = func(context.Context, string, []string, string) (func(), error) {
 		return func() {}, nil
 	}
 	r.Exec = func(_ context.Context, name string, args []string) error {
 		calls = append(calls, execCall{name: name, args: append([]string(nil), args...)})
 		return nil
 	}
-	code := r.Run(context.Background(), []string{"remote", "~/.sshx/bin/sshx local uname -s"})
+	code := r.Run(context.Background(), []string{"remote", "custom-wrapper local uname -s"})
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
@@ -461,7 +538,12 @@ features:
 	if strings.Contains(strings.Join(probeArgs, " "), "local uname") {
 		t.Fatalf("internal ssh args included quoted remote command: %#v", probeArgs)
 	}
-	if !reflect.DeepEqual(calls[0].args, []string{"remote", "~/.sshx/bin/sshx local uname -s"}) {
+	if !reflect.DeepEqual(calls[0].args[:1], []string{"remote"}) {
+		t.Fatalf("delegated ssh args = %#v", calls[0].args)
+	}
+	if len(calls[0].args) != 2 ||
+		!strings.Contains(calls[0].args[1], "SSHX_SERVER_HOME") ||
+		!strings.Contains(calls[0].args[1], "custom-wrapper local uname -s") {
 		t.Fatalf("delegated ssh args = %#v", calls[0].args)
 	}
 }
