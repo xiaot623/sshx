@@ -58,11 +58,7 @@ func (m *Manager) DNSAddr() string {
 }
 
 func (m *Manager) NameForTarget(target string) string {
-	host := domainSafeHost(targetHost(target))
-	if host == "" {
-		host = "host"
-	}
-	return fmt.Sprintf("%s.%s", host, m.suffix)
+	return fmt.Sprintf("%s.%s", TargetPrefix(target), m.suffix)
 }
 
 func (m *Manager) startDNS(ctx context.Context) error {
@@ -103,28 +99,12 @@ func normalizeSuffix(s string) string {
 	return strings.ToLower(strings.Trim(strings.TrimSpace(s), "."))
 }
 
-func targetHost(target string) string {
-	target = strings.TrimSpace(target)
-	if at := strings.LastIndex(target, "@"); at >= 0 {
-		target = target[at+1:]
-	}
-	if strings.HasPrefix(target, "[") {
-		if end := strings.Index(target, "]"); end >= 0 {
-			return target[1:end]
-		}
-	}
-	if colon := strings.LastIndex(target, ":"); colon > 0 && !strings.Contains(target[:colon], ":") {
-		return target[:colon]
-	}
-	return target
-}
-
-func domainSafeHost(host string) string {
-	host = strings.ToLower(strings.Trim(strings.TrimSpace(host), "."))
+func TargetPrefix(target string) string {
+	host := strings.ToLower(strings.Trim(strings.TrimSpace(target), "."))
 	var b strings.Builder
 	prevDash := false
 	for _, r := range host {
-		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.'
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
 		if ok {
 			b.WriteRune(r)
 			prevDash = false
@@ -135,7 +115,11 @@ func domainSafeHost(host string) string {
 			prevDash = true
 		}
 	}
-	return strings.Trim(b.String(), "-.")
+	prefix := strings.Trim(b.String(), "-")
+	if prefix == "" {
+		return "host"
+	}
+	return prefix
 }
 
 func buildDNSResponse(req []byte, suffix string) ([]byte, error) {

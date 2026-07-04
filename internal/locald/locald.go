@@ -44,18 +44,24 @@ type Response struct {
 
 type Forwarded struct {
 	Target     string `json:"target"`
+	Domain     string `json:"domain,omitempty"`
 	LocalPort  int    `json:"localPort"`
 	RemotePort int    `json:"remotePort"`
+}
+
+type forwardRecord struct {
+	Target string
+	Domain string
 }
 
 type Server struct {
 	SocketPath string
 	Stderr     io.Writer
 
-	mu         sync.Mutex
-	forwarders map[string]*forward.Manager
-	targets    map[string]string
-	domains    map[string]*domain.Manager
+	mu             sync.Mutex
+	forwarders     map[string]*forward.Manager
+	forwardRecords map[string]map[int]forwardRecord
+	domains        map[string]*domain.Manager
 }
 
 func DefaultSocketPath() string {
@@ -76,8 +82,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.forwarders == nil {
 		s.forwarders = map[string]*forward.Manager{}
 	}
-	if s.targets == nil {
-		s.targets = map[string]string{}
+	if s.forwardRecords == nil {
+		s.forwardRecords = map[string]map[int]forwardRecord{}
 	}
 	if s.domains == nil {
 		s.domains = map[string]*domain.Manager{}
@@ -146,7 +152,6 @@ func (s *Server) ensurePort(ctx context.Context, req Request) Response {
 		sshArgs = []string{req.Target}
 	}
 	fwd := s.forwarder(ctx, req.SSHPath, sshArgs)
-	s.rememberTarget(req.SSHPath, sshArgs, req.Target)
 	f, err := fwd.Ensure(req.RemotePort, req.DomainsEnabled)
 	if err != nil {
 		return Response{OK: false, Error: err.Error()}
@@ -159,17 +164,21 @@ func (s *Server) ensurePort(ctx context.Context, req Request) Response {
 		}
 		resp.Domain = dom.NameForTarget(req.Target)
 	}
+	s.rememberForward(req.SSHPath, sshArgs, req.RemotePort, req.Target, resp.Domain)
 	return resp
 }
 
-func (s *Server) rememberTarget(sshPath string, sshArgs []string, target string) {
+func (s *Server) rememberForward(sshPath string, sshArgs []string, remotePort int, target string, domain string) {
 	key := sshPath + "\x00" + strings.Join(sshArgs, "\x00")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.targets == nil {
-		s.targets = map[string]string{}
+	if s.forwardRecords == nil {
+		s.forwardRecords = map[string]map[int]forwardRecord{}
 	}
-	s.targets[key] = target
+	if s.forwardRecords[key] == nil {
+		s.forwardRecords[key] = map[int]forwardRecord{}
+	}
+	s.forwardRecords[key][remotePort] = forwardRecord{Target: target, Domain: domain}
 }
 
 func (s *Server) forwarder(ctx context.Context, sshPath string, sshArgs []string) *forward.Manager {
@@ -192,10 +201,11 @@ func (s *Server) listPorts() Response {
 	defer s.mu.Unlock()
 	var out []Forwarded
 	for key, fwd := range s.forwarders {
-		target := s.targets[key]
 		for _, entry := range fwd.List() {
+			record := s.forwardRecords[key][entry.RemotePort]
 			out = append(out, Forwarded{
-				Target:     target,
+				Target:     record.Target,
+				Domain:     record.Domain,
 				LocalPort:  entry.LocalPort,
 				RemotePort: entry.RemotePort,
 			})

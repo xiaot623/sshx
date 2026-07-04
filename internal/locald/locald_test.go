@@ -96,11 +96,11 @@ func TestDomainForwardUsesNextPortWhenPreferredPortIsOccupied(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
-		SocketPath: shortSocketPath(t),
-		forwarders: map[string]*forward.Manager{},
-		targets:    map[string]string{},
-		domains:    map[string]*domain.Manager{},
-		Stderr:     io.Discard,
+		SocketPath:     shortSocketPath(t),
+		forwarders:     map[string]*forward.Manager{},
+		forwardRecords: map[string]map[int]forwardRecord{},
+		domains:        map[string]*domain.Manager{},
+		Stderr:         io.Discard,
 	}
 	resp := s.handle(ctx, Request{
 		Type:           TypeEnsurePort,
@@ -123,11 +123,11 @@ func TestListPorts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
-		SocketPath: shortSocketPath(t),
-		forwarders: map[string]*forward.Manager{},
-		targets:    map[string]string{},
-		domains:    map[string]*domain.Manager{},
-		Stderr:     io.Discard,
+		SocketPath:     shortSocketPath(t),
+		forwarders:     map[string]*forward.Manager{},
+		forwardRecords: map[string]map[int]forwardRecord{},
+		domains:        map[string]*domain.Manager{},
+		Stderr:         io.Discard,
 	}
 	remotePort := freeTCPPort(t)
 	ensure := s.handle(ctx, Request{
@@ -145,6 +145,42 @@ func TestListPorts(t *testing.T) {
 	}
 	got := resp.Forwards[0]
 	if got.Target != "debian" || got.RemotePort != remotePort || got.LocalPort == 0 {
+		t.Fatalf("forward = %#v", got)
+	}
+}
+
+func TestListPortsIncludesDomainForDirectTarget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{
+		SocketPath:     shortSocketPath(t),
+		forwarders:     map[string]*forward.Manager{},
+		forwardRecords: map[string]map[int]forwardRecord{},
+		domains:        map[string]*domain.Manager{},
+		Stderr:         io.Discard,
+	}
+	remotePort := freeTCPPort(t)
+	ensure := s.handle(ctx, Request{
+		Type:           TypeEnsurePort,
+		SSHPath:        "ssh",
+		Target:         "debian@192.168.1.100",
+		RemotePort:     remotePort,
+		DomainsEnabled: true,
+		DomainSuffix:   "it.sshx",
+		DNSAddr:        "127.0.0.1:0",
+	})
+	if !ensure.OK {
+		t.Fatalf("ensure response = %#v", ensure)
+	}
+	resp := s.handle(ctx, Request{Type: TypeListPorts})
+	if !resp.OK || len(resp.Forwards) != 1 {
+		t.Fatalf("list response = %#v", resp)
+	}
+	got := resp.Forwards[0]
+	if got.Target != "debian@192.168.1.100" ||
+		got.Domain != "debian-192-168-1-100.it.sshx" ||
+		got.RemotePort != remotePort ||
+		got.LocalPort == 0 {
 		t.Fatalf("forward = %#v", got)
 	}
 }

@@ -196,9 +196,17 @@ func (r *Runner) runForwardList(ctx context.Context) int {
 		return resp.Forwards[i].RemotePort < resp.Forwards[j].RemotePort
 	})
 	for _, fwd := range resp.Forwards {
-		fmt.Fprintf(r.Stdout, "%d -> %s:%d\n", fwd.LocalPort, fwd.Target, fwd.RemotePort)
+		fmt.Fprintf(r.Stdout, "%s -> %s:%d\n", forwardAddress(fwd), fwd.Target, fwd.RemotePort)
 	}
 	return 0
+}
+
+func forwardAddress(fwd locald.Forwarded) string {
+	host := fwd.Domain
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%d", host, fwd.LocalPort)
 }
 
 func (r *Runner) runServer(ctx context.Context, args []string) int {

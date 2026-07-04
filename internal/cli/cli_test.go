@@ -349,7 +349,7 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	want := itoa(resp.LocalPort) + " -> debian:" + itoa(remotePort) + "\n"
+	want := "http://127.0.0.1:" + itoa(resp.LocalPort) + " -> debian:" + itoa(remotePort) + "\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
@@ -362,6 +362,17 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server did not stop")
+	}
+}
+
+func TestForwardAddressUsesDomainWhenAvailable(t *testing.T) {
+	got := forwardAddress(locald.Forwarded{
+		Domain:    "debian-192-168-1-100.xiaot.sshx",
+		LocalPort: 3001,
+	})
+	want := "http://debian-192-168-1-100.xiaot.sshx:3001"
+	if got != want {
+		t.Fatalf("forwardAddress = %q, want %q", got, want)
 	}
 }
 
