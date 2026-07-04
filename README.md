@@ -74,25 +74,35 @@ sshx first tries to use the same local port as the remote listener. If that loca
 
 ## Installation
 
-### From npm
+### Run with npx (Recommended)
+
+No installation required — npx fetches the latest binary on each run:
+
+```sh
+npx @hahahhh/sshx@next my-server
+npx @hahahhh/sshx@next -p 2222 user@my-server hostname
+```
+
+For repeated use, install globally:
 
 ```sh
 npm install -g @hahahhh/sshx@next
 ```
 
-### From Source
+The npm wrapper auto-downloads the correct native binary for your platform from GitHub Releases.
+
+### Download Binary
+
+Download the prebuilt binary directly from [GitHub Releases](https://github.com/xiaot623/sshx/releases):
 
 ```sh
-git clone https://github.com/xiaot623/sshx.git
-cd sshx
-go build -o ./bin/sshx ./cmd/sshx
+# Example: macOS arm64, v0.0.1-rc.6
+curl -L -o sshx https://github.com/xiaot623/sshx/releases/download/v0.0.1-rc.6/sshx-darwin-arm64
+chmod +x sshx
+sudo mv sshx /usr/local/bin/sshx
 ```
 
-Copy the binary to a location in your `$PATH`:
-
-```sh
-cp ./bin/sshx /usr/local/bin/sshx
-```
+Available binaries: `sshx-darwin-arm64`, `sshx-darwin-amd64`, `sshx-linux-arm64`, `sshx-linux-amd64`.
 
 ### Shell Alias (Recommended)
 
@@ -108,27 +118,7 @@ The alias is safe — unmatched hosts have zero overhead and zero side effects.
 
 ## Quick Start
 
-### 1. Create your config
-
-```sh
-mkdir -p ~/.sshx
-```
-
-`~/.sshx/config.yaml`:
-
-```yaml
-features:
-  commandBridge: true
-  ports:
-    auto: true
-  domains:
-    enabled: true
-
-commands:
-  deny: []
-```
-
-### 2. Connect normally
+### 1. Connect normally
 
 ```sh
 sshx my-server
@@ -138,7 +128,7 @@ sshx -p 2222 user@my-server hostname
 
 All existing SSH options work — `-F`, `-o`, `-J`, `ProxyJump`, etc. are handled by OpenSSH.
 
-### 3. Try the command bridge
+### 2. Try the command bridge
 
 Inside your SSH session on the remote:
 
@@ -147,7 +137,7 @@ sshx local uname -s
 # → Darwin (your local machine's OS)
 ```
 
-### 4. Start a dev server on the remote
+### 3. Start a dev server on the remote
 
 On the remote, start a server listening on `localhost`:
 

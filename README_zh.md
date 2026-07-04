@@ -74,25 +74,35 @@ sshx 会优先使用与远端监听相同的本地端口。如果该本地端口
 
 ## 安装
 
-### 通过 npm 安装
+### 通过 npx 运行（推荐）
+
+无需安装——npx 每次运行时自动获取最新二进制文件：
+
+```sh
+npx @hahahhh/sshx@next my-server
+npx @hahahhh/sshx@next -p 2222 user@my-server hostname
+```
+
+如果需要频繁使用，也可以全局安装：
 
 ```sh
 npm install -g @hahahhh/sshx@next
 ```
 
-### 从源码构建
+npm 封装器会自动从 GitHub Releases 下载适合你平台的本地二进制文件。
+
+### 下载二进制文件
+
+直接从 [GitHub Releases](https://github.com/xiaot623/sshx/releases) 下载预编译二进制文件：
 
 ```sh
-git clone https://github.com/xiaot623/sshx.git
-cd sshx
-go build -o ./bin/sshx ./cmd/sshx
+# 示例：macOS arm64, v0.0.1-rc.6
+curl -L -o sshx https://github.com/xiaot623/sshx/releases/download/v0.0.1-rc.6/sshx-darwin-arm64
+chmod +x sshx
+sudo mv sshx /usr/local/bin/sshx
 ```
 
-将二进制文件复制到 `$PATH` 中的位置：
-
-```sh
-cp ./bin/sshx /usr/local/bin/sshx
-```
+可用二进制文件：`sshx-darwin-arm64`、`sshx-darwin-amd64`、`sshx-linux-arm64`、`sshx-linux-amd64`。
 
 ### Shell 别名（推荐）
 
@@ -108,27 +118,7 @@ alias ssh=sshx
 
 ## 快速开始
 
-### 1. 创建配置文件
-
-```sh
-mkdir -p ~/.sshx
-```
-
-`~/.sshx/config.yaml`：
-
-```yaml
-features:
-  commandBridge: true
-  ports:
-    auto: true
-  domains:
-    enabled: true
-
-commands:
-  deny: []
-```
-
-### 2. 正常连接
+### 1. 正常连接
 
 ```sh
 sshx my-server
@@ -138,7 +128,7 @@ sshx -p 2222 user@my-server hostname
 
 所有已有的 SSH 选项均可使用——`-F`、`-o`、`-J`、`ProxyJump` 等由 OpenSSH 处理。
 
-### 3. 尝试命令桥
+### 2. 尝试命令桥
 
 在远程的 SSH 会话中：
 
@@ -147,7 +137,7 @@ sshx local uname -s
 # → Darwin（你本地机器的操作系统）
 ```
 
-### 4. 在远程启动开发服务器
+### 3. 在远程启动开发服务器
 
 在远程启动一个监听 localhost 的服务器：
 
