@@ -79,14 +79,14 @@ sshx first tries to use the same local port as the remote listener. If that loca
 No installation required — npx fetches the latest binary on each run:
 
 ```sh
-npx @hahahhh/sshx@next my-server
-npx @hahahhh/sshx@next -p 2222 user@my-server hostname
+npx @hahahhh/sshx my-server
+npx @hahahhh/sshx -p 2222 user@my-server hostname
 ```
 
 For repeated use, install globally:
 
 ```sh
-npm install -g @hahahhh/sshx@next
+npm install -g @hahahhh/sshx
 ```
 
 The npm wrapper auto-downloads the correct native binary for your platform from GitHub Releases.
@@ -96,8 +96,8 @@ The npm wrapper auto-downloads the correct native binary for your platform from 
 Download the prebuilt binary directly from [GitHub Releases](https://github.com/xiaot623/sshx/releases):
 
 ```sh
-# Example: macOS arm64, v0.0.1-rc.6
-curl -L -o sshx https://github.com/xiaot623/sshx/releases/download/v0.0.1-rc.6/sshx-darwin-arm64
+# Example: macOS arm64, latest release
+curl -L -o sshx https://github.com/xiaot623/sshx/releases/latest/download/sshx-darwin-arm64
 chmod +x sshx
 sudo mv sshx /usr/local/bin/sshx
 ```
