@@ -16,7 +16,6 @@ import { fileURLToPath } from "node:url";
 const platformByNode = new Map([
   ["darwin", "darwin"],
   ["linux", "linux"],
-  ["win32", "windows"],
 ]);
 
 const archByNode = new Map([

@@ -38,6 +38,7 @@ jobs:
           set -euo pipefail
 
           version="${GITHUB_REF_NAME#v}"
+          ldflags="-s -w -X github.com/xiaot623/sshx/internal/version.Version=${version}"
           mkdir -p dist/native release
 
           targets=(
@@ -45,32 +46,18 @@ jobs:
             "linux arm64"
             "darwin amd64"
             "darwin arm64"
-            "windows amd64"
-            "windows arm64"
           )
 
           for target in "${targets[@]}"; do
             read -r goos goarch <<< "${target}"
-            ext=""
-            if [[ "${goos}" == "windows" ]]; then
-              ext=".exe"
-            fi
 
-            binary="sshx-${goos}-${goarch}${ext}"
+            binary="sshx-${goos}-${goarch}"
             GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
-              go build -trimpath -ldflags "-s -w" -o "dist/native/${binary}" ./cmd/sshx
-            cp "dist/native/${binary}" "release/${binary}"
-
-            package_dir="release/sshx-${version}-${goos}-${goarch}"
-            mkdir -p "${package_dir}"
-            cp "dist/native/${binary}" "${package_dir}/sshx${ext}"
-            cp README.md "${package_dir}/README.md" 2>/dev/null || true
-
-            if [[ "${goos}" == "windows" ]]; then
-              (cd release && zip -qr "sshx-${version}-${goos}-${goarch}.zip" "sshx-${version}-${goos}-${goarch}")
-            else
-              tar -czf "release/sshx-${version}-${goos}-${goarch}.tar.gz" -C release "sshx-${version}-${goos}-${goarch}"
+              go build -trimpath -ldflags "${ldflags}" -o "dist/native/${binary}" ./cmd/sshx
+            if [[ "${goos}-${goarch}" == "$(go env GOOS)-$(go env GOARCH)" ]]; then
+              "dist/native/${binary}" --version | grep -qx "sshx ${version}"
             fi
+            cp "dist/native/${binary}" "release/${binary}"
           done
 
           (cd release && find . -maxdepth 1 -type f ! -name "*checksums.txt" -exec shasum -a 256 {} + | sed 's# \./# #' > "sshx-${version}-checksums.txt")
