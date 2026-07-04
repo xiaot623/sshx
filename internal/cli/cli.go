@@ -827,10 +827,24 @@ func remoteLoginShell(remoteHome string) string {
 }
 
 func remoteExecShell(remoteHome string, argv []string) string {
+	if len(argv) == 1 {
+		return remoteExecCommandShell(remoteHome, argv[0])
+	}
+	envLine := remoteServerEnvScript(remoteHome)
 	parts := []string{
 		"sh",
 		"-lc",
-		remoteServerEnvScript(remoteHome) + "; exec \"$@\"",
+		strings.Join([]string{
+			envLine,
+			"mkdir -p \"$SSHX_SERVER_HOME\"",
+			"shell=${SHELL:-sh}",
+			"name=${shell##*/}",
+			"case \"$name\" in",
+			"  bash) err=\"$SSHX_SERVER_HOME/bash-stderr.$$\"; \"$shell\" -ic " + shellQuote(envLine+"; \"$@\"") + " sh \"$@\" 2>\"$err\"; status=$?; sed '/^bash: cannot set terminal process group /d; /^bash: no job control in this shell$/d' \"$err\" >&2; rm -f \"$err\"; exit $status ;;",
+			"  zsh) exec \"$shell\" -ic " + shellQuote(envLine+"; \"$@\"") + " sh \"$@\" ;;",
+			"  *) \"$@\" ;;",
+			"esac",
+		}, "\n"),
 		"sh",
 	}
 	parts = append(parts, argv...)
@@ -839,6 +853,23 @@ func remoteExecShell(remoteHome string, argv []string) string {
 		quoted = append(quoted, shellQuote(part))
 	}
 	return strings.Join(quoted, " ")
+}
+
+func remoteExecCommandShell(remoteHome string, command string) string {
+	envLine := remoteServerEnvScript(remoteHome)
+	commandLine := envLine + "; " + command
+	script := strings.Join([]string{
+		envLine,
+		"mkdir -p \"$SSHX_SERVER_HOME\"",
+		"shell=${SHELL:-sh}",
+		"name=${shell##*/}",
+		"case \"$name\" in",
+		"  bash) err=\"$SSHX_SERVER_HOME/bash-stderr.$$\"; \"$shell\" -ic " + shellQuote(commandLine) + " 2>\"$err\"; status=$?; sed '/^bash: cannot set terminal process group /d; /^bash: no job control in this shell$/d' \"$err\" >&2; rm -f \"$err\"; exit $status ;;",
+		"  zsh) exec \"$shell\" -ic " + shellQuote(commandLine) + " ;;",
+		"  *) exec \"$shell\" -lc " + shellQuote(commandLine) + " ;;",
+		"esac",
+	}, "\n")
+	return remoteShell(script)
 }
 
 func remoteShell(script string) string {

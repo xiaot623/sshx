@@ -159,6 +159,19 @@ func TestSessionSSHArgsDoesNotWrapSessionlessSSH(t *testing.T) {
 	}
 }
 
+func TestSessionSSHArgsRunsSingleRemoteCommandThroughShell(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"debian", "echo ok; sshx local uname -s"})
+	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	if len(got) != 2 || got[0] != "debian" {
+		t.Fatalf("args = %#v", got)
+	}
+	if !strings.Contains(got[1], "echo ok; sshx local uname -s") ||
+		!strings.Contains(got[1], "-ic") ||
+		strings.Contains(got[1], "'echo ok; sshx local uname -s' '") {
+		t.Fatalf("remote command = %q", got[1])
+	}
+}
+
 func TestServerDefaultsUseSSHXServerHome(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SSHX_SERVER_HOME", dir)
@@ -499,7 +512,9 @@ features:
 	}
 	if len(calls[0].args) != len(wantBase)+1 ||
 		!strings.Contains(calls[0].args[len(calls[0].args)-1], "SSHX_SERVER_HOME") ||
-		!strings.Contains(calls[0].args[len(calls[0].args)-1], "exec \"$@\"") ||
+		!strings.Contains(calls[0].args[len(calls[0].args)-1], "bash)") ||
+		!strings.Contains(calls[0].args[len(calls[0].args)-1], "zsh)") ||
+		!strings.Contains(calls[0].args[len(calls[0].args)-1], "-ic") ||
 		!strings.Contains(calls[0].args[len(calls[0].args)-1], "uname") {
 		t.Fatalf("delegated ssh args = %#v", calls[0].args)
 	}
