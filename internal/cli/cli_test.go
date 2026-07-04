@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,11 +15,21 @@ import (
 
 	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/locald"
+	"github.com/xiaot623/sshx/internal/version"
 )
 
 type execCall struct {
 	name string
 	args []string
+}
+
+func sameVersionRemoteProbe() []byte {
+	return []byte("Linux\nx86_64\n" + version.Version + "\n" + version.Version + "\n1\n")
+}
+
+func isolateHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 }
 
 func TestLocalIsReservedWithoutBridgeSocket(t *testing.T) {
@@ -63,6 +74,40 @@ func TestReadLocalBridgeStdinSkipsCharacterDevice(t *testing.T) {
 	}
 }
 
+func TestVersionFlagPrintsClientVersion(t *testing.T) {
+	old := version.Version
+	version.Version = "1.2.3-rc.1"
+	t.Cleanup(func() { version.Version = old })
+
+	var stdout bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &stdout, &bytes.Buffer{})
+	code := r.Run(context.Background(), []string{"--version"})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if stdout.String() != "sshx 1.2.3-rc.1\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRecordVersionStateRotatesCurrentToLast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "version-state.json")
+	if err := recordVersionState(path, "0.0.1-rc.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordVersionState(path, "0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"current_version": "0.0.1"`) ||
+		!strings.Contains(string(b), `"last_version": "0.0.1-rc.1"`) {
+		t.Fatalf("version state = %s", b)
+	}
+}
+
 func TestNoWrapDelegatesToSSHWithoutNoWrapFlag(t *testing.T) {
 	t.Setenv("SSHX_CONFIG", "")
 	var calls []execCall
@@ -78,6 +123,86 @@ func TestNoWrapDelegatesToSSHWithoutNoWrapFlag(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0].name != "ssh" || !reflect.DeepEqual(calls[0].args, []string{"-p", "2222", "remote"}) {
 		t.Fatalf("calls = %#v", calls)
+	}
+}
+
+func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) {
+	old := version.Version
+	version.Version = "1.2.3-rc.1"
+	t.Cleanup(func() { version.Version = old })
+
+	dir := t.TempDir()
+	localBinary := filepath.Join(dir, "sshx-linux-arm64")
+	if err := os.WriteFile(localBinary, []byte("binary-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var downloadedVersion string
+	var downloadedAsset string
+	var uploaded []byte
+	var execCalls []execCall
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return []byte("Linux\naarch64\n1.2.3-rc.0\n1.2.3-rc.0\n1\n"), nil
+	}
+	r.DownloadBinary = func(_ context.Context, targetVersion, assetName string) (string, error) {
+		downloadedVersion = targetVersion
+		downloadedAsset = assetName
+		return localBinary, nil
+	}
+	r.ExecInput = func(_ context.Context, name string, args []string, stdin io.Reader) error {
+		var err error
+		uploaded, err = io.ReadAll(stdin)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	r.Exec = func(_ context.Context, name string, args []string) error {
+		execCalls = append(execCalls, execCall{name: name, args: append([]string(nil), args...)})
+		return nil
+	}
+
+	err := r.ensureRemoteServer(context.Background(), []string{"remote"}, config.Features{CommandBridge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if downloadedVersion != "1.2.3-rc.1" || downloadedAsset != "sshx-linux-arm64" {
+		t.Fatalf("download = %q %q", downloadedVersion, downloadedAsset)
+	}
+	if string(uploaded) != "binary-data" {
+		t.Fatalf("uploaded = %q", uploaded)
+	}
+	if len(execCalls) != 2 {
+		t.Fatalf("exec calls = %#v", execCalls)
+	}
+}
+
+func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
+	old := version.Version
+	version.Version = "1.2.3"
+	t.Cleanup(func() { version.Version = old })
+
+	var execCalls []execCall
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return []byte("Linux\nx86_64\n1.2.3\n\n1\n"), nil
+	}
+	r.DownloadBinary = func(context.Context, string, string) (string, error) {
+		t.Fatal("binary should not be downloaded when installed binary already matches")
+		return "", nil
+	}
+	r.Exec = func(_ context.Context, name string, args []string) error {
+		execCalls = append(execCalls, execCall{name: name, args: append([]string(nil), args...)})
+		return nil
+	}
+
+	err := r.ensureRemoteServer(context.Background(), []string{"remote"}, config.Features{CommandBridge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(execCalls) != 2 {
+		t.Fatalf("exec calls = %#v", execCalls)
 	}
 }
 
@@ -184,6 +309,7 @@ commands:
 }
 
 func TestGlobalDomainFeatureEnsuresResolver(t *testing.T) {
+	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
@@ -198,6 +324,9 @@ features:
 	r.EnsureResolver = func(_ context.Context, cfg config.DomainsFeature) error {
 		ensured = cfg.Enabled
 		return nil
+	}
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return nil, errors.New("remote server unavailable")
 	}
 	r.Exec = func(_ context.Context, _ string, args []string) error {
 		if reflect.DeepEqual(args, []string{"remote"}) {
@@ -215,6 +344,7 @@ features:
 }
 
 func TestGlobalDomainFeatureStartsBridgeWithoutCommandBridge(t *testing.T) {
+	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
@@ -227,6 +357,9 @@ features:
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
 	r.EnsureResolver = func(context.Context, config.DomainsFeature) error { return nil }
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return sameVersionRemoteProbe(), nil
+	}
 	r.StartBridge = func(context.Context, string, []string) (func(), error) {
 		bridgeStarted = true
 		return func() {}, nil
@@ -247,6 +380,7 @@ features:
 }
 
 func TestInternalSSHUsesOptionsBeforeTargetAndExcludesRemoteCommand(t *testing.T) {
+	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
@@ -256,8 +390,13 @@ features:
 	}
 	var calls []execCall
 	var bridgeArgs []string
+	var probeArgs []string
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
+	r.ExecOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
+		probeArgs = append([]string(nil), args...)
+		return sameVersionRemoteProbe(), nil
+	}
 	r.StartBridge = func(_ context.Context, _ string, sshArgs []string) (func(), error) {
 		bridgeArgs = append([]string(nil), sshArgs...)
 		return func() {}, nil
@@ -274,21 +413,22 @@ features:
 	if !reflect.DeepEqual(bridgeArgs, wantBase) {
 		t.Fatalf("bridge args = %#v, want %#v", bridgeArgs, wantBase)
 	}
-	if len(calls) != 2 {
+	if len(calls) != 1 {
 		t.Fatalf("calls = %#v", calls)
 	}
-	if !reflect.DeepEqual(calls[0].args[:len(wantBase)+1], append([]string{"-n"}, wantBase...)) {
-		t.Fatalf("internal ssh args = %#v", calls[0].args)
+	if !reflect.DeepEqual(probeArgs[:len(wantBase)+1], append([]string{"-n"}, wantBase...)) {
+		t.Fatalf("internal ssh args = %#v", probeArgs)
 	}
-	if strings.Contains(strings.Join(calls[0].args, " "), "uname -s") {
-		t.Fatalf("internal ssh args included remote command: %#v", calls[0].args)
+	if len(probeArgs) != len(wantBase)+2 || !strings.HasPrefix(probeArgs[len(probeArgs)-1], "sh -lc ") {
+		t.Fatalf("internal ssh args = %#v", probeArgs)
 	}
-	if !reflect.DeepEqual(calls[1].args, []string{"-p", "2222", "-J", "jump", "remote", "uname", "-s"}) {
-		t.Fatalf("delegated ssh args = %#v", calls[1].args)
+	if !reflect.DeepEqual(calls[0].args, []string{"-p", "2222", "-J", "jump", "remote", "uname", "-s"}) {
+		t.Fatalf("delegated ssh args = %#v", calls[0].args)
 	}
 }
 
 func TestQuotedRemoteCommandIsDelegatedButNotUsedForInternalSSH(t *testing.T) {
+	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
@@ -297,8 +437,13 @@ features:
 		t.Fatal(err)
 	}
 	var calls []execCall
+	var probeArgs []string
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
+	r.ExecOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
+		probeArgs = append([]string(nil), args...)
+		return sameVersionRemoteProbe(), nil
+	}
 	r.StartBridge = func(context.Context, string, []string) (func(), error) {
 		return func() {}, nil
 	}
@@ -310,14 +455,14 @@ features:
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	if len(calls) != 2 {
+	if len(calls) != 1 {
 		t.Fatalf("calls = %#v", calls)
 	}
-	if strings.Contains(strings.Join(calls[0].args, " "), "local uname") {
-		t.Fatalf("internal ssh args included quoted remote command: %#v", calls[0].args)
+	if strings.Contains(strings.Join(probeArgs, " "), "local uname") {
+		t.Fatalf("internal ssh args included quoted remote command: %#v", probeArgs)
 	}
-	if !reflect.DeepEqual(calls[1].args, []string{"remote", "~/.sshx/bin/sshx local uname -s"}) {
-		t.Fatalf("delegated ssh args = %#v", calls[1].args)
+	if !reflect.DeepEqual(calls[0].args, []string{"remote", "~/.sshx/bin/sshx local uname -s"}) {
+		t.Fatalf("delegated ssh args = %#v", calls[0].args)
 	}
 }
 
@@ -330,6 +475,7 @@ func TestSSHCommandArgsCanKeepStdioOpen(t *testing.T) {
 }
 
 func TestGlobalNonStrictFallsBackToSSHWhenServerUnavailable(t *testing.T) {
+	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
@@ -340,23 +486,24 @@ features:
 	var calls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return nil, errors.New("remote server unavailable")
+	}
 	r.Exec = func(_ context.Context, name string, args []string) error {
 		calls = append(calls, execCall{name: name, args: append([]string(nil), args...)})
-		if len(calls) < 3 {
-			return errors.New("remote server unavailable")
-		}
 		return nil
 	}
 	code := r.Run(context.Background(), []string{"remote"})
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	if len(calls) != 3 || !reflect.DeepEqual(calls[2].args, []string{"remote"}) {
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0].args, []string{"remote"}) {
 		t.Fatalf("calls = %#v", calls)
 	}
 }
 
 func TestGlobalStrictFailsWhenServerUnavailable(t *testing.T) {
+	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 strict: true
@@ -369,6 +516,9 @@ features:
 	var calls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
 	r.ConfigPath = configPath
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return nil, errors.New("remote server unavailable")
+	}
 	r.Exec = func(_ context.Context, name string, args []string) error {
 		calls = append(calls, execCall{name: name, args: append([]string(nil), args...)})
 		return errors.New("remote server unavailable")
@@ -377,7 +527,7 @@ features:
 	if code == 0 {
 		t.Fatal("exit code = 0")
 	}
-	if len(calls) != 2 {
+	if len(calls) != 0 {
 		t.Fatalf("calls = %#v", calls)
 	}
 	if !strings.Contains(stderr.String(), "remote server unavailable") {

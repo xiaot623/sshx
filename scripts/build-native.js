@@ -1,5 +1,5 @@
 // @ts-check
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -26,12 +26,22 @@ if (!platform || !arch) {
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const outDir = join(root, "dist", "native");
 const binary = `sshx-${platform}-${arch}${platform === "windows" ? ".exe" : ""}`;
+const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+const version = packageJson.version;
 
 mkdirSync(outDir, { recursive: true });
 
 const result = spawnSync(
   "go",
-  ["build", "-trimpath", "-o", join(outDir, binary), "./cmd/sshx"],
+  [
+    "build",
+    "-trimpath",
+    "-ldflags",
+    `-X github.com/xiaot623/sshx/internal/version.Version=${version}`,
+    "-o",
+    join(outDir, binary),
+    "./cmd/sshx",
+  ],
   {
     cwd: root,
     stdio: "inherit",

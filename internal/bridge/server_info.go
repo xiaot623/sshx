@@ -4,19 +4,22 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/xiaot623/sshx/internal/version"
 )
 
 type ServerInfo struct {
 	Protocol string `json:"protocol"`
 	Address  string `json:"address"`
 	Token    string `json:"token,omitempty"`
+	Version  string `json:"version,omitempty"`
 }
 
 func WriteServerInfo(path, socketPath, token string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(ServerInfo{Protocol: "unix", Address: socketPath, Token: token}, "", "  ")
+	b, err := json.MarshalIndent(ServerInfo{Protocol: "unix", Address: socketPath, Token: token, Version: version.Version}, "", "  ")
 	if err != nil {
 		return err
 	}

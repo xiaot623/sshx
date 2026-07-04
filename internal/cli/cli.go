@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +25,7 @@ import (
 	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/locald"
 	"github.com/xiaot623/sshx/internal/sshcompat"
+	"github.com/xiaot623/sshx/internal/version"
 )
 
 const reservedLocalMessage = `"local" is reserved for the remote-to-local command bridge. Use it inside an sshx remote session.`
@@ -34,6 +38,9 @@ type Runner struct {
 	SSHPath        string
 	ConfigPath     string
 	Exec           func(context.Context, string, []string) error
+	ExecInput      func(context.Context, string, []string, io.Reader) error
+	ExecOutput     func(context.Context, string, []string) ([]byte, error)
+	DownloadBinary func(context.Context, string, string) (string, error)
 	StartBridge    func(context.Context, string, []string) (func(), error)
 	EnsureResolver func(context.Context, config.DomainsFeature) error
 
@@ -55,13 +62,20 @@ func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
 		SSHPath:    "ssh",
 		ConfigPath: configPath,
 		Exec:       defaultExec,
+		ExecInput:  defaultExecInput,
+		ExecOutput: defaultExecOutput,
 	}
+	r.DownloadBinary = defaultDownloadBinary
 	r.StartBridge = r.defaultStartBridge
 	r.EnsureResolver = r.defaultEnsureResolver
 	return r
 }
 
 func (r *Runner) Run(ctx context.Context, args []string) int {
+	if len(args) == 1 && args[0] == "--version" {
+		fmt.Fprintf(r.Stdout, "sshx %s\n", clientVersion())
+		return 0
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "server":
@@ -98,6 +112,13 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	features := cfg.Features
 	if !features.Enabled() {
 		return r.execSSH(ctx, parsed.Args)
+	}
+	if err := recordDefaultVersionState(clientVersion()); err != nil {
+		if cfg.Strict {
+			fmt.Fprintf(r.Stderr, "sshx: version state unavailable: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(r.Stderr, "sshx: version state skipped: %v\n", err)
 	}
 	sshArgs := baseSSHArgs(parsed)
 	r.commandPolicy = cfg.Commands
@@ -175,6 +196,10 @@ func (r *Runner) runServer(ctx context.Context, args []string) int {
 			return 1
 		}
 		*token = generated
+	}
+	if err := recordDefaultVersionState(clientVersion()); err != nil {
+		fmt.Fprintf(r.Stderr, "sshx server: version state: %v\n", err)
+		return 1
 	}
 	s := &bridge.Server{SocketPath: *socketPath, InfoPath: *infoPath, Token: *token, PortScanInterval: *portScanInterval, IdleTimeout: *idleTimeout}
 	if err := s.Serve(ctx); err != nil {
@@ -317,11 +342,24 @@ func (r *Runner) ensureRemoteServer(ctx context.Context, sshArgs []string, featu
 	if !features.Enabled() {
 		return nil
 	}
-	check := "test -S ~/.sshx/sock && test -f ~/.sshx/server-info"
-	if err := r.Exec(ctx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(check))); err == nil {
+	targetVersion := clientVersion()
+	probe, err := r.probeRemote(ctx, sshArgs)
+	if err != nil {
+		return err
+	}
+	if probe.Running && probe.ServerVersion == targetVersion {
 		return nil
 	}
-	start := "mkdir -p ~/.sshx/bin ~/.sshx/run && test -x ~/.sshx/bin/sshx && nohup ~/.sshx/bin/sshx server --socket ~/.sshx/sock --server-info ~/.sshx/server-info >/tmp/sshx-server.log 2>&1 &"
+	if probe.BinaryVersion != targetVersion {
+		localBinary, err := r.DownloadBinary(ctx, targetVersion, probe.AssetName())
+		if err != nil {
+			return err
+		}
+		if err := r.installRemoteBinary(ctx, sshArgs, localBinary); err != nil {
+			return err
+		}
+	}
+	start := "mkdir -p \"$HOME/.sshx/bin\" \"$HOME/.sshx/run\" && rm -f \"$HOME/.sshx/sock\" \"$HOME/.sshx/server-info\" && nohup \"$HOME/.sshx/bin/sshx\" server --socket \"$HOME/.sshx/sock\" --server-info \"$HOME/.sshx/server-info\" >/tmp/sshx-server.log 2>&1 &"
 	startCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := r.Exec(startCtx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(start))); err != nil {
@@ -329,6 +367,79 @@ func (r *Runner) ensureRemoteServer(ctx context.Context, sshArgs []string, featu
 	}
 	verify := "i=0; while [ $i -lt 20 ]; do test -S ~/.sshx/sock && test -f ~/.sshx/server-info && exit 0; i=$((i+1)); sleep 0.1; done; exit 1"
 	return r.Exec(startCtx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(verify)))
+}
+
+type remoteProbe struct {
+	OS            string
+	Arch          string
+	BinaryVersion string
+	ServerVersion string
+	Running       bool
+}
+
+func (p remoteProbe) AssetName() string {
+	return "sshx-" + p.OS + "-" + p.Arch
+}
+
+func (r *Runner) probeRemote(ctx context.Context, sshArgs []string) (remoteProbe, error) {
+	script := strings.Join([]string{
+		"os=$(uname -s 2>/dev/null || true)",
+		"arch=$(uname -m 2>/dev/null || true)",
+		"ver=",
+		"if test -x \"$HOME/.sshx/bin/sshx\"; then ver=$(\"$HOME/.sshx/bin/sshx\" --version 2>/dev/null | awk '{print $2}' || true); fi",
+		"server_ver=",
+		"if test -f \"$HOME/.sshx/server-info\"; then server_ver=$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$HOME/.sshx/server-info\" | head -n 1 || true); fi",
+		"running=0",
+		"if test -S \"$HOME/.sshx/sock\" && test -f \"$HOME/.sshx/server-info\"; then running=1; fi",
+		"printf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$ver\" \"$server_ver\" \"$running\"",
+	}, "; ")
+	out, err := r.ExecOutput(ctx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(script)))
+	if err != nil {
+		return remoteProbe{}, err
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	lines := make([]string, 0, 5)
+	for scanner.Scan() {
+		lines = append(lines, strings.TrimSpace(scanner.Text()))
+	}
+	if err := scanner.Err(); err != nil {
+		return remoteProbe{}, err
+	}
+	for len(lines) < 5 {
+		lines = append(lines, "")
+	}
+	osName, err := normalizeRemoteOS(lines[0])
+	if err != nil {
+		return remoteProbe{}, err
+	}
+	arch, err := normalizeRemoteArch(lines[1])
+	if err != nil {
+		return remoteProbe{}, err
+	}
+	return remoteProbe{
+		OS:            osName,
+		Arch:          arch,
+		BinaryVersion: lines[2],
+		ServerVersion: lines[3],
+		Running:       lines[4] == "1",
+	}, nil
+}
+
+func (r *Runner) installRemoteBinary(ctx context.Context, sshArgs []string, localPath string) error {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	script := strings.Join([]string{
+		"set -eu",
+		"mkdir -p \"$HOME/.sshx/bin\" \"$HOME/.sshx/run\"",
+		"tmp=\"$HOME/.sshx/bin/sshx.$$.tmp\"",
+		"cat > \"$tmp\"",
+		"chmod 755 \"$tmp\"",
+		"mv \"$tmp\" \"$HOME/.sshx/bin/sshx\"",
+	}, "; ")
+	return r.ExecInput(ctx, r.SSHPath, sshCommandArgs(sshArgs, remoteShell(script)), f)
 }
 
 func (r *Runner) execSSH(ctx context.Context, args []string) int {
@@ -349,6 +460,76 @@ func defaultExec(ctx context.Context, name string, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func defaultExecInput(ctx context.Context, name string, args []string, stdin io.Reader) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func defaultExecOutput(ctx context.Context, name string, args []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stderr = os.Stderr
+	return cmd.Output()
+}
+
+func defaultDownloadBinary(ctx context.Context, targetVersion, assetName string) (string, error) {
+	if override := os.Getenv("SSHX_REMOTE_BINARY"); override != "" {
+		if _, err := os.Stat(override); err != nil {
+			return "", err
+		}
+		return override, nil
+	}
+	if targetVersion == "" || targetVersion == "dev" {
+		return "", errors.New("remote binary download requires a release version; set SSHX_REMOTE_BINARY for dev builds")
+	}
+	cachePath := filepath.Join(defaultCacheRoot(), "remote", targetVersion, assetName)
+	if info, err := os.Stat(cachePath); err == nil && info.Mode().IsRegular() {
+		return cachePath, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		return "", err
+	}
+	baseURL := os.Getenv("SSHX_RELEASE_BASE_URL")
+	if baseURL == "" {
+		baseURL = "https://github.com/xiaot623/sshx/releases/download"
+	}
+	url := strings.TrimRight(baseURL, "/") + "/v" + targetVersion + "/" + assetName
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("download %s: GitHub returned %s", url, resp.Status)
+	}
+	tmpPath := fmt.Sprintf("%s.%d.tmp", cachePath, os.Getpid())
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		return "", err
+	}
+	_, copyErr := io.Copy(tmp, resp.Body)
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpPath)
+		return "", copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return "", closeErr
+	}
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	return cachePath, nil
 }
 
 func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs []string) (func(), error) {
@@ -585,6 +766,81 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
+type versionState struct {
+	CurrentVersion string `json:"current_version"`
+	LastVersion    string `json:"last_version,omitempty"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+func recordDefaultVersionState(current string) error {
+	return recordVersionState(defaultVersionStatePath(), current)
+}
+
+func recordVersionState(path, current string) error {
+	if current == "" {
+		current = "dev"
+	}
+	var state versionState
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &state)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if state.CurrentVersion != current {
+		state.LastVersion = state.CurrentVersion
+		state.CurrentVersion = current
+	}
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	tmpPath := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	if err := os.WriteFile(tmpPath, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func clientVersion() string {
+	if version.Version == "" {
+		return "dev"
+	}
+	return version.Version
+}
+
+func normalizeRemoteOS(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "linux":
+		return "linux", nil
+	case "":
+		return "", errors.New("remote OS probe returned empty value")
+	default:
+		return "", fmt.Errorf("unsupported remote server OS %q", s)
+	}
+}
+
+func normalizeRemoteArch(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "x86_64", "amd64":
+		return "amd64", nil
+	case "aarch64", "arm64":
+		return "arm64", nil
+	case "":
+		return "", errors.New("remote arch probe returned empty value")
+	default:
+		return "", fmt.Errorf("unsupported remote server arch %q", s)
+	}
+}
+
 func generateToken() (string, error) {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -646,6 +902,28 @@ func defaultLocalDaemonSocketPath() string {
 		return override
 	}
 	return locald.DefaultSocketPath()
+}
+
+func defaultCacheRoot() string {
+	if override := os.Getenv("SSHX_CACHE_DIR"); override != "" {
+		return override
+	}
+	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
+		return filepath.Join(xdg, "sshx")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "sshx-cache")
+	}
+	return filepath.Join(home, ".cache", "sshx")
+}
+
+func defaultVersionStatePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "sshx-version-state.json")
+	}
+	return filepath.Join(home, ".sshx", "version-state.json")
 }
 
 func defaultServerInfoPath() string {
