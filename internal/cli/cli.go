@@ -811,11 +811,18 @@ func sessionSSHArgs(parsed sshcompat.Parsed, remoteHome string) []string {
 }
 
 func remoteLoginShell(remoteHome string) string {
+	envLine := remoteServerEnvScript(remoteHome)
 	script := strings.Join([]string{
-		remoteServerEnvScript(remoteHome),
-		"if [ -n \"${SHELL:-}\" ]; then exec \"$SHELL\" -l; fi",
-		"exec sh -l",
-	}, "; ")
+		envLine,
+		"mkdir -p \"$SSHX_SERVER_HOME\"",
+		"shell=${SHELL:-sh}",
+		"name=${shell##*/}",
+		"case \"$name\" in",
+		"  bash) rc=\"$SSHX_SERVER_HOME/bashrc\"; { printf '%s\\n' " + shellQuote("test -f \"$HOME/.bashrc\" && . \"$HOME/.bashrc\"") + "; printf '%s\\n' " + shellQuote(envLine) + "; } > \"$rc\"; exec \"$shell\" --rcfile \"$rc\" -i ;;",
+		"  zsh) zdot=\"$SSHX_SERVER_HOME/zdotdir\"; mkdir -p \"$zdot\"; { printf '%s\\n' " + shellQuote("test -f \"$HOME/.zshrc\" && . \"$HOME/.zshrc\"") + "; printf '%s\\n' " + shellQuote(envLine) + "; } > \"$zdot/.zshrc\"; ZDOTDIR=\"$zdot\" exec \"$shell\" -i ;;",
+		"  *) exec \"$shell\" -i ;;",
+		"esac",
+	}, "\n")
 	return remoteShell(script)
 }
 
@@ -965,7 +972,7 @@ func remoteServerHome(id string) string {
 }
 
 func remoteServerEnvScript(remoteHome string) string {
-	return "SSHX_SERVER_HOME=\"" + strings.ReplaceAll(remoteHome, `"`, `\"`) + "\"; export SSHX_SERVER_HOME; PATH=\"$SSHX_SERVER_HOME:$PATH\"; export PATH"
+	return "SSHX_SERVER_HOME=\"" + strings.ReplaceAll(remoteHome, `"`, `\"`) + "\"; export SSHX_SERVER_HOME; case \":$PATH:\" in *\":$SSHX_SERVER_HOME:\"*) ;; *) PATH=\"$SSHX_SERVER_HOME:$PATH\" ;; esac; export PATH"
 }
 
 type versionState struct {

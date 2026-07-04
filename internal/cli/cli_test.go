@@ -145,7 +145,8 @@ func TestSessionSSHArgsInjectsRemoteHomeForInteractiveShell(t *testing.T) {
 	}
 	if !strings.Contains(got[2], "SSHX_SERVER_HOME=\"$HOME/.sshx_server/test-id\"") ||
 		!strings.Contains(got[2], "PATH=\"$SSHX_SERVER_HOME:$PATH\"") ||
-		!strings.Contains(got[2], "exec \"$SHELL\" -l") {
+		!strings.Contains(got[2], "--rcfile \"$rc\" -i") ||
+		!strings.Contains(got[2], "ZDOTDIR=\"$zdot\" exec \"$shell\" -i") {
 		t.Fatalf("remote command = %q", got[2])
 	}
 }
