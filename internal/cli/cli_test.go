@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xiaot/sshx/internal/config"
-	"github.com/xiaot/sshx/internal/locald"
+	"github.com/xiaot623/sshx/internal/config"
+	"github.com/xiaot623/sshx/internal/locald"
 )
 
 type execCall struct {

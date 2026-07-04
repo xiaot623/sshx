@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xiaot/sshx/internal/ports"
-	"github.com/xiaot/sshx/internal/protocol"
+	"github.com/xiaot623/sshx/internal/ports"
+	"github.com/xiaot623/sshx/internal/protocol"
 )
 
 var ErrNoClient = errors.New("no active sshx client bridge session")

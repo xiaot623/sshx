@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xiaot/sshx/internal/protocol"
+	"github.com/xiaot623/sshx/internal/protocol"
 )
 
 func TestExecuteLocalPropagatesBatchStdinOutputStderrAndExitCode(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/xiaot/sshx/internal/cli"
+	"github.com/xiaot623/sshx/internal/cli"
 )
 
 func main() {

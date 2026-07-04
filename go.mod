@@ -1,4 +1,4 @@
-module github.com/xiaot/sshx
+module github.com/xiaot623/sshx
 
 go 1.25
 

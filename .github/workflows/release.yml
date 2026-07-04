@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Build, Test & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Vet
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      - name: Build native binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/native release
+
+          targets=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64"
+            "windows arm64"
+          )
+
+          for target in "${targets[@]}"; do
+            read -r goos goarch <<< "${target}"
+            ext=""
+            if [[ "${goos}" == "windows" ]]; then
+              ext=".exe"
+            fi
+
+            binary="sshx-${goos}-${goarch}${ext}"
+            GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w" -o "dist/native/${binary}" ./cmd/sshx
+            cp "dist/native/${binary}" "release/${binary}"
+
+            package_dir="release/sshx-${version}-${goos}-${goarch}"
+            mkdir -p "${package_dir}"
+            cp "dist/native/${binary}" "${package_dir}/sshx${ext}"
+            cp README.md "${package_dir}/README.md" 2>/dev/null || true
+
+            if [[ "${goos}" == "windows" ]]; then
+              (cd release && zip -qr "sshx-${version}-${goos}-${goarch}.zip" "sshx-${version}-${goos}-${goarch}")
+            else
+              tar -czf "release/sshx-${version}-${goos}-${goarch}.tar.gz" -C release "sshx-${version}-${goos}-${goarch}"
+            fi
+          done
+
+          (cd release && find . -maxdepth 1 -type f ! -name "*checksums.txt" -exec shasum -a 256 {} + | sed 's# \./# #' > "sshx-${version}-checksums.txt")
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'pre') }}

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/xiaot/sshx/internal/domain"
-	"github.com/xiaot/sshx/internal/forward"
+	"github.com/xiaot623/sshx/internal/domain"
+	"github.com/xiaot623/sshx/internal/forward"
 )
 
 const (

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xiaot/sshx/internal/domain"
-	"github.com/xiaot/sshx/internal/forward"
+	"github.com/xiaot623/sshx/internal/domain"
+	"github.com/xiaot623/sshx/internal/forward"
 )
 
 func TestPing(t *testing.T) {

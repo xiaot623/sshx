@@ -74,10 +74,16 @@ sshx 会优先使用与远端监听相同的本地端口。如果该本地端口
 
 ## 安装
 
+### 通过 npm 安装
+
+```sh
+npm install -g @hahahhh/sshx@next
+```
+
 ### 从源码构建
 
 ```sh
-git clone https://github.com/OWNER/sshx.git
+git clone https://github.com/xiaot623/sshx.git
 cd sshx
 go build -o ./bin/sshx ./cmd/sshx
 ```

@@ -74,10 +74,16 @@ sshx first tries to use the same local port as the remote listener. If that loca
 
 ## Installation
 
+### From npm
+
+```sh
+npm install -g @hahahhh/sshx@next
+```
+
 ### From Source
 
 ```sh
-git clone https://github.com/OWNER/sshx.git
+git clone https://github.com/xiaot623/sshx.git
 cd sshx
 go build -o ./bin/sshx ./cmd/sshx
 ```

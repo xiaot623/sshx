@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xiaot/sshx/internal/bridge"
-	"github.com/xiaot/sshx/internal/config"
-	"github.com/xiaot/sshx/internal/locald"
-	"github.com/xiaot/sshx/internal/sshcompat"
+	"github.com/xiaot623/sshx/internal/bridge"
+	"github.com/xiaot623/sshx/internal/config"
+	"github.com/xiaot623/sshx/internal/locald"
+	"github.com/xiaot623/sshx/internal/sshcompat"
 )
 
 const reservedLocalMessage = `"local" is reserved for the remote-to-local command bridge. Use it inside an sshx remote session.`

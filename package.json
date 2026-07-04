@@ -1,0 +1,37 @@
+{
+  "name": "@hahahhh/sshx",
+  "version": "0.0.1-rc.0",
+  "type": "module",
+  "description": "Transparent SSH enhancement wrapper for OpenSSH",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaot623/sshx.git"
+  },
+  "keywords": [
+    "ssh",
+    "sshx",
+    "openssh",
+    "cli"
+  ],
+  "bin": {
+    "sshx": "./bin/sshx.js"
+  },
+  "files": [
+    "bin/sshx.js"
+  ],
+  "scripts": {
+    "build": "node scripts/build-native.js",
+    "build:go": "go build -trimpath -o sshx ./cmd/sshx",
+    "check": "go vet ./...",
+    "test": "go test ./...",
+    "pre_release": "npm version prerelease --preid=rc -m \"chore: pre-release v%s\" && git push origin HEAD --follow-tags",
+    "publish:rc": "npm publish --access public --tag next",
+    "publish:release": "npm publish --access public --tag latest",
+    "release:patch": "node scripts/release.js patch",
+    "release:minor": "node scripts/release.js minor",
+    "release:major": "node scripts/release.js major"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
