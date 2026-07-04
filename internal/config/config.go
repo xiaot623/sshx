@@ -1,6 +1,7 @@
 package config
 
 import (
+	_ "embed"
 	"errors"
 	"os"
 	"path/filepath"
@@ -35,12 +36,30 @@ type CommandPolicy struct {
 	Deny []string `yaml:"deny"`
 }
 
+//go:embed default_config.yaml
+var defaultConfigYAML []byte
+
 func DefaultPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
 	return filepath.Join(home, ".sshx", "config.yaml")
+}
+
+func EnsureDefault(path string) error {
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, defaultConfigYAML, 0o600)
 }
 
 func Load(path string) (Config, error) {

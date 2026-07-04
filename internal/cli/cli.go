@@ -104,6 +104,10 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 		return r.execSSH(ctx, parsed.Args)
 	}
 
+	if err := config.EnsureDefault(r.ConfigPath); err != nil {
+		fmt.Fprintf(r.Stderr, "sshx: config error: %v\n", err)
+		return 2
+	}
 	cfg, err := config.Load(r.ConfigPath)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx: config error: %v\n", err)

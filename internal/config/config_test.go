@@ -38,6 +38,44 @@ commands:
 	}
 }
 
+func TestEnsureDefaultWritesEmbeddedConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".sshx", "config.yaml")
+	if err := EnsureDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, want 0600", info.Mode().Perm())
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.Ports.Auto || !cfg.Features.Domains.Enabled {
+		t.Fatalf("unexpected default config: %#v", cfg)
+	}
+}
+
+func TestEnsureDefaultDoesNotOverwriteExistingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("strict: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "strict: true\n" {
+		t.Fatalf("config was overwritten: %q", b)
+	}
+}
+
 func TestNormalizeTargetHost(t *testing.T) {
 	cases := map[string]string{
 		"remote":              "remote",
