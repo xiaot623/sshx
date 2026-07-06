@@ -2,11 +2,12 @@
 
 > Transparent SSH enhancement — add remote-to-local commands, auto port forwarding, and local domains to your SSH workflow. Zero side effects when you don't need them.
 
-**sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host with sshx-aware features enabled, you unlock a persistent, shared remote server that gives you:
+**sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host (or Docker container) with sshx-aware features enabled, you unlock a persistent, shared remote server that gives you:
 
 - 🔄 **Reverse command bridge** — run `sshx local <cmd>` *on the remote* to execute commands on your local machine, with stdout, stderr, exit code, and stdin all propagated.
 - 🔌 **Automatic port forwarding** — remote loopback listeners (e.g., a dev server on `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
+- 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. The same bridge, port forwarding, and domain features work inside containers via `docker exec`.
 
 ## Why sshx?
 
@@ -30,6 +31,16 @@ sshx is designed to be **safe to alias**. Hosts without sshx configuration are u
 - All SSH flags pass through: `-F`, `-o`, `-J`, `-L`, `-R`, `-D`, `-N`, `-T`, `-V`, `-G`, `-Q`, etc.
 - `~/.ssh/config` resolution is handled by OpenSSH — no reimplementation.
 - Bypass with `sshx --no-wrap` or `SSHX_DISABLE=1` at any time.
+
+### 🐳 Docker Container Target
+
+When the target doesn't match any SSH host, sshx falls back to resolving it as a running Docker container:
+
+- `sshx <container-name>` — opens a shell in the container via `docker exec`.
+- `sshx <container-id-prefix>` — matches by container ID prefix.
+- Explicit SSH targets (`user@host`, IP addresses, hostnames with dots/colons) are never treated as Docker containers.
+- The full sshx feature set (command bridge, port detection, domain binding) works inside containers.
+- Requires `docker` CLI available on the local machine — gracefully falls back to SSH if Docker isn't found or the container isn't running.
 
 ### 🔄 Remote-to-Local Command Bridge
 
@@ -128,6 +139,21 @@ sshx -p 2222 user@my-server hostname
 
 All existing SSH options work — `-F`, `-o`, `-J`, `ProxyJump`, etc. are handled by OpenSSH.
 
+### 1a. Connect to a Docker container
+
+```sh
+# By container name
+sshx my-dev-container
+
+# By container ID prefix
+sshx 4fa8bc
+
+# Run a command directly
+sshx my-container cat /etc/os-release
+```
+
+sshx detects that the target isn't an SSH host and automatically uses `docker exec`. The command bridge and other features work exactly the same inside containers.
+
 ### 2. Try the command bridge
 
 Inside your SSH session on the remote:
@@ -216,7 +242,7 @@ commands:
 4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using `ssh -W`.
 5. **Domains**: The local DNS responder maps `<target>.<suffix>` → localhost. The browser's URL port selects the local forwarded port.
 
-When `sshx` is invoked for a **non-matching host** (no sshx config, or host not in scope), it `exec`s the real `ssh` directly — no daemon, no installation, no overhead.
+When `sshx` is invoked for a **non-matching host** (no sshx config, or host not in scope), it first checks if the target resolves to a running Docker container. If neither SSH nor Docker matches, it `exec`s the real `ssh` directly — no daemon, no installation, no overhead.
 
 ---
 
@@ -225,20 +251,22 @@ When `sshx` is invoked for a **non-matching host** (no sshx config, or host not 
 - `sshx --no-wrap ...` — skip all sshx behavior and call raw `ssh`.
 - `SSHX_DISABLE=1 sshx ...` — same as `--no-wrap`, useful in scripts.
 - `sshx local ...` on a **client** (not inside a remote session) — errors immediately with a clear message. `local` is globally reserved.
+- Docker containers that aren't running or can't be reached are pure passthrough — sshx falls back to raw `ssh` with no side effects.
 - Unmatched hosts are pure passthrough — no files created, no processes started.
 
 ---
 
 ## Platform Support
 
-| Platform | Client | Server |
-|---|---|---|
-| macOS | ✅ | — |
-| Linux | ✅ | ✅ |
-| Windows | 🔜 | — |
+| Platform | Client | Server | Docker Client |
+|---|---|---|---|
+| macOS | ✅ | — | ✅ |
+| Linux | ✅ | ✅ | ✅ |
+| Windows | 🔜 | — | 🔜 |
 
 - **Client**: macOS and Linux are fully supported.
 - **Server**: Linux is required for the remote sshx server (uses `/proc/net/tcp*` for port detection).
+- **Docker Client**: macOS and Linux — targets any running Docker container via `docker exec`.
 
 ---
 
@@ -248,7 +276,7 @@ When `sshx` is invoked for a **non-matching host** (no sshx config, or host not 
 sshx/
 ├── cmd/sshx/          # Main entry point
 ├── internal/
-│   ├── cli/           # CLI parsing, host detection
+│   ├── cli/           # CLI parsing, host detection, Docker container resolution
 │   ├── sshcompat/     # SSH argument compatibility
 │   ├── config/        # YAML configuration
 │   ├── protocol/      # Client-server wire protocol
