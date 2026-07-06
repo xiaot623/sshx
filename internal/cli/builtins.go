@@ -56,7 +56,7 @@ func (r *Runner) runPS(ctx context.Context) int {
 	fmt.Fprintln(r.Stdout, "Docker containers")
 	containers, dockerErr := r.listDockerContainers(ctx)
 	if dockerErr != nil {
-		fmt.Fprintf(r.Stderr, "sshx ps: docker: %v\n", dockerErr)
+		fmt.Fprintf(r.Stdout, "  unavailable: %v\n", dockerErr)
 		return 0
 	}
 	for _, c := range containers {

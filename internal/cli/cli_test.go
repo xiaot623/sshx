@@ -703,6 +703,38 @@ func TestDockerTargetRunsDockerExecWhenNotSSHConfigAlias(t *testing.T) {
 	}
 }
 
+func TestDockerDiscoveryFailureFallsBackToSSH(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("commands:\n  deny: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls []execCall
+	var stderr bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	r.ConfigPath = configPath
+	r.SSHConfigPath = filepath.Join(t.TempDir(), "missing")
+	r.ExecOutput = func(_ context.Context, name string, args []string) ([]byte, error) {
+		if name != "docker" || !reflect.DeepEqual(args, []string{"ps", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}"}) {
+			t.Fatalf("ExecOutput = %s %#v", name, args)
+		}
+		return nil, errors.New("docker daemon unavailable")
+	}
+	r.Exec = func(_ context.Context, name string, args []string) error {
+		calls = append(calls, execCall{name: name, args: append([]string(nil), args...)})
+		return nil
+	}
+	code := r.Run(context.Background(), []string{"debian"})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if len(calls) != 1 || calls[0].name != "ssh" || !reflect.DeepEqual(calls[0].args, []string{"debian"}) {
+		t.Fatalf("calls = %#v", calls)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestSSHConfigAliasBeatsDockerTarget(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
@@ -812,6 +844,37 @@ func TestRunPSListsSSHConfigAndDockerContainers(t *testing.T) {
 	}
 	if strings.Contains(out, "*.corp") {
 		t.Fatalf("stdout includes wildcard host: %q", out)
+	}
+}
+
+func TestRunPSHandlesUnavailableDocker(t *testing.T) {
+	dir := t.TempDir()
+	sshConfigPath := filepath.Join(dir, "ssh_config")
+	if err := os.WriteFile(sshConfigPath, []byte("Host debian\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &stdout, &stderr)
+	r.SSHConfigPath = sshConfigPath
+	r.ExecOutput = func(_ context.Context, name string, _ []string) ([]byte, error) {
+		if name != "docker" {
+			t.Fatalf("name = %q", name)
+		}
+		return nil, errors.New("executable file not found")
+	}
+	code := r.Run(context.Background(), []string{"ps"})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{"SSH config\n", "  debian\n", "Docker containers\n", "  unavailable: executable file not found\n"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q: %q", want, out)
+		}
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 
