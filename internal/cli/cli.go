@@ -26,12 +26,11 @@ type Runner struct {
 	ExecOutput      func(context.Context, string, []string) ([]byte, error)
 	DownloadBinary  func(context.Context, string, string) (string, error)
 	StartBridge     func(context.Context, string, []string, string) (func(), error)
-	EnsureResolver  func(context.Context, config.DomainsFeature) error
+	EnsureResolver  func(context.Context) error
 
 	commandPolicy config.CommandPolicy
 	commandBridge bool
-	forwardPorts  bool
-	domains       config.DomainsFeature
+	autoForward   bool
 }
 
 func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
@@ -134,10 +133,9 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	remoteHome := remoteServerHome(remoteID)
 	r.commandPolicy = cfg.Commands
 	r.commandBridge = features.CommandBridge
-	r.forwardPorts = features.Ports.Auto || features.Domains.Enabled
-	r.domains = features.Domains
-	if features.Domains.Enabled {
-		if err := r.EnsureResolver(ctx, features.Domains); err != nil {
+	r.autoForward = features.AutoForward
+	if features.AutoForward {
+		if err := r.EnsureResolver(ctx); err != nil {
 			if cfg.Strict {
 				fmt.Fprintf(r.Stderr, "sshx: resolver setup unavailable for %s: %v\n", parsed.Target, err)
 				return 1
@@ -151,7 +149,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			fmt.Fprintf(r.Stderr, "sshx: remote server unavailable for %s: %v\n", parsed.Target, err)
 			return 1
 		}
-	} else if features.CommandBridge || r.forwardPorts {
+	} else if features.CommandBridge || features.AutoForward {
 		stopBridge, err := r.StartBridge(ctx, parsed.Target, sshArgs, remoteHome)
 		if err != nil {
 			if cfg.Strict {

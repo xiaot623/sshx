@@ -18,20 +18,22 @@ import (
 )
 
 const (
-	TypePing       = "ping"
-	TypeEnsurePort = "ensurePort"
-	TypeListPorts  = "listPorts"
+	TypePing             = "ping"
+	TypeRegisterTarget   = "registerTarget"
+	TypeUnregisterTarget = "unregisterTarget"
+	TypeEnsureTargetPort = "ensureTargetPort"
+	TypeRemoveTargetPort = "removeTargetPort"
+	TypeListPorts        = "listPorts"
 )
 
 type Request struct {
-	Type           string   `json:"type"`
-	SSHPath        string   `json:"sshPath,omitempty"`
-	Target         string   `json:"target,omitempty"`
-	SSHArgs        []string `json:"sshArgs,omitempty"`
-	RemotePort     int      `json:"remotePort,omitempty"`
-	DomainsEnabled bool     `json:"domainsEnabled,omitempty"`
-	DomainSuffix   string   `json:"domainSuffix,omitempty"`
-	DNSAddr        string   `json:"dnsAddr,omitempty"`
+	Type         string   `json:"type"`
+	SSHPath      string   `json:"sshPath,omitempty"`
+	Target       string   `json:"target,omitempty"`
+	SSHArgs      []string `json:"sshArgs,omitempty"`
+	RemotePort   int      `json:"remotePort,omitempty"`
+	DomainSuffix string   `json:"domainSuffix,omitempty"`
+	DNSAddr      string   `json:"dnsAddr,omitempty"`
 }
 
 type Response struct {
@@ -39,19 +41,29 @@ type Response struct {
 	Error     string      `json:"error,omitempty"`
 	LocalPort int         `json:"localPort,omitempty"`
 	Domain    string      `json:"domain,omitempty"`
+	ListenIP  string      `json:"listenIp,omitempty"`
 	Forwards  []Forwarded `json:"forwards,omitempty"`
 }
 
 type Forwarded struct {
 	Target     string `json:"target"`
 	Domain     string `json:"domain,omitempty"`
+	ListenIP   string `json:"listenIp,omitempty"`
 	LocalPort  int    `json:"localPort"`
 	RemotePort int    `json:"remotePort"`
 }
 
 type forwardRecord struct {
-	Target string
-	Domain string
+	Target   string
+	Domain   string
+	ListenIP string
+}
+
+type targetRecord struct {
+	Target   string
+	Domain   string
+	ListenIP string
+	Refs     int
 }
 
 type Server struct {
@@ -61,7 +73,9 @@ type Server struct {
 	mu             sync.Mutex
 	forwarders     map[string]*forward.Manager
 	forwardRecords map[string]map[int]forwardRecord
+	targets        map[string]*targetRecord
 	domains        map[string]*domain.Manager
+	nextLoopback   int
 }
 
 func DefaultSocketPath() string {
@@ -84,6 +98,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	if s.forwardRecords == nil {
 		s.forwardRecords = map[string]map[int]forwardRecord{}
+	}
+	if s.targets == nil {
+		s.targets = map[string]*targetRecord{}
 	}
 	if s.domains == nil {
 		s.domains = map[string]*domain.Manager{}
@@ -134,8 +151,14 @@ func (s *Server) handle(ctx context.Context, req Request) Response {
 	switch req.Type {
 	case TypePing:
 		return Response{OK: true}
-	case TypeEnsurePort:
-		return s.ensurePort(ctx, req)
+	case TypeRegisterTarget:
+		return s.registerTarget(ctx, req)
+	case TypeUnregisterTarget:
+		return s.unregisterTarget(req)
+	case TypeEnsureTargetPort:
+		return s.ensureTargetPort(ctx, req)
+	case TypeRemoveTargetPort:
+		return s.removeTargetPort(req)
 	case TypeListPorts:
 		return s.listPorts()
 	default:
@@ -143,33 +166,81 @@ func (s *Server) handle(ctx context.Context, req Request) Response {
 	}
 }
 
-func (s *Server) ensurePort(ctx context.Context, req Request) Response {
-	if req.Target == "" || req.SSHPath == "" || req.RemotePort <= 0 {
-		return Response{OK: false, Error: "sshPath, target and remotePort are required"}
-	}
-	sshArgs := req.SSHArgs
-	if len(sshArgs) == 0 {
-		sshArgs = []string{req.Target}
-	}
-	fwd := s.forwarder(ctx, req.SSHPath, sshArgs)
-	f, err := fwd.Ensure(req.RemotePort, req.DomainsEnabled)
+func (s *Server) registerTarget(ctx context.Context, req Request) Response {
+	rec, err := s.ensureTarget(ctx, req)
 	if err != nil {
 		return Response{OK: false, Error: err.Error()}
 	}
-	resp := Response{OK: true, LocalPort: f.LocalPort}
-	if req.DomainsEnabled {
-		dom, err := s.domain(ctx, req)
-		if err != nil {
-			return Response{OK: false, Error: err.Error(), LocalPort: f.LocalPort}
-		}
-		resp.Domain = dom.NameForTarget(req.Target)
-	}
-	s.rememberForward(req.SSHPath, sshArgs, req.RemotePort, req.Target, resp.Domain)
-	return resp
+	s.mu.Lock()
+	rec.Refs++
+	s.mu.Unlock()
+	return Response{OK: true, Domain: rec.Domain, ListenIP: rec.ListenIP}
 }
 
-func (s *Server) rememberForward(sshPath string, sshArgs []string, remotePort int, target string, domain string) {
-	key := sshPath + "\x00" + strings.Join(sshArgs, "\x00")
+func (s *Server) unregisterTarget(req Request) Response {
+	if req.Target == "" || req.SSHPath == "" {
+		return Response{OK: false, Error: "sshPath and target are required"}
+	}
+	key := requestKey(req.SSHPath, defaultSSHArgs(req))
+	var fwd *forward.Manager
+	s.mu.Lock()
+	if rec := s.targets[key]; rec != nil {
+		if rec.Refs > 0 {
+			rec.Refs--
+		}
+		if rec.Refs == 0 {
+			fwd = s.forwarders[key]
+			delete(s.forwardRecords, key)
+		}
+	}
+	s.mu.Unlock()
+	if fwd != nil {
+		fwd.Stop()
+	}
+	return Response{OK: true}
+}
+
+func (s *Server) ensureTargetPort(ctx context.Context, req Request) Response {
+	if req.RemotePort <= 0 {
+		return Response{OK: false, Error: "remotePort is required"}
+	}
+	rec, err := s.ensureTarget(ctx, req)
+	if err != nil {
+		return Response{OK: false, Error: err.Error()}
+	}
+	sshArgs := defaultSSHArgs(req)
+	fwd := s.forwarder(ctx, req.SSHPath, sshArgs)
+	f, err := fwd.Ensure(req.RemotePort, rec.ListenIP)
+	if err != nil {
+		return Response{OK: false, Error: err.Error()}
+	}
+	s.rememberForward(req.SSHPath, sshArgs, req.RemotePort, rec.Target, rec.Domain, rec.ListenIP)
+	return Response{OK: true, LocalPort: f.LocalPort, Domain: rec.Domain, ListenIP: rec.ListenIP}
+}
+
+func (s *Server) removeTargetPort(req Request) Response {
+	if req.Target == "" || req.SSHPath == "" || req.RemotePort <= 0 {
+		return Response{OK: false, Error: "sshPath, target and remotePort are required"}
+	}
+	key := requestKey(req.SSHPath, defaultSSHArgs(req))
+	var fwd *forward.Manager
+	s.mu.Lock()
+	fwd = s.forwarders[key]
+	if records := s.forwardRecords[key]; records != nil {
+		delete(records, req.RemotePort)
+		if len(records) == 0 {
+			delete(s.forwardRecords, key)
+		}
+	}
+	s.mu.Unlock()
+	if fwd != nil {
+		fwd.Remove(req.RemotePort)
+	}
+	return Response{OK: true}
+}
+
+func (s *Server) rememberForward(sshPath string, sshArgs []string, remotePort int, target string, domain string, listenIP string) {
+	key := requestKey(sshPath, sshArgs)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.forwardRecords == nil {
@@ -178,11 +249,66 @@ func (s *Server) rememberForward(sshPath string, sshArgs []string, remotePort in
 	if s.forwardRecords[key] == nil {
 		s.forwardRecords[key] = map[int]forwardRecord{}
 	}
-	s.forwardRecords[key][remotePort] = forwardRecord{Target: target, Domain: domain}
+	s.forwardRecords[key][remotePort] = forwardRecord{Target: target, Domain: domain, ListenIP: listenIP}
+}
+
+func (s *Server) ensureTarget(ctx context.Context, req Request) (*targetRecord, error) {
+	if req.Target == "" || req.SSHPath == "" || req.DomainSuffix == "" || req.DNSAddr == "" {
+		return nil, errors.New("sshPath, target, domainSuffix and dnsAddr are required")
+	}
+	sshArgs := defaultSSHArgs(req)
+	key := requestKey(req.SSHPath, sshArgs)
+	s.mu.Lock()
+	if rec := s.targets[key]; rec != nil {
+		s.mu.Unlock()
+		return rec, nil
+	}
+	s.mu.Unlock()
+
+	dom, err := s.domain(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if s.targets == nil {
+		s.targets = map[string]*targetRecord{}
+	}
+	if rec := s.targets[key]; rec != nil {
+		s.mu.Unlock()
+		return rec, nil
+	}
+	rec := &targetRecord{
+		Target:   req.Target,
+		Domain:   dom.NameForTarget(req.Target),
+		ListenIP: s.allocateLoopbackIPLocked(),
+	}
+	s.targets[key] = rec
+	s.mu.Unlock()
+
+	if err := dom.Register(rec.Domain, net.ParseIP(rec.ListenIP)); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *Server) allocateLoopbackIPLocked() string {
+	if s.nextLoopback == 0 {
+		s.nextLoopback = 1
+	}
+	offset := s.nextLoopback
+	s.nextLoopback++
+	second := 64 + offset/(254*254)
+	third := (offset / 254) % 254
+	fourth := offset%254 + 1
+	if second > 126 {
+		second = 126
+	}
+	return fmt.Sprintf("127.%d.%d.%d", second, third, fourth)
 }
 
 func (s *Server) forwarder(ctx context.Context, sshPath string, sshArgs []string) *forward.Manager {
-	key := sshPath + "\x00" + strings.Join(sshArgs, "\x00")
+	key := requestKey(sshPath, sshArgs)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.forwarders == nil {
@@ -196,6 +322,17 @@ func (s *Server) forwarder(ctx context.Context, sshPath string, sshArgs []string
 	return f
 }
 
+func defaultSSHArgs(req Request) []string {
+	if len(req.SSHArgs) > 0 {
+		return req.SSHArgs
+	}
+	return []string{req.Target}
+}
+
+func requestKey(sshPath string, sshArgs []string) string {
+	return sshPath + "\x00" + strings.Join(sshArgs, "\x00")
+}
+
 func (s *Server) listPorts() Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,6 +343,7 @@ func (s *Server) listPorts() Response {
 			out = append(out, Forwarded{
 				Target:     record.Target,
 				Domain:     record.Domain,
+				ListenIP:   record.ListenIP,
 				LocalPort:  entry.LocalPort,
 				RemotePort: entry.RemotePort,
 			})

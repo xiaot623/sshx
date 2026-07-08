@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,7 +33,10 @@ type ClientOptions struct {
 	Ready          chan<- error
 	Allow          CommandAllowed
 	OnPortObserved func(port int)
+	OnPortGone     func(port int)
 }
+
+const portGoneMissingScans = 2
 
 type Server struct {
 	SocketPath       string
@@ -44,6 +48,7 @@ type Server struct {
 	mu            sync.Mutex
 	clients       []*clientConn
 	observedPorts map[int]bool
+	portMisses    map[int]int
 	lastActive    time.Time
 }
 
@@ -152,24 +157,70 @@ func (s *Server) scanAndBroadcastPorts() {
 	if err != nil {
 		return
 	}
-	for _, port := range portList {
-		if s.markPortObserved(port) {
-			s.broadcast(protocol.Frame{Type: protocol.TypePortObserved, Host: "localhost", Port: port})
-		}
+	observed, gone := s.applyPortScan(portList)
+	for _, port := range observed {
+		s.broadcast(protocol.Frame{Type: protocol.TypePortObserved, Host: "localhost", Port: port})
+	}
+	for _, port := range gone {
+		s.broadcast(protocol.Frame{Type: protocol.TypePortGone, Host: "localhost", Port: port})
 	}
 }
 
-func (s *Server) markPortObserved(port int) bool {
+func (s *Server) applyPortScan(portList []int) ([]int, []int) {
+	current := map[int]bool{}
+	for _, port := range portList {
+		if port > 0 {
+			current[port] = true
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.observedPorts == nil {
 		s.observedPorts = map[int]bool{}
 	}
-	if s.observedPorts[port] {
-		return false
+	if s.portMisses == nil {
+		s.portMisses = map[int]int{}
 	}
-	s.observedPorts[port] = true
-	return true
+	var observed []int
+	for port := range current {
+		if !s.observedPorts[port] {
+			observed = append(observed, port)
+		}
+		s.observedPorts[port] = true
+		delete(s.portMisses, port)
+	}
+	var gone []int
+	for port := range s.observedPorts {
+		if current[port] {
+			continue
+		}
+		s.portMisses[port]++
+		if s.portMisses[port] >= portGoneMissingScans {
+			delete(s.observedPorts, port)
+			delete(s.portMisses, port)
+			gone = append(gone, port)
+		}
+	}
+	sort.Ints(observed)
+	sort.Ints(gone)
+	return observed, gone
+}
+
+func (s *Server) currentPorts() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ports := make([]int, 0, len(s.observedPorts))
+	for port := range s.observedPorts {
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+	return ports
+}
+
+func (s *Server) sendCurrentPorts(client *clientConn) {
+	for _, port := range s.currentPorts() {
+		_ = client.send(protocol.Frame{Type: protocol.TypePortObserved, Host: "localhost", Port: port})
+	}
 }
 
 func (s *Server) broadcast(frame protocol.Frame) {
@@ -203,7 +254,11 @@ func (s *Server) handleConn(c net.Conn) {
 	case protocol.RoleClient:
 		cc := &clientConn{enc: enc, dec: dec, c: c}
 		s.addClient(cc)
-		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCapabilities, Capabilities: []string{"command.exec.batch-stdin"}})
+		if err := enc.Encode(protocol.Frame{Type: protocol.TypeCapabilities, Capabilities: []string{"command.exec.batch-stdin"}}); err != nil {
+			s.removeClient(cc)
+			return
+		}
+		s.sendCurrentPorts(cc)
 	case protocol.RoleRequester:
 		s.handleRequester(c, dec, enc)
 	default:
@@ -422,6 +477,12 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 		if frame.Type == protocol.TypePortObserved {
 			if opts.OnPortObserved != nil && frame.Port > 0 {
 				opts.OnPortObserved(frame.Port)
+			}
+			continue
+		}
+		if frame.Type == protocol.TypePortGone {
+			if opts.OnPortGone != nil && frame.Port > 0 {
+				opts.OnPortGone(frame.Port)
 			}
 			continue
 		}

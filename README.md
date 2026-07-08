@@ -7,7 +7,7 @@
 - 🔄 **Reverse command bridge** — run `sshx local <cmd>` *on the remote* to execute commands on your local machine, with stdout, stderr, exit code, and stdin all propagated.
 - 🔌 **Automatic port forwarding** — remote loopback listeners (e.g., a dev server on `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
-- 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. The same bridge, port forwarding, and domain features work inside containers via `docker exec`.
+- 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. Command bridge support works inside containers via `docker exec`.
 
 ## Why sshx?
 
@@ -39,7 +39,7 @@ When the target doesn't match any SSH host, sshx falls back to resolving it as a
 - `sshx <container-name>` — opens a shell in the container via `docker exec`.
 - `sshx <container-id-prefix>` — matches by container ID prefix.
 - Explicit SSH targets (`user@host`, IP addresses, hostnames with dots/colons) are never treated as Docker containers.
-- The full sshx feature set (command bridge, port detection, domain binding) works inside containers.
+- Command bridge support works inside containers.
 - Requires `docker` CLI available on the local machine — gracefully falls back to SSH if Docker isn't found or the container isn't running.
 
 ### 🔄 Remote-to-Local Command Bridge
@@ -62,15 +62,15 @@ sshx local pbcopy < /tmp/some-data
 When a process on the remote starts listening on `127.0.0.1` (e.g., `npm run dev` on port 3000), sshx detects it and:
 
 1. Broadcasts the port to the local daemon.
-2. Creates a shared TCP forward over SSH.
-3. Binds the SSH target domain, e.g. `debian.<your-user>.sshx`.
+2. Assigns the SSH target its own loopback IP.
+3. Exposes a TCP proxy at the target domain, e.g. `debian.<your-user>.sshx:3000`.
 
-sshx first tries to use the same local port as the remote listener. If that local port is already occupied, it automatically tries the next port (`+1`) until it finds a free one. Run `sshx forward` to see the active mapping.
+The URL port is the remote port. sshx does not bind `127.0.0.1:<port>`; it binds the target's private loopback IP instead, so `debian.<your-user>.sshx:8080` and `ubuntu.<your-user>.sshx:8080` can point at different hosts at the same time. Run `sshx forward` to see the active mappings.
 
 ### 🌐 Local Domains (macOS, Linux)
 
-- A local DNS responder on `127.0.0.1:53` resolves `*.sshx` names dynamically.
-- The domain resolves to localhost; the URL port selects the forwarded local listener.
+- A local DNS responder on `127.0.0.1:53` resolves active target names dynamically.
+- Each target domain resolves to a private loopback IP; the URL port selects the remote listener.
 - On macOS, `/etc/resolver/<suffix>` is configured once (with `sudo` when needed).
 - All terminals on the same host share one DNS resolver and forwarding daemon.
 
@@ -177,13 +177,12 @@ On your **local** machine, open:
 http://my-server.<your-user>.sshx:8080
 ```
 
-No `-L` flags, no manual forwarding.
-
-If local port `8080` is already occupied, sshx will try `8081`, then `8082`, and so on. Check the chosen port with:
+No `-L` flags, no manual forwarding. Since each target gets its own loopback IP, another target can expose its own `8080` at the same time:
 
 ```sh
 sshx forward
-# 8080 -> my-server:8080
+# http://my-server.<your-user>.sshx:8080 -> my-server:8080
+# http://other-server.<your-user>.sshx:8080 -> other-server:8080
 ```
 
 ---
@@ -201,17 +200,9 @@ features:
   # Remote-to-local command bridge (`sshx local <cmd>` on the remote)
   commandBridge: true
 
-  ports:
-    # Auto-detect loopback TCP listeners on the remote and forward them.
-    auto: true
-    # Future: also detect 0.0.0.0 listeners.
-    # bindAll: false
-
-  domains:
-    # Enable local domain binding (<host>.<user>.sshx:<port>).
-    enabled: true
-    # Custom domain suffix. Default: <local-user>.sshx
-    suffix: user.sshx
+  # Auto-detect remote loopback TCP listeners and expose them via
+  # <host>.<user>.sshx:<remote-port>.
+  autoForward: true
 
 commands:
   # Commands blocked from bridge execution.

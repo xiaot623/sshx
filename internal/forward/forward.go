@@ -2,6 +2,7 @@ package forward
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,12 +23,14 @@ type Manager struct {
 type Forward struct {
 	RemotePort int
 	LocalPort  int
+	ListenIP   string
 	listener   net.Listener
 }
 
 type Entry struct {
 	RemotePort int
 	LocalPort  int
+	ListenIP   string
 }
 
 func NewManager(ctx context.Context, sshPath string, sshArgs []string, stderr io.Writer) *Manager {
@@ -40,7 +43,7 @@ func NewManager(ctx context.Context, sshPath string, sshArgs []string, stderr io
 	}
 }
 
-func (m *Manager) Ensure(remotePort int, preferRemoteLocalPort bool) (*Forward, error) {
+func (m *Manager) Ensure(remotePort int, listenIP string) (*Forward, error) {
 	m.mu.Lock()
 	if f := m.byRemote[remotePort]; f != nil {
 		m.mu.Unlock()
@@ -48,12 +51,14 @@ func (m *Manager) Ensure(remotePort int, preferRemoteLocalPort bool) (*Forward, 
 	}
 	m.mu.Unlock()
 
-	ln, err := listenPreferredPort(remotePort, preferRemoteLocalPort)
+	if listenIP == "" {
+		return nil, errors.New("listen IP is required")
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(listenIP, fmt.Sprint(remotePort)))
 	if err != nil {
 		return nil, err
 	}
-	localPort := ln.Addr().(*net.TCPAddr).Port
-	f := &Forward{RemotePort: remotePort, LocalPort: localPort, listener: ln}
+	f := &Forward{RemotePort: remotePort, LocalPort: remotePort, ListenIP: listenIP, listener: ln}
 
 	m.mu.Lock()
 	if existing := m.byRemote[remotePort]; existing != nil {
@@ -68,33 +73,24 @@ func (m *Manager) Ensure(remotePort int, preferRemoteLocalPort bool) (*Forward, 
 	return f, nil
 }
 
-func listenPreferredPort(remotePort int, preferRemoteLocalPort bool) (net.Listener, error) {
-	if preferRemoteLocalPort {
-		var lastErr error
-		for localPort := remotePort; localPort <= 65535; localPort++ {
-			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))
-			if err == nil {
-				return ln, nil
-			}
-			lastErr = err
-		}
-		return nil, fmt.Errorf("no local port available at or above %d: %w", remotePort, lastErr)
-	}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", remotePort))
-	if err == nil {
-		return ln, nil
-	}
-	return net.Listen("tcp", "127.0.0.1:0")
-}
-
 func (m *Manager) List() []Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entries := make([]Entry, 0, len(m.byRemote))
 	for _, f := range m.byRemote {
-		entries = append(entries, Entry{RemotePort: f.RemotePort, LocalPort: f.LocalPort})
+		entries = append(entries, Entry{RemotePort: f.RemotePort, LocalPort: f.LocalPort, ListenIP: f.ListenIP})
 	}
 	return entries
+}
+
+func (m *Manager) Remove(remotePort int) {
+	m.mu.Lock()
+	f := m.byRemote[remotePort]
+	delete(m.byRemote, remotePort)
+	m.mu.Unlock()
+	if f != nil {
+		_ = f.listener.Close()
+	}
 }
 
 func (m *Manager) Stop() {

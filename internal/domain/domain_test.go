@@ -46,6 +46,9 @@ func TestManagerDNSResolvesSuffixToLoopback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Stop()
+	if err := m.Register("debian.xiaot.sshx", net.IPv4(127, 64, 0, 2)); err != nil {
+		t.Fatal(err)
+	}
 
 	conn, err := net.Dial("udp", m.DNSAddr())
 	if err != nil {
@@ -63,7 +66,7 @@ func TestManagerDNSResolvesSuffixToLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(buf[:n], []byte{127, 0, 0, 1}) {
+	if !bytes.Contains(buf[:n], []byte{127, 64, 0, 2}) {
 		t.Fatalf("DNS response did not contain loopback A record: %x", buf[:n])
 	}
 }

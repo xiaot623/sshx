@@ -10,19 +10,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"github.com/xiaot623/sshx/internal/config"
 )
 
-func (r *Runner) defaultEnsureResolver(ctx context.Context, cfg config.DomainsFeature) error {
-	if !cfg.Enabled || runtime.GOOS != "darwin" {
+func (r *Runner) defaultEnsureResolver(ctx context.Context) error {
+	if runtime.GOOS != "darwin" {
 		return nil
 	}
-	suffix := strings.Trim(domainSuffix(cfg), ".")
+	suffix := strings.Trim(domainSuffix(), ".")
 	if suffix == "" {
 		return errors.New("domain suffix is required")
 	}
-	content, err := resolverContent(domainDNSAddr(cfg))
+	content, err := resolverContent(domainDNSAddr())
 	if err != nil {
 		return err
 	}

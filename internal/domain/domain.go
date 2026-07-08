@@ -16,6 +16,8 @@ type Manager struct {
 	dnsAddr string
 	stderr  io.Writer
 
+	mu        sync.RWMutex
+	records   map[string]net.IP
 	dnsConn   *net.UDPConn
 	closeOnce sync.Once
 }
@@ -61,6 +63,33 @@ func (m *Manager) NameForTarget(target string) string {
 	return fmt.Sprintf("%s.%s", TargetPrefix(target), m.suffix)
 }
 
+func (m *Manager) Register(name string, ip net.IP) error {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return fmt.Errorf("domain record %s requires an IPv4 address", name)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.records == nil {
+		m.records = map[string]net.IP{}
+	}
+	m.records[normalizeSuffix(name)] = append(net.IP(nil), ip4...)
+	return nil
+}
+
+func (m *Manager) Unregister(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.records, normalizeSuffix(name))
+}
+
+func (m *Manager) lookup(name string) (net.IP, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ip, ok := m.records[normalizeSuffix(name)]
+	return append(net.IP(nil), ip...), ok
+}
+
 func (m *Manager) startDNS(ctx context.Context) error {
 	addr, err := net.ResolveUDPAddr("udp", m.dnsAddr)
 	if err != nil {
@@ -82,7 +111,12 @@ func (m *Manager) serveDNS(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		resp, err := buildDNSResponse(buf[:n], m.suffix)
+		name, _, err := parseQuestion(buf[:n])
+		if err != nil {
+			continue
+		}
+		ip, found := m.lookup(name)
+		resp, err := buildDNSResponse(buf[:n], ip, found)
 		if err != nil {
 			continue
 		}
@@ -122,11 +156,11 @@ func TargetPrefix(target string) string {
 	return prefix
 }
 
-func buildDNSResponse(req []byte, suffix string) ([]byte, error) {
+func buildDNSResponse(req []byte, ip net.IP, found bool) ([]byte, error) {
 	if len(req) < 12 {
 		return nil, errors.New("short dns request")
 	}
-	name, qEnd, err := parseQName(req, 12)
+	_, qEnd, err := parseQName(req, 12)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +168,8 @@ func buildDNSResponse(req []byte, suffix string) ([]byte, error) {
 		return nil, errors.New("short dns question")
 	}
 	qtype := binary.BigEndian.Uint16(req[qEnd : qEnd+2])
-	answer := normalizeSuffix(name) == normalizeSuffix(suffix) || strings.HasSuffix(normalizeSuffix(name), "."+normalizeSuffix(suffix))
+	ip4 := ip.To4()
+	answer := found && ip4 != nil
 	resp := make([]byte, 0, len(req)+32)
 	resp = append(resp, req[:2]...)
 	flags := uint16(0x8180)
@@ -157,9 +192,20 @@ func buildDNSResponse(req []byte, suffix string) ([]byte, error) {
 		resp = binary.BigEndian.AppendUint16(resp, 1)
 		resp = binary.BigEndian.AppendUint32(resp, 30)
 		resp = binary.BigEndian.AppendUint16(resp, 4)
-		resp = append(resp, 127, 0, 0, 1)
+		resp = append(resp, ip4...)
 	}
 	return resp, nil
+}
+
+func parseQuestion(msg []byte) (string, uint16, error) {
+	name, qEnd, err := parseQName(msg, 12)
+	if err != nil {
+		return "", 0, err
+	}
+	if qEnd+4 > len(msg) {
+		return "", 0, errors.New("short dns question")
+	}
+	return name, binary.BigEndian.Uint16(msg[qEnd : qEnd+2]), nil
 }
 
 func parseQName(msg []byte, offset int) (string, int, error) {

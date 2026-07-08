@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xiaot623/sshx/internal/bridge"
@@ -20,7 +22,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		return nil, err
 	}
 	localDaemonSocket := defaultLocalDaemonSocketPath()
-	if r.forwardPorts {
+	if r.autoForward {
 		if err := r.ensureLocalDaemon(ctx, localDaemonSocket); err != nil {
 			return nil, err
 		}
@@ -57,6 +59,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	})
 	readyCh := make(chan error, 1)
 	errCh := make(chan error, 1)
+	var autoForwardStopped atomic.Bool
 	go func() {
 		opts := bridge.ClientOptions{
 			Ready: readyCh,
@@ -64,20 +67,37 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 				return r.commandBridge && r.commandPolicy.Allows(argv)
 			},
 		}
-		if r.forwardPorts {
+		if r.autoForward {
 			opts.OnPortObserved = func(port int) {
+				if autoForwardStopped.Load() {
+					return
+				}
 				_, err := locald.ClientRequest(bridgeCtx, localDaemonSocket, locald.Request{
-					Type:           locald.TypeEnsurePort,
-					SSHPath:        r.SSHPath,
-					Target:         target,
-					SSHArgs:        append([]string(nil), sshArgs...),
-					RemotePort:     port,
-					DomainsEnabled: r.domains.Enabled,
-					DomainSuffix:   domainSuffix(r.domains),
-					DNSAddr:        domainDNSAddr(r.domains),
+					Type:         locald.TypeEnsureTargetPort,
+					SSHPath:      r.SSHPath,
+					Target:       target,
+					SSHArgs:      append([]string(nil), sshArgs...),
+					RemotePort:   port,
+					DomainSuffix: domainSuffix(),
+					DNSAddr:      domainDNSAddr(),
 				})
 				if err != nil {
 					fmt.Fprintf(r.Stderr, "sshx: forward remote port %d: %v\n", port, err)
+				}
+			}
+			opts.OnPortGone = func(port int) {
+				if autoForwardStopped.Load() {
+					return
+				}
+				_, err := locald.ClientRequest(bridgeCtx, localDaemonSocket, locald.Request{
+					Type:       locald.TypeRemoveTargetPort,
+					SSHPath:    r.SSHPath,
+					Target:     target,
+					SSHArgs:    append([]string(nil), sshArgs...),
+					RemotePort: port,
+				})
+				if err != nil {
+					fmt.Fprintf(r.Stderr, "sshx: remove remote port %d: %v\n", port, err)
 				}
 			}
 		}
@@ -96,18 +116,57 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		cancel()
 		return nil, errors.New("timed out waiting for command bridge handshake")
 	}
+	registered := false
+	if r.autoForward {
+		_, err := locald.ClientRequest(ctx, localDaemonSocket, locald.Request{
+			Type:         locald.TypeRegisterTarget,
+			SSHPath:      r.SSHPath,
+			Target:       target,
+			SSHArgs:      append([]string(nil), sshArgs...),
+			DomainSuffix: domainSuffix(),
+			DNSAddr:      domainDNSAddr(),
+		})
+		if err != nil {
+			autoForwardStopped.Store(true)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+			_, _ = locald.ClientRequest(cleanupCtx, localDaemonSocket, locald.Request{
+				Type:    locald.TypeUnregisterTarget,
+				SSHPath: r.SSHPath,
+				Target:  target,
+				SSHArgs: append([]string(nil), sshArgs...),
+			})
+			cleanupCancel()
+			cancel()
+			return nil, err
+		}
+		registered = true
+	}
+	var stopOnce sync.Once
 	stop := func() {
-		cancel()
-		_ = stdin.Close()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-			_ = cmd.Process.Kill()
-		}
-		select {
-		case <-waitCh:
-		case <-time.After(time.Second):
-		}
+		stopOnce.Do(func() {
+			if registered {
+				autoForwardStopped.Store(true)
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+				_, _ = locald.ClientRequest(cleanupCtx, localDaemonSocket, locald.Request{
+					Type:    locald.TypeUnregisterTarget,
+					SSHPath: r.SSHPath,
+					Target:  target,
+					SSHArgs: append([]string(nil), sshArgs...),
+				})
+				cleanupCancel()
+			}
+			cancel()
+			_ = stdin.Close()
+			select {
+			case <-errCh:
+			case <-time.After(time.Second):
+				_ = cmd.Process.Kill()
+			}
+			select {
+			case <-waitCh:
+			case <-time.After(time.Second):
+			}
+		})
 	}
 	return stop, nil
 }

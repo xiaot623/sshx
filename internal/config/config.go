@@ -17,19 +17,8 @@ type Config struct {
 }
 
 type Features struct {
-	CommandBridge bool           `yaml:"commandBridge"`
-	Ports         PortsFeature   `yaml:"ports"`
-	Domains       DomainsFeature `yaml:"domains"`
-}
-
-type PortsFeature struct {
-	Auto bool `yaml:"auto"`
-}
-
-type DomainsFeature struct {
-	Enabled bool   `yaml:"enabled"`
-	Suffix  string `yaml:"suffix"`
-	DNSAddr string `yaml:"dnsAddr"`
+	CommandBridge bool `yaml:"commandBridge"`
+	AutoForward   bool `yaml:"autoForward"`
 }
 
 type CommandPolicy struct {
@@ -81,7 +70,7 @@ func Load(path string) (Config, error) {
 }
 
 func (f Features) Enabled() bool {
-	return f.CommandBridge || f.Ports.Auto || f.Domains.Enabled
+	return f.CommandBridge || f.AutoForward
 }
 
 func (p CommandPolicy) Allows(argv []string) bool {

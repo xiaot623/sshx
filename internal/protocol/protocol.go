@@ -15,6 +15,7 @@ const (
 	TypeCommandResult = "command.result"
 	TypeCommandError  = "command.error"
 	TypePortObserved  = "port.observed"
+	TypePortGone      = "port.gone"
 	TypePortForward   = "port.forward"
 	TypeError         = "error"
 	TypeHeartbeat     = "heartbeat"

@@ -173,6 +173,68 @@ func TestServerExitsAfterIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestPortScanDiffDebouncesGonePorts(t *testing.T) {
+	s := &Server{}
+	observed, gone := s.applyPortScan([]int{8080})
+	if len(observed) != 1 || observed[0] != 8080 || len(gone) != 0 {
+		t.Fatalf("first scan observed=%v gone=%v", observed, gone)
+	}
+	observed, gone = s.applyPortScan(nil)
+	if len(observed) != 0 || len(gone) != 0 {
+		t.Fatalf("first miss observed=%v gone=%v", observed, gone)
+	}
+	observed, gone = s.applyPortScan(nil)
+	if len(observed) != 0 || len(gone) != 1 || gone[0] != 8080 {
+		t.Fatalf("second miss observed=%v gone=%v", observed, gone)
+	}
+	observed, gone = s.applyPortScan([]int{8080})
+	if len(observed) != 1 || observed[0] != 8080 || len(gone) != 0 {
+		t.Fatalf("restart observed=%v gone=%v", observed, gone)
+	}
+}
+
+func TestNewClientReceivesCurrentPortSnapshot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serverConn, clientConn := net.Pipe()
+	s := &Server{observedPorts: map[int]bool{8080: true}}
+	go s.handleConn(serverConn)
+
+	ready := make(chan error, 1)
+	observed := make(chan int, 1)
+	clientErr := make(chan error, 1)
+	go func() {
+		clientErr <- RunClientConnWithOptions(ctx, clientConn, ClientOptions{
+			Ready: ready,
+			OnPortObserved: func(port int) {
+				observed <- port
+			},
+		})
+	}()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client did not become ready")
+	}
+	select {
+	case port := <-observed:
+		if port != 8080 {
+			t.Fatalf("observed port = %d", port)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client did not receive current port snapshot")
+	}
+	cancel()
+	select {
+	case <-clientErr:
+	case <-time.After(time.Second):
+		t.Fatal("client did not stop")
+	}
+}
+
 func waitForSocket(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

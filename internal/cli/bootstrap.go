@@ -37,7 +37,8 @@ func (p remoteProbe) AssetName() string {
 
 func (r *Runner) ensureRemoteServer(ctx context.Context, sshArgs []string, features config.Features, remoteHome string) error {
 	return r.ensureBootstrappedServer(ctx, remoteHome, sshServerTransport{r: r, sshArgs: sshArgs}, serverBootstrapOptions{
-		Enabled: features.Enabled(),
+		Enabled:         features.Enabled(),
+		DisablePortScan: !features.AutoForward,
 	})
 }
 

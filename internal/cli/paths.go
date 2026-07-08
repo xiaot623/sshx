@@ -6,21 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/locald"
 )
 
-func domainSuffix(cfg config.DomainsFeature) string {
-	if cfg.Suffix != "" {
-		return cfg.Suffix
-	}
+func domainSuffix() string {
 	return defaultDomainSuffix()
 }
 
-func domainDNSAddr(cfg config.DomainsFeature) string {
-	if cfg.DNSAddr != "" {
-		return cfg.DNSAddr
-	}
+func domainDNSAddr() string {
 	if v := os.Getenv("SSHX_DOMAIN_DNS_ADDR"); v != "" {
 		return v
 	}

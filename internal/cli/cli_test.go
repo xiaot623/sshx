@@ -331,10 +331,12 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 
 	remotePort := freeLocalTCPPort(t)
 	resp, err := locald.ClientRequest(ctx, socket, locald.Request{
-		Type:       locald.TypeEnsurePort,
-		SSHPath:    "ssh",
-		Target:     "debian",
-		RemotePort: remotePort,
+		Type:         locald.TypeEnsureTargetPort,
+		SSHPath:      "ssh",
+		Target:       "debian",
+		RemotePort:   remotePort,
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -349,7 +351,7 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	want := "http://127.0.0.1:" + itoa(resp.LocalPort) + " -> debian:" + itoa(remotePort) + "\n"
+	want := "http://debian.it.sshx:" + itoa(remotePort) + " -> debian:" + itoa(remotePort) + "\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
@@ -401,21 +403,20 @@ commands:
 	}
 }
 
-func TestGlobalDomainFeatureEnsuresResolver(t *testing.T) {
+func TestGlobalAutoForwardFeatureEnsuresResolver(t *testing.T) {
 	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
-  domains:
-    enabled: true
+  autoForward: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var ensured bool
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
-	r.EnsureResolver = func(_ context.Context, cfg config.DomainsFeature) error {
-		ensured = cfg.Enabled
+	r.EnsureResolver = func(context.Context) error {
+		ensured = true
 		return nil
 	}
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
@@ -436,20 +437,19 @@ features:
 	}
 }
 
-func TestGlobalDomainFeatureStartsBridgeWithoutCommandBridge(t *testing.T) {
+func TestGlobalAutoForwardFeatureStartsBridgeWithoutCommandBridge(t *testing.T) {
 	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
-  domains:
-    enabled: true
+  autoForward: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var bridgeStarted bool
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
-	r.EnsureResolver = func(context.Context, config.DomainsFeature) error { return nil }
+	r.EnsureResolver = func(context.Context) error { return nil }
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
 		return sameVersionRemoteProbe(), nil
 	}

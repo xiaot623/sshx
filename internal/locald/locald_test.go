@@ -55,13 +55,12 @@ func TestDomainManagerCanBeSharedByRequests(t *testing.T) {
 	remotePort := freeTCPPort(t)
 	for i := 0; i < 2; i++ {
 		resp := s.handle(ctx, Request{
-			Type:           TypeEnsurePort,
-			SSHPath:        "ssh",
-			Target:         "debian",
-			RemotePort:     remotePort,
-			DomainsEnabled: true,
-			DomainSuffix:   "it.sshx",
-			DNSAddr:        dnsAddr,
+			Type:         TypeEnsureTargetPort,
+			SSHPath:      "ssh",
+			Target:       "debian",
+			RemotePort:   remotePort,
+			DomainSuffix: "it.sshx",
+			DNSAddr:      dnsAddr,
 		})
 		if !resp.OK {
 			t.Fatalf("ensure response = %#v", resp)
@@ -71,6 +70,9 @@ func TestDomainManagerCanBeSharedByRequests(t *testing.T) {
 		}
 		if resp.Domain != "debian.it.sshx" {
 			t.Fatalf("domain = %q", resp.Domain)
+		}
+		if resp.ListenIP != "127.64.0.2" {
+			t.Fatalf("listen IP = %q", resp.ListenIP)
 		}
 	}
 	if len(s.domains) != 1 {
@@ -85,7 +87,7 @@ func TestDomainManagerCanBeSharedByRequests(t *testing.T) {
 	}
 }
 
-func TestDomainForwardUsesNextPortWhenPreferredPortIsOccupied(t *testing.T) {
+func TestDomainForwardUsesTargetIPWhenLocalhostPortIsOccupied(t *testing.T) {
 	basePort := freeConsecutiveTCPPorts(t)
 	occupied, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoa(basePort)))
 	if err != nil {
@@ -103,19 +105,18 @@ func TestDomainForwardUsesNextPortWhenPreferredPortIsOccupied(t *testing.T) {
 		Stderr:         io.Discard,
 	}
 	resp := s.handle(ctx, Request{
-		Type:           TypeEnsurePort,
-		SSHPath:        "ssh",
-		Target:         "debian",
-		RemotePort:     basePort,
-		DomainsEnabled: true,
-		DomainSuffix:   "it.sshx",
-		DNSAddr:        "127.0.0.1:0",
+		Type:         TypeEnsureTargetPort,
+		SSHPath:      "ssh",
+		Target:       "debian",
+		RemotePort:   basePort,
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
 	})
 	if !resp.OK {
 		t.Fatalf("ensure response = %#v", resp)
 	}
-	if resp.LocalPort != basePort+1 {
-		t.Fatalf("local port = %d, want %d", resp.LocalPort, basePort+1)
+	if resp.LocalPort != basePort || resp.ListenIP != "127.64.0.2" {
+		t.Fatalf("response = %#v, want target IP port %d", resp, basePort)
 	}
 }
 
@@ -131,10 +132,12 @@ func TestListPorts(t *testing.T) {
 	}
 	remotePort := freeTCPPort(t)
 	ensure := s.handle(ctx, Request{
-		Type:       TypeEnsurePort,
-		SSHPath:    "ssh",
-		Target:     "debian",
-		RemotePort: remotePort,
+		Type:         TypeEnsureTargetPort,
+		SSHPath:      "ssh",
+		Target:       "debian",
+		RemotePort:   remotePort,
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
 	})
 	if !ensure.OK {
 		t.Fatalf("ensure response = %#v", ensure)
@@ -144,7 +147,7 @@ func TestListPorts(t *testing.T) {
 		t.Fatalf("list response = %#v", resp)
 	}
 	got := resp.Forwards[0]
-	if got.Target != "debian" || got.RemotePort != remotePort || got.LocalPort == 0 {
+	if got.Target != "debian" || got.RemotePort != remotePort || got.LocalPort != remotePort || got.ListenIP != "127.64.0.2" {
 		t.Fatalf("forward = %#v", got)
 	}
 }
@@ -161,13 +164,12 @@ func TestListPortsIncludesDomainForDirectTarget(t *testing.T) {
 	}
 	remotePort := freeTCPPort(t)
 	ensure := s.handle(ctx, Request{
-		Type:           TypeEnsurePort,
-		SSHPath:        "ssh",
-		Target:         "debian@192.168.1.100",
-		RemotePort:     remotePort,
-		DomainsEnabled: true,
-		DomainSuffix:   "it.sshx",
-		DNSAddr:        "127.0.0.1:0",
+		Type:         TypeEnsureTargetPort,
+		SSHPath:      "ssh",
+		Target:       "debian@192.168.1.100",
+		RemotePort:   remotePort,
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
 	})
 	if !ensure.OK {
 		t.Fatalf("ensure response = %#v", ensure)
@@ -180,8 +182,104 @@ func TestListPortsIncludesDomainForDirectTarget(t *testing.T) {
 	if got.Target != "debian@192.168.1.100" ||
 		got.Domain != "debian-192-168-1-100.it.sshx" ||
 		got.RemotePort != remotePort ||
-		got.LocalPort == 0 {
+		got.LocalPort != remotePort ||
+		got.ListenIP != "127.64.0.2" {
 		t.Fatalf("forward = %#v", got)
+	}
+}
+
+func TestMultipleTargetsCanExposeSameRemotePort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{SocketPath: shortSocketPath(t), Stderr: io.Discard}
+	remotePort := freeTCPPort(t)
+	for _, target := range []string{"debian", "ubuntu"} {
+		resp := s.handle(ctx, Request{
+			Type:         TypeEnsureTargetPort,
+			SSHPath:      "ssh",
+			Target:       target,
+			SSHArgs:      []string{target},
+			RemotePort:   remotePort,
+			DomainSuffix: "it.sshx",
+			DNSAddr:      "127.0.0.1:0",
+		})
+		if !resp.OK {
+			t.Fatalf("ensure %s response = %#v", target, resp)
+		}
+	}
+	resp := s.handle(ctx, Request{Type: TypeListPorts})
+	if !resp.OK || len(resp.Forwards) != 2 {
+		t.Fatalf("list response = %#v", resp)
+	}
+	if resp.Forwards[0].ListenIP == resp.Forwards[1].ListenIP {
+		t.Fatalf("targets shared listen IP: %#v", resp.Forwards)
+	}
+	for _, fwd := range resp.Forwards {
+		if fwd.RemotePort != remotePort || fwd.LocalPort != remotePort {
+			t.Fatalf("forward = %#v", fwd)
+		}
+	}
+}
+
+func TestRemoveTargetPortStopsListingForward(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{SocketPath: shortSocketPath(t), Stderr: io.Discard}
+	remotePort := freeTCPPort(t)
+	req := Request{
+		SSHPath:      "ssh",
+		Target:       "debian",
+		RemotePort:   remotePort,
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
+	}
+	ensure := s.handle(ctx, withType(req, TypeEnsureTargetPort))
+	if !ensure.OK {
+		t.Fatalf("ensure response = %#v", ensure)
+	}
+	remove := s.handle(ctx, withType(req, TypeRemoveTargetPort))
+	if !remove.OK {
+		t.Fatalf("remove response = %#v", remove)
+	}
+	resp := s.handle(ctx, Request{Type: TypeListPorts})
+	if !resp.OK || len(resp.Forwards) != 0 {
+		t.Fatalf("list response = %#v", resp)
+	}
+}
+
+func TestUnregisterTargetCleansAfterLastReference(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{SocketPath: shortSocketPath(t), Stderr: io.Discard}
+	remotePort := freeTCPPort(t)
+	req := Request{
+		SSHPath:      "ssh",
+		Target:       "debian",
+		RemotePort:   remotePort,
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
+	}
+	for i := 0; i < 2; i++ {
+		if resp := s.handle(ctx, withType(req, TypeRegisterTarget)); !resp.OK {
+			t.Fatalf("register response = %#v", resp)
+		}
+	}
+	if resp := s.handle(ctx, withType(req, TypeEnsureTargetPort)); !resp.OK {
+		t.Fatalf("ensure response = %#v", resp)
+	}
+	if resp := s.handle(ctx, withType(req, TypeUnregisterTarget)); !resp.OK {
+		t.Fatalf("first unregister response = %#v", resp)
+	}
+	list := s.handle(ctx, Request{Type: TypeListPorts})
+	if !list.OK || len(list.Forwards) != 1 {
+		t.Fatalf("list after first unregister = %#v", list)
+	}
+	if resp := s.handle(ctx, withType(req, TypeUnregisterTarget)); !resp.OK {
+		t.Fatalf("second unregister response = %#v", resp)
+	}
+	list = s.handle(ctx, Request{Type: TypeListPorts})
+	if !list.OK || len(list.Forwards) != 0 {
+		t.Fatalf("list after second unregister = %#v", list)
 	}
 }
 
@@ -196,6 +294,11 @@ func waitForSocket(t *testing.T, path string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("socket %s was not created", path)
+}
+
+func withType(req Request, typ string) Request {
+	req.Type = typ
+	return req
 }
 
 func shortSocketPath(t *testing.T) string {
