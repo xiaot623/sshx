@@ -12,6 +12,13 @@ import (
 
 var ErrUnsupported = errors.New("port scanning is only supported on Linux servers")
 
+// minForwardablePort is the lowest port sshx will auto-forward. Ports below
+// 1024 are privileged: unprivileged users cannot bind them locally, and
+// forwarding them (e.g. sshd on :22) is rarely useful — the session is
+// already established over SSH. Manual `sshx forward add` is unaffected since
+// it bypasses the scanner.
+const minForwardablePort = 1024
+
 func parseProcNetTCP(data string, ipv6 bool) ([]int, error) {
 	seen := map[int]bool{}
 	scanner := bufio.NewScanner(strings.NewReader(data))
@@ -43,6 +50,9 @@ func parseProcNetTCP(data string, ipv6 bool) ([]int, error) {
 		}
 		p, err := strconv.ParseInt(port, 16, 32)
 		if err != nil || p <= 0 || p > 65535 {
+			continue
+		}
+		if p < minForwardablePort {
 			continue
 		}
 		seen[int(p)] = true

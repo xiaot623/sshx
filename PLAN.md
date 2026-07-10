@@ -143,7 +143,7 @@ v1 uses batch stdin: all stdin data is collected and sent before the command sta
 
 ### Ports & Domains
 
-- The remote Server sniffs TCP listening ports bound to the loopback interface (`127.0.0.1` / `::1`) and the wildcard addresses (`0.0.0.0` / `::`). Wildcard listeners are reachable via `127.0.0.1` on the remote, so they are forwarded identically. Bindings on other interfaces are not sniffed.
+- The remote Server sniffs TCP listening ports bound to the loopback interface (`127.0.0.1` / `::1`) and the wildcard addresses (`0.0.0.0` / `::`). Wildcard listeners are reachable via `127.0.0.1` on the remote, so they are forwarded identically. Bindings on other interfaces are not sniffed. Privileged ports (< 1024) are not auto-forwarded (unprivileged users cannot bind them locally); manual `sshx forward add` is unaffected.
 - The Server sends a `port.observed` message when a new port is detected.
 - The local daemon creates forwardings and domain routes.
 - Domain suffix: `${user}.sshx` (e.g., `xiaot.sshx`). Avoids `.local` which conflicts with mDNS/Bonjour.
