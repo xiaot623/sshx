@@ -12,12 +12,16 @@ import (
 
 type Manager struct {
 	ctx     context.Context
+	cancel  context.CancelFunc
 	sshPath string
 	sshArgs []string
 	stderr  io.Writer
 
 	mu       sync.Mutex
 	byRemote map[int]*Forward
+	active   map[net.Conn]struct{}
+	stopped  bool
+	wg       sync.WaitGroup
 }
 
 type Forward struct {
@@ -34,17 +38,24 @@ type Entry struct {
 }
 
 func NewManager(ctx context.Context, sshPath string, sshArgs []string, stderr io.Writer) *Manager {
+	managerCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		ctx:      ctx,
+		ctx:      managerCtx,
+		cancel:   cancel,
 		sshPath:  sshPath,
 		sshArgs:  append([]string(nil), sshArgs...),
 		stderr:   stderr,
 		byRemote: map[int]*Forward{},
+		active:   map[net.Conn]struct{}{},
 	}
 }
 
 func (m *Manager) Ensure(remotePort int, listenIP string) (*Forward, error) {
 	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return nil, errors.New("forward manager is stopped")
+	}
 	if f := m.byRemote[remotePort]; f != nil {
 		m.mu.Unlock()
 		return f, nil
@@ -95,11 +106,29 @@ func (m *Manager) Remove(remotePort int) {
 
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.stopped {
+		m.mu.Unlock()
+		return
+	}
+	m.stopped = true
+	forwards := make([]*Forward, 0, len(m.byRemote))
 	for _, f := range m.byRemote {
-		_ = f.listener.Close()
+		forwards = append(forwards, f)
+	}
+	connections := make([]net.Conn, 0, len(m.active))
+	for conn := range m.active {
+		connections = append(connections, conn)
 	}
 	m.byRemote = map[int]*Forward{}
+	m.mu.Unlock()
+	m.cancel()
+	for _, f := range forwards {
+		_ = f.listener.Close()
+	}
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	m.wg.Wait()
 }
 
 func (m *Manager) acceptLoop(f *Forward) {
@@ -108,7 +137,24 @@ func (m *Manager) acceptLoop(f *Forward) {
 		if err != nil {
 			return
 		}
-		go m.handleConn(conn, f.RemotePort)
+		m.mu.Lock()
+		if m.stopped {
+			m.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		m.active[conn] = struct{}{}
+		m.wg.Add(1)
+		m.mu.Unlock()
+		go func() {
+			defer m.wg.Done()
+			defer func() {
+				m.mu.Lock()
+				delete(m.active, conn)
+				m.mu.Unlock()
+			}()
+			m.handleConn(conn, f.RemotePort)
+		}()
 	}
 }
 

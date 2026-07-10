@@ -62,7 +62,7 @@ sshx uses one long-running Server daemon per client target alias, shared by that
 └──────────────────────────────┘     └──────────────────────────────┘
 ```
 
-- **Server lifecycle**: The first matched `sshx <host>` starts the Server on the remote. The Server stays alive after clients disconnect (configurable idle timeout, e.g., exit after 10 minutes with no connected clients).
+- **Server lifecycle**: The first matched `sshx <host>` starts the Server on the remote. Clients hold heartbeat-backed leases; the Server drains and exits after the last lease closes or expires.
 - **Port forwarding**: Centrally managed by the Server — no port conflicts across concurrent terminals.
 - **Discovery**: The client maintains a stable target-alias → UUID mapping locally. The remote Server writes connection info under `~/.sshx_server/<uuid>/server-info` (Unix socket path + auth token). Each new client terminal for that alias reads this isolated file to connect.
 
@@ -228,7 +228,7 @@ SSHX_DISABLE=1 sshx remote
 
 - The first matched connection installs the remote binary and starts the shared Server.
 - A second concurrent client connects to the same Server (shared port forwarding, domain routing).
-- The Server stays alive through brief disconnects (idle timeout).
+- The local daemon exits with its last client lease. The remote Server exits after its last heartbeat-backed bridge lease closes or expires.
 - On Server exception, fall back to ordinary SSH (unless `strict: true`).
 
 ### Feature Integration

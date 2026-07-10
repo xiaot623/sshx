@@ -13,10 +13,13 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xiaot623/sshx/internal/ports"
+	"github.com/xiaot623/sshx/internal/processlock"
 	"github.com/xiaot623/sshx/internal/protocol"
+	"github.com/xiaot623/sshx/internal/version"
 )
 
 var ErrNoClient = errors.New("no active sshx client bridge session")
@@ -30,89 +33,169 @@ type CommandResult struct {
 type CommandAllowed func([]string) bool
 
 type ClientOptions struct {
-	Ready          chan<- error
-	Allow          CommandAllowed
-	OnPortObserved func(port int)
-	OnPortGone     func(port int)
+	Ready             chan<- error
+	Allow             CommandAllowed
+	OnPortObserved    func(port int)
+	OnPortGone        func(port int)
+	AppVersion        string
+	SessionID         string
+	HeartbeatInterval time.Duration
+	HeartbeatTimeout  time.Duration
 }
 
-const portGoneMissingScans = 2
+const (
+	portGoneMissingScans      = 2
+	DefaultHeartbeatInterval  = 5 * time.Second
+	DefaultHeartbeatTimeout   = 15 * time.Second
+	DefaultServerDrainTimeout = 500 * time.Millisecond
+	DefaultServerStartTimeout = 10 * time.Second
+)
 
 type Server struct {
 	SocketPath       string
 	InfoPath         string
 	Token            string
 	PortScanInterval time.Duration
-	IdleTimeout      time.Duration
+	StartupTimeout   time.Duration
+	HeartbeatTimeout time.Duration
+	DrainTimeout     time.Duration
+	Version          string
 
 	mu            sync.Mutex
 	clients       []*clientConn
 	observedPorts map[int]bool
 	portMisses    map[int]int
 	lastActive    time.Time
+	everHadClient bool
+	shutdown      chan struct{}
+	shutdownOnce  sync.Once
+	listener      net.Listener
+	cancel        context.CancelFunc
+	draining      bool
+	connections   map[net.Conn]struct{}
+	connWG        sync.WaitGroup
 }
 
 type clientConn struct {
-	enc *protocol.Encoder
-	dec *protocol.Decoder
-	c   net.Conn
-	mu  sync.Mutex
+	enc       *protocol.Encoder
+	dec       *protocol.Decoder
+	c         net.Conn
+	writeMu   sync.Mutex
+	pendingMu sync.Mutex
+	pending   map[string]chan protocol.Frame
+	lastSeen  time.Time
+	closeOnce sync.Once
+	done      chan struct{}
 }
 
 func (s *Server) Serve(ctx context.Context) error {
 	if s.SocketPath == "" {
 		return errors.New("socket path is required")
 	}
+	if s.Version == "" {
+		s.Version = version.Version
+	}
+	if s.HeartbeatTimeout <= 0 {
+		s.HeartbeatTimeout = DefaultHeartbeatTimeout
+	}
+	if s.DrainTimeout <= 0 {
+		s.DrainTimeout = DefaultServerDrainTimeout
+	}
+	if s.StartupTimeout <= 0 {
+		s.StartupTimeout = DefaultServerStartTimeout
+	}
+	if s.shutdown == nil {
+		s.shutdown = make(chan struct{})
+	}
+	if s.connections == nil {
+		s.connections = map[net.Conn]struct{}{}
+	}
+	serveCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	defer cancel()
 	if err := os.MkdirAll(filepath.Dir(s.SocketPath), 0o700); err != nil {
 		return err
 	}
+	lock, err := processlock.Acquire(s.SocketPath + ".lock")
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	_ = os.Remove(s.SocketPath)
 	ln, err := net.Listen("unix", s.SocketPath)
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
-	defer os.Remove(s.SocketPath)
+	s.listener = ln
+	ownedSocket, _ := os.Stat(s.SocketPath)
+	defer removeSocketIfOwned(s.SocketPath, ownedSocket)
+	defer func() {
+		s.closeConnections()
+		s.connWG.Wait()
+	}()
 	s.markActive()
 	if err := os.Chmod(s.SocketPath, 0o600); err != nil {
 		return err
 	}
 	if s.InfoPath != "" {
-		if err := WriteServerInfo(s.InfoPath, s.SocketPath, s.Token); err != nil {
+		if err := WriteServerInfo(s.InfoPath, s.SocketPath, s.Token, s.Version); err != nil {
 			return err
 		}
+		defer os.Remove(s.InfoPath)
 	}
 	if s.PortScanInterval > 0 {
-		go s.observePorts(ctx)
+		go s.observePorts(serveCtx)
 	}
-	if s.IdleTimeout > 0 {
-		go s.monitorIdle(ctx, ln)
-	}
+	go s.monitorLeases(serveCtx)
 
 	go func() {
-		<-ctx.Done()
+		<-serveCtx.Done()
 		_ = ln.Close()
 	}()
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			if serveCtx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
 			return err
 		}
-		go s.handleConn(c)
+		s.mu.Lock()
+		if s.draining {
+			s.mu.Unlock()
+			_ = c.Close()
+			continue
+		}
+		s.connections[c] = struct{}{}
+		s.connWG.Add(1)
+		s.mu.Unlock()
+		go func() {
+			defer s.connWG.Done()
+			defer s.removeConnection(c)
+			s.handleConn(c)
+		}()
 	}
 }
 
-func (s *Server) monitorIdle(ctx context.Context, ln net.Listener) {
-	interval := time.Second
-	if s.IdleTimeout > 0 && s.IdleTimeout/2 < interval {
-		interval = s.IdleTimeout / 2
-		if interval <= 0 {
-			interval = time.Millisecond
-		}
+func removeSocketIfOwned(path string, owned os.FileInfo) {
+	if owned == nil {
+		return
+	}
+	current, err := os.Stat(path)
+	if err == nil && os.SameFile(owned, current) {
+		_ = os.Remove(path)
+	}
+}
+
+func (s *Server) monitorLeases(ctx context.Context) {
+	interval := s.HeartbeatTimeout / 3
+	if interval > 250*time.Millisecond {
+		interval = 250 * time.Millisecond
+	}
+	if interval <= 0 {
+		interval = time.Millisecond
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -121,21 +204,40 @@ func (s *Server) monitorIdle(ctx context.Context, ln net.Listener) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if s.isIdleExpired() {
-				_ = ln.Close()
+			now := time.Now()
+			s.mu.Lock()
+			clients := append([]*clientConn(nil), s.clients...)
+			everHad := s.everHadClient
+			lastActive := s.lastActive
+			s.mu.Unlock()
+			for _, client := range clients {
+				client.pendingMu.Lock()
+				lastSeen := client.lastSeen
+				client.pendingMu.Unlock()
+				if now.Sub(lastSeen) >= s.HeartbeatTimeout {
+					s.removeClient(client)
+				}
+			}
+			s.mu.Lock()
+			empty := len(s.clients) == 0
+			lastActive = s.lastActive
+			everHad = s.everHadClient
+			s.mu.Unlock()
+			shouldDrain := empty && ((everHad && now.Sub(lastActive) >= s.DrainTimeout) || (!everHad && now.Sub(lastActive) >= s.StartupTimeout))
+			if shouldDrain {
+				s.mu.Lock()
+				shouldDrain = len(s.clients) == 0
+				if shouldDrain {
+					s.draining = true
+				}
+				s.mu.Unlock()
+			}
+			if shouldDrain {
+				s.initiateShutdown()
 				return
 			}
 		}
 	}
-}
-
-func (s *Server) isIdleExpired() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.clients) > 0 {
-		return false
-	}
-	return !s.lastActive.IsZero() && time.Since(s.lastActive) >= s.IdleTimeout
 }
 
 func (s *Server) observePorts(ctx context.Context) {
@@ -240,8 +342,8 @@ func (s *Server) handleConn(c net.Conn) {
 		_ = c.Close()
 		return
 	}
-	if hello.Type != protocol.TypeHello || hello.ProtocolVersion != protocol.Version {
-		_ = enc.Encode(protocol.Frame{Type: protocol.TypeError, Error: "unsupported sshx protocol handshake"})
+	if hello.Type != protocol.TypeHello {
+		_ = enc.Encode(protocol.Frame{Type: protocol.TypeError, Error: "expected sshx hello"})
 		_ = c.Close()
 		return
 	}
@@ -250,15 +352,32 @@ func (s *Server) handleConn(c net.Conn) {
 		_ = c.Close()
 		return
 	}
+	if hello.ProtocolVersion != protocol.Version {
+		_ = enc.Encode(protocol.Frame{Type: protocol.TypeServerDrain, AppVersion: s.Version, ProtocolVersion: protocol.Version, Error: "sshx protocol version changed"})
+		_ = c.Close()
+		s.initiateShutdown()
+		return
+	}
 	switch hello.Role {
 	case protocol.RoleClient:
-		cc := &clientConn{enc: enc, dec: dec, c: c}
-		s.addClient(cc)
-		if err := enc.Encode(protocol.Frame{Type: protocol.TypeCapabilities, Capabilities: []string{"command.exec.batch-stdin"}}); err != nil {
+		if hello.AppVersion == "" || hello.AppVersion != s.Version {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeServerDrain, AppVersion: s.Version, ProtocolVersion: protocol.Version, Error: "sshx application version changed"})
+			_ = c.Close()
+			s.initiateShutdown()
+			return
+		}
+		cc := &clientConn{enc: enc, dec: dec, c: c, pending: map[string]chan protocol.Frame{}, lastSeen: time.Now(), done: make(chan struct{})}
+		if !s.addClient(cc) {
+			_ = cc.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolVersion: protocol.Version, AppVersion: s.Version, Error: "sshx server is draining"})
+			cc.close()
+			return
+		}
+		if err := cc.send(protocol.Frame{Type: protocol.TypeCapabilities, ProtocolVersion: protocol.Version, AppVersion: s.Version, Capabilities: []string{"command.exec.batch-stdin", "heartbeat.v1"}}); err != nil {
 			s.removeClient(cc)
 			return
 		}
 		s.sendCurrentPorts(cc)
+		cc.readLoop(s)
 	case protocol.RoleRequester:
 		s.handleRequester(c, dec, enc)
 	default:
@@ -289,7 +408,7 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: msg})
 			return
 		}
-		resp, err := client.roundTrip(req)
+		resp, err := client.request(req)
 		if err != nil {
 			lastErr = err
 			s.removeClient(client)
@@ -300,24 +419,35 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 	}
 }
 
-func (s *Server) addClient(c *clientConn) {
+func (s *Server) addClient(c *clientConn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.draining {
+		return false
+	}
 	s.clients = append(s.clients, c)
+	s.everHadClient = true
 	s.lastActive = time.Now()
+	return true
 }
 
 func (s *Server) removeClient(c *clientConn) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	found := false
 	for i, existing := range s.clients {
 		if existing == c {
 			s.clients = append(s.clients[:i], s.clients[i+1:]...)
+			found = true
 			break
 		}
 	}
-	_ = c.c.Close()
-	s.lastActive = time.Now()
+	if found {
+		s.lastActive = time.Now()
+	}
+	s.mu.Unlock()
+	if found {
+		c.close()
+	}
 }
 
 func (s *Server) markActive() {
@@ -335,26 +465,114 @@ func (s *Server) pickClient() *clientConn {
 	return s.clients[0]
 }
 
-func (c *clientConn) roundTrip(req protocol.Frame) (protocol.Frame, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.enc.Encode(req); err != nil {
+func (c *clientConn) request(req protocol.Frame) (protocol.Frame, error) {
+	responses := make(chan protocol.Frame, 1)
+	c.pendingMu.Lock()
+	c.pending[req.ID] = responses
+	c.pendingMu.Unlock()
+	defer func() {
+		c.pendingMu.Lock()
+		delete(c.pending, req.ID)
+		c.pendingMu.Unlock()
+	}()
+	if err := c.send(req); err != nil {
 		return protocol.Frame{}, err
 	}
-	resp, err := c.dec.Decode()
-	if err != nil {
-		return protocol.Frame{}, err
+	select {
+	case resp := <-responses:
+		return resp, nil
+	case <-c.done:
+		return protocol.Frame{}, io.EOF
+	case <-time.After(30 * time.Second):
+		return protocol.Frame{}, errors.New("timed out waiting for bridge command result")
 	}
-	if resp.ID == "" {
-		resp.ID = req.ID
-	}
-	return resp, nil
 }
 
 func (c *clientConn) send(frame protocol.Frame) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	return c.enc.Encode(frame)
+}
+
+func (c *clientConn) readLoop(s *Server) {
+	defer s.removeClient(c)
+	for {
+		frame, err := c.dec.Decode()
+		if err != nil {
+			return
+		}
+		switch frame.Type {
+		case protocol.TypeHeartbeat:
+			if frame.ProtocolVersion != protocol.Version || frame.AppVersion != s.Version {
+				_ = c.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolVersion: protocol.Version, AppVersion: s.Version, Error: "sshx version changed"})
+				s.initiateShutdown()
+				return
+			}
+			c.pendingMu.Lock()
+			c.lastSeen = time.Now()
+			c.pendingMu.Unlock()
+			if err := c.send(protocol.Frame{Type: protocol.TypeHeartbeatAck, ProtocolVersion: protocol.Version, AppVersion: s.Version, SessionID: frame.SessionID, Sequence: frame.Sequence}); err != nil {
+				return
+			}
+		case protocol.TypeCommandResult, protocol.TypeCommandError:
+			c.pendingMu.Lock()
+			responses := c.pending[frame.ID]
+			c.pendingMu.Unlock()
+			if responses != nil {
+				select {
+				case responses <- frame:
+				default:
+				}
+			}
+		}
+	}
+}
+
+func (c *clientConn) close() {
+	c.closeOnce.Do(func() {
+		_ = c.c.Close()
+		close(c.done)
+		c.pendingMu.Lock()
+		for id := range c.pending {
+			delete(c.pending, id)
+		}
+		c.pendingMu.Unlock()
+	})
+}
+
+func (s *Server) initiateShutdown() {
+	s.shutdownOnce.Do(func() {
+		s.mu.Lock()
+		s.draining = true
+		s.mu.Unlock()
+		if s.shutdown != nil {
+			close(s.shutdown)
+		}
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+	})
+}
+
+func (s *Server) closeConnections() {
+	s.mu.Lock()
+	connections := make([]net.Conn, 0, len(s.connections))
+	for conn := range s.connections {
+		connections = append(connections, conn)
+	}
+	s.mu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+}
+
+func (s *Server) removeConnection(conn net.Conn) {
+	s.mu.Lock()
+	delete(s.connections, conn)
+	s.mu.Unlock()
 }
 
 func RequestCommand(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd string, token ...string) (CommandResult, error) {
@@ -444,16 +662,59 @@ func RunClientConnReadyPolicy(ctx context.Context, c io.ReadWriteCloser, ready c
 
 func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts ClientOptions, token ...string) error {
 	defer c.Close()
+	if opts.AppVersion == "" {
+		opts.AppVersion = version.Version
+	}
+	if opts.SessionID == "" {
+		opts.SessionID = fmt.Sprintf("bridge-%d", time.Now().UnixNano())
+	}
+	if opts.HeartbeatInterval <= 0 {
+		opts.HeartbeatInterval = DefaultHeartbeatInterval
+	}
+	if opts.HeartbeatTimeout <= 0 {
+		opts.HeartbeatTimeout = DefaultHeartbeatTimeout
+	}
 	go func() {
 		<-ctx.Done()
 		_ = c.Close()
 	}()
 	enc := protocol.NewEncoder(c)
 	dec := protocol.NewDecoder(c)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, Role: protocol.RoleClient, Token: firstToken(token)}); err != nil {
+	var writeMu sync.Mutex
+	send := func(frame protocol.Frame) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return enc.Encode(frame)
+	}
+	if err := send(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, AppVersion: opts.AppVersion, SessionID: opts.SessionID, Role: protocol.RoleClient, Token: firstToken(token)}); err != nil {
 		signalReady(opts.Ready, err)
 		return err
 	}
+	clientCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var lastAck atomic.Int64
+	lastAck.Store(time.Now().UnixNano())
+	go func() {
+		ticker := time.NewTicker(opts.HeartbeatInterval)
+		defer ticker.Stop()
+		var sequence uint64
+		for {
+			select {
+			case <-clientCtx.Done():
+				return
+			case <-ticker.C:
+				if time.Since(time.Unix(0, lastAck.Load())) >= opts.HeartbeatTimeout {
+					_ = c.Close()
+					return
+				}
+				sequence++
+				if err := send(protocol.Frame{Type: protocol.TypeHeartbeat, ProtocolVersion: protocol.Version, AppVersion: opts.AppVersion, SessionID: opts.SessionID, Sequence: sequence}); err != nil {
+					_ = c.Close()
+					return
+				}
+			}
+		}
+	}()
 	readySignaled := false
 	for {
 		frame, err := dec.Decode()
@@ -470,9 +731,27 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 			return err
 		}
 		if !readySignaled && frame.Type == protocol.TypeCapabilities {
+			if frame.ProtocolVersion != protocol.Version || frame.AppVersion != opts.AppVersion {
+				err := errors.New("sshx bridge version changed")
+				signalReady(opts.Ready, err)
+				return err
+			}
 			readySignaled = true
 			signalReady(opts.Ready, nil)
 			continue
+		}
+		if frame.Type == protocol.TypeHeartbeatAck {
+			if frame.ProtocolVersion != protocol.Version || frame.AppVersion != opts.AppVersion {
+				return errors.New("sshx bridge heartbeat version changed")
+			}
+			lastAck.Store(time.Now().UnixNano())
+			continue
+		}
+		if frame.Type == protocol.TypeServerDrain {
+			if !readySignaled {
+				signalReady(opts.Ready, errors.New(frame.Error))
+			}
+			return fmt.Errorf("sshx server draining: %s", frame.Error)
 		}
 		if frame.Type == protocol.TypePortObserved {
 			if opts.OnPortObserved != nil && frame.Port > 0 {
@@ -495,10 +774,10 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 			}
 			continue
 		}
-		resp := ExecuteLocal(ctx, frame)
-		if err := enc.Encode(resp); err != nil {
-			return err
-		}
+		go func(frame protocol.Frame) {
+			resp := ExecuteLocal(clientCtx, frame)
+			_ = send(resp)
+		}(frame)
 	}
 }
 

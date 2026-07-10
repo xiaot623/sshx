@@ -61,6 +61,14 @@ func (r *Runner) ensureBootstrappedServer(ctx context.Context, remoteHome string
 	if probe.Running && probe.ServerVersion == targetVersion {
 		return nil
 	}
+	if probe.Running {
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := transport.ExecScript(stopCtx, stopServerScript(remoteHome)); err != nil {
+			cancel()
+			return err
+		}
+		cancel()
+	}
 	if probe.BinaryVersion != targetVersion {
 		localBinary, err := r.DownloadBinary(ctx, targetVersion, probe.AssetName())
 		if err != nil {
@@ -162,6 +170,19 @@ func startServerScript(remoteHome string, opts serverBootstrapOptions) string {
 		"mkdir -p \"$SSHX_SERVER_HOME\"",
 		"rm -f \"$SSHX_SERVER_HOME/sock\" \"$SSHX_SERVER_HOME/server-info\"",
 		serverCmd,
+	}, "; ")
+}
+
+func stopServerScript(remoteHome string) string {
+	return strings.Join([]string{
+		remoteServerEnvScript(remoteHome),
+		"pid=",
+		"if test -f \"$SSHX_SERVER_HOME/server-info\"; then pid=$(sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' \"$SSHX_SERVER_HOME/server-info\" | head -n 1 || true); fi",
+		"if test -n \"$pid\"; then kill \"$pid\" 2>/dev/null || true; fi",
+		"if test -z \"$pid\" && test -d /proc; then for proc in /proc/[0-9]*; do test -r \"$proc/cmdline\" || continue; cmd=$(tr '\\000' ' ' < \"$proc/cmdline\" 2>/dev/null || true); case \"$cmd\" in *\"server --socket $SSHX_SERVER_HOME/sock\"*) kill \"${proc##*/}\" 2>/dev/null || true ;; esac; done; fi",
+		"i=0",
+		"while { test -S \"$SSHX_SERVER_HOME/sock\" || test -f \"$SSHX_SERVER_HOME/sock.lock\"; } && test $i -lt 30; do i=$((i+1)); sleep 0.1; done",
+		"rm -f \"$SSHX_SERVER_HOME/sock\" \"$SSHX_SERVER_HOME/server-info\"",
 	}, "; ")
 }
 

@@ -2,15 +2,19 @@ package locald
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/xiaot623/sshx/internal/domain"
 	"github.com/xiaot623/sshx/internal/forward"
+	"github.com/xiaot623/sshx/internal/protocol"
 )
 
 func TestPing(t *testing.T) {
@@ -41,6 +45,7 @@ func TestPing(t *testing.T) {
 }
 
 func TestDomainManagerCanBeSharedByRequests(t *testing.T) {
+	requireTargetLoopback(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	socket := shortSocketPath(t)
@@ -88,6 +93,7 @@ func TestDomainManagerCanBeSharedByRequests(t *testing.T) {
 }
 
 func TestDomainForwardUsesTargetIPWhenLocalhostPortIsOccupied(t *testing.T) {
+	requireTargetLoopback(t)
 	basePort := freeConsecutiveTCPPorts(t)
 	occupied, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoa(basePort)))
 	if err != nil {
@@ -121,6 +127,7 @@ func TestDomainForwardUsesTargetIPWhenLocalhostPortIsOccupied(t *testing.T) {
 }
 
 func TestListPorts(t *testing.T) {
+	requireTargetLoopback(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
@@ -153,6 +160,7 @@ func TestListPorts(t *testing.T) {
 }
 
 func TestListPortsIncludesDomainForDirectTarget(t *testing.T) {
+	requireTargetLoopback(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
@@ -189,6 +197,7 @@ func TestListPortsIncludesDomainForDirectTarget(t *testing.T) {
 }
 
 func TestMultipleTargetsCanExposeSameRemotePort(t *testing.T) {
+	requireTargetLoopback(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{SocketPath: shortSocketPath(t), Stderr: io.Discard}
@@ -222,6 +231,7 @@ func TestMultipleTargetsCanExposeSameRemotePort(t *testing.T) {
 }
 
 func TestRemoveTargetPortStopsListingForward(t *testing.T) {
+	requireTargetLoopback(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{SocketPath: shortSocketPath(t), Stderr: io.Discard}
@@ -247,39 +257,159 @@ func TestRemoveTargetPortStopsListingForward(t *testing.T) {
 	}
 }
 
-func TestUnregisterTargetCleansAfterLastReference(t *testing.T) {
+func TestLastSessionClosesLocalDaemon(t *testing.T) {
+	ctx := context.Background()
+	socket := shortSocketPath(t)
+	dnsAddr := freeUDPAddr(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "test-version", LeaseTimeout: 100 * time.Millisecond}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+	session, err := OpenSession(ctx, socket, Request{
+		SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: dnsAddr,
+		SessionID: "session-1", AppVersion: "test-version",
+	}, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("local daemon did not exit after its last session closed")
+	}
+	if _, err := os.Stat(socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket still exists: %v", err)
+	}
+	addr, err := net.ResolveUDPAddr("udp", dnsAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Fatalf("DNS listener was not released: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestLocalDaemonWaitsForAllSessions(t *testing.T) {
+	ctx := context.Background()
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "test-version"}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+	var sessions []*Session
+	for _, id := range []string{"session-1", "session-2"} {
+		session, err := OpenSession(ctx, socket, Request{
+			SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
+			SessionID: id, AppVersion: "test-version",
+		}, 10*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessions = append(sessions, session)
+	}
+	_ = sessions[0].Close()
+	select {
+	case err := <-errCh:
+		t.Fatalf("daemon exited with another session active: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	_ = sessions[1].Close()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not exit after all sessions closed")
+	}
+}
+
+func TestLocalDaemonExpiresSessionWithoutHeartbeat(t *testing.T) {
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "test-version", LeaseTimeout: 30 * time.Millisecond}).Serve(context.Background())
+	}()
+	waitForSocket(t, socket)
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	request := Request{
+		Type: TypeOpenSession, SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
+		SessionID: "session-1", AppVersion: "test-version", ProtocolVersion: protocol.Version,
+	}
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		t.Fatal(err)
+	}
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil || !resp.OK {
+		t.Fatalf("open response = %#v, %v", resp, err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not expire session without heartbeat")
+	}
+}
+
+func TestLocalDaemonExitsOnVersionChange(t *testing.T) {
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "1.0.0"}).Serve(context.Background())
+	}()
+	waitForSocket(t, socket)
+	_, err := OpenSession(context.Background(), socket, Request{
+		SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
+		SessionID: "session-1", AppVersion: "2.0.0",
+	}, 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("version-changing session unexpectedly opened")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not exit after version change")
+	}
+}
+
+func TestPortMutationRequiresActiveSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := &Server{SocketPath: shortSocketPath(t), Stderr: io.Discard}
-	remotePort := freeTCPPort(t)
-	req := Request{
-		SSHPath:      "ssh",
-		Target:       "debian",
-		RemotePort:   remotePort,
-		DomainSuffix: "it.sshx",
-		DNSAddr:      "127.0.0.1:0",
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "test-version"}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+	_, err := ClientRequest(ctx, socket, Request{
+		Type: TypeEnsureTargetPort, SSHPath: "ssh", Target: "debian", RemotePort: 8080,
+		DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
+	})
+	if err == nil || !strings.Contains(err.Error(), "active session lease") {
+		t.Fatalf("error = %v", err)
 	}
-	for i := 0; i < 2; i++ {
-		if resp := s.handle(ctx, withType(req, TypeRegisterTarget)); !resp.OK {
-			t.Fatalf("register response = %#v", resp)
-		}
-	}
-	if resp := s.handle(ctx, withType(req, TypeEnsureTargetPort)); !resp.OK {
-		t.Fatalf("ensure response = %#v", resp)
-	}
-	if resp := s.handle(ctx, withType(req, TypeUnregisterTarget)); !resp.OK {
-		t.Fatalf("first unregister response = %#v", resp)
-	}
-	list := s.handle(ctx, Request{Type: TypeListPorts})
-	if !list.OK || len(list.Forwards) != 1 {
-		t.Fatalf("list after first unregister = %#v", list)
-	}
-	if resp := s.handle(ctx, withType(req, TypeUnregisterTarget)); !resp.OK {
-		t.Fatalf("second unregister response = %#v", resp)
-	}
-	list = s.handle(ctx, Request{Type: TypeListPorts})
-	if !list.OK || len(list.Forwards) != 0 {
-		t.Fatalf("list after second unregister = %#v", list)
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -319,6 +449,15 @@ func freeTCPPort(t *testing.T) int {
 	}
 	defer ln.Close()
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func requireTargetLoopback(t *testing.T) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.64.0.2:0")
+	if err != nil {
+		t.Skipf("target loopback aliases are unavailable: %v", err)
+	}
+	_ = ln.Close()
 }
 
 func freeConsecutiveTCPPorts(t *testing.T) int {

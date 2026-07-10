@@ -6,7 +6,7 @@ import (
 	"io"
 )
 
-const Version = 1
+const Version = 2
 
 const (
 	TypeHello         = "hello"
@@ -19,6 +19,8 @@ const (
 	TypePortForward   = "port.forward"
 	TypeError         = "error"
 	TypeHeartbeat     = "heartbeat"
+	TypeHeartbeatAck  = "heartbeat.ack"
+	TypeServerDrain   = "server.drain"
 )
 
 const (
@@ -30,6 +32,9 @@ type Frame struct {
 	Type            string            `json:"type"`
 	ID              string            `json:"id,omitempty"`
 	ProtocolVersion int               `json:"protocolVersion,omitempty"`
+	AppVersion      string            `json:"appVersion,omitempty"`
+	SessionID       string            `json:"sessionId,omitempty"`
+	Sequence        uint64            `json:"sequence,omitempty"`
 	Role            string            `json:"role,omitempty"`
 	Token           string            `json:"token,omitempty"`
 	Capabilities    []string          `json:"capabilities,omitempty"`

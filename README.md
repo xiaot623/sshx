@@ -79,7 +79,9 @@ The URL port is the remote port. sshx does not bind `127.0.0.1:<port>`; it binds
 - One **server daemon** per client target alias, installed under `~/.sshx_server/<uuid>` on the remote and shared by that client's concurrent SSH sessions.
 - Client connects via a hidden `socket-proxy` SSH channel.
 - Server manages port sniffing, forwarding state, and command bridge routing centrally.
-- Server stays alive through brief disconnects, exiting after an idle timeout with no clients.
+- Clients renew local and remote leases every 5 seconds. A daemon expires a client after 15 seconds without a heartbeat.
+- The local daemon exits when its last client lease closes. The remote server drains briefly and exits after its last bridge lease closes.
+- Application or protocol version changes drain the existing daemon before the current binary starts a replacement.
 
 ---
 

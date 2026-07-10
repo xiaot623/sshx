@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -251,12 +252,15 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	if string(uploaded) != "binary-data" {
 		t.Fatalf("uploaded = %q", uploaded)
 	}
-	if len(execCalls) != 2 {
+	if len(execCalls) != 3 {
 		t.Fatalf("exec calls = %#v", execCalls)
 	}
-	if !strings.Contains(strings.Join(execCalls[0].args, " "), "SSHX_SERVER_HOME") ||
-		!strings.Contains(strings.Join(execCalls[0].args, " "), ".sshx_server/client-remote") {
-		t.Fatalf("start args = %#v", execCalls[0].args)
+	if !strings.Contains(strings.Join(execCalls[0].args, " "), "kill") {
+		t.Fatalf("stop args = %#v", execCalls[0].args)
+	}
+	if !strings.Contains(strings.Join(execCalls[1].args, " "), "SSHX_SERVER_HOME") ||
+		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/client-remote") {
+		t.Fatalf("start args = %#v", execCalls[1].args)
 	}
 }
 
@@ -283,8 +287,15 @@ func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(execCalls) != 2 {
+	if len(execCalls) != 3 {
 		t.Fatalf("exec calls = %#v", execCalls)
+	}
+}
+
+func TestStopServerScriptHasValidShellSyntax(t *testing.T) {
+	cmd := exec.Command("sh", "-n", "-c", stopServerScript(remoteServerHome("client-remote")))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("shell syntax: %v: %s", err, output)
 	}
 }
 
@@ -313,6 +324,7 @@ func TestInstallResolverPrintsResolverFileWithoutApplying(t *testing.T) {
 }
 
 func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
+	requireTargetLoopback(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir, err := os.MkdirTemp("/tmp", "sshx-cli-")
@@ -365,6 +377,15 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("server did not stop")
 	}
+}
+
+func requireTargetLoopback(t *testing.T) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.64.0.2:0")
+	if err != nil {
+		t.Skipf("target loopback aliases are unavailable: %v", err)
+	}
+	_ = ln.Close()
 }
 
 func TestForwardAddressUsesDomainWhenAvailable(t *testing.T) {
