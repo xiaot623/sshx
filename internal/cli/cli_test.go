@@ -909,6 +909,39 @@ func TestResolverContentUsesConfiguredDNSAddress(t *testing.T) {
 	}
 }
 
+func TestMissingLoopbackAliases(t *testing.T) {
+	// Realistic ifconfig lo0 excerpt: only 127.0.0.1 and one alias present.
+	src := `lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+	options=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>
+	inet 127.0.0.1 netmask 0xff000000
+	inet 127.64.0.2 netmask 0xff000000
+	inet6 ::1 prefixlen 128
+	nd6 options=201<PERFORMNUD,DAD>
+`
+	missing := missingLoopbackAliases(src, 4)
+	want := []string{"127.64.0.1", "127.64.0.3", "127.64.0.4"}
+	if !reflect.DeepEqual(missing, want) {
+		t.Fatalf("missing = %v, want %v", missing, want)
+	}
+
+	// Fully provisioned pool yields nothing to do.
+	var full strings.Builder
+	full.WriteString("lo0:\n\tinet 127.0.0.1 netmask 0xff000000\n")
+	for i := 1; i <= 8; i++ {
+		full.WriteString("\tinet 127.64.0." + itoa(i) + " netmask 0xff000000\n")
+	}
+	if got := missingLoopbackAliases(full.String(), 8); len(got) != 0 {
+		t.Fatalf("got %v, want empty", got)
+	}
+
+	// Empty ifconfig output means provision the whole pool.
+	got := missingLoopbackAliases("", 3)
+	want = []string{"127.64.0.1", "127.64.0.2", "127.64.0.3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 func waitForLocalDaemonSocket(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

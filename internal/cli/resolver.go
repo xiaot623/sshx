@@ -25,17 +25,34 @@ func (r *Runner) defaultEnsureResolver(ctx context.Context) error {
 		return err
 	}
 	path := filepath.Join("/etc/resolver", suffix)
-	current, err := os.ReadFile(path)
-	if err == nil && string(current) == content {
+
+	// Resolver file: try a direct write first (works when already root or
+	// /etc/resolver is writable); only escalate to sudo if needed.
+	resolverOK := false
+	if current, rerr := os.ReadFile(path); rerr == nil && string(current) == content {
+		resolverOK = true
+	} else if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return rerr
+	} else if werr := writeResolverFile(path, content); werr == nil {
+		resolverOK = true
+	}
+
+	// Loopback aliases: provision the 127.64.0.x pool so per-target forwards can
+	// bind. Idempotent; returns nil when the whole pool already exists.
+	aliasCmds := loopbackAliasCommands()
+
+	if resolverOK && len(aliasCmds) == 0 {
 		return nil
 	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+
+	// Batch whatever still needs root into a single sudo sh -c so the user sees
+	// at most one password prompt for the whole first-time setup.
+	var cmds []string
+	if !resolverOK {
+		cmds = append(cmds, resolverWriteScript(filepath.Dir(path), path, content))
 	}
-	if err := writeResolverFile(path, content); err == nil {
-		return nil
-	}
-	return sudoWriteResolverFile(ctx, path, content, r.Stderr)
+	cmds = append(cmds, aliasCmds...)
+	return sudoRun(ctx, joinShellCommands(cmds), r.Stderr)
 }
 
 func resolverContent(dnsAddr string) (string, error) {
@@ -53,10 +70,14 @@ func writeResolverFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-func sudoWriteResolverFile(ctx context.Context, path, content string, stderr io.Writer) error {
-	script := "mkdir -p " + shellQuote(filepath.Dir(path)) +
+// resolverWriteScript builds the shell command that writes /etc/resolver/<suffix>.
+func resolverWriteScript(dir, path, content string) string {
+	return "mkdir -p " + shellQuote(dir) +
 		" && printf %s " + shellQuote(content) +
 		" > " + shellQuote(path)
+}
+
+func sudoRun(ctx context.Context, script string, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, "sudo", "sh", "-c", script)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
