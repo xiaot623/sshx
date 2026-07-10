@@ -333,13 +333,28 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	socket := filepath.Join(dir, "local.sock")
-	srv := &locald.Server{SocketPath: socket}
+	srv := &locald.Server{SocketPath: socket, Version: "test-version"}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.Serve(ctx)
 	}()
 	waitForLocalDaemonSocket(t, socket)
 	t.Setenv("SSHX_LOCAL_DAEMON_SOCKET", socket)
+
+	// EnsureTargetPort requires an active session lease since the lifecycle
+	// hardening commit; open one before issuing the ensure request.
+	session, err := locald.OpenSession(ctx, socket, locald.Request{
+		SSHPath:      "ssh",
+		Target:       "debian",
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
+		SessionID:    "session-typo",
+		AppVersion:   "test-version",
+	}, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
 
 	remotePort := freeLocalTCPPort(t)
 	resp, err := locald.ClientRequest(ctx, socket, locald.Request{
@@ -349,6 +364,7 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 		RemotePort:   remotePort,
 		DomainSuffix: "it.sshx",
 		DNSAddr:      "127.0.0.1:0",
+		SessionID:    "session-typo",
 	})
 	if err != nil {
 		t.Fatal(err)
