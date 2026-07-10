@@ -38,7 +38,7 @@ func parseProcNetTCP(data string, ipv6 bool) ([]int, error) {
 		if !ok {
 			continue
 		}
-		if !isLoopbackProcAddress(host, ipv6) {
+		if !isLocalListenAddress(host, ipv6) {
 			continue
 		}
 		p, err := strconv.ParseInt(port, 16, 32)
@@ -58,18 +58,25 @@ func parseProcNetTCP(data string, ipv6 bool) ([]int, error) {
 	return out, nil
 }
 
-func isLoopbackProcAddress(hexAddr string, ipv6 bool) bool {
+// isLocalListenAddress reports whether a /proc/net/{tcp,tcp6} local_address
+// hex field is an address sshx should auto-forward. sshx forwards services
+// bound to the loopback interface (127.0.0.1 / ::1) and the wildcard addresses
+// (0.0.0.0 / ::), since wildcard listeners are reachable via 127.0.0.1 on the
+// remote host. Bindings on other interfaces are not forwarded.
+func isLocalListenAddress(hexAddr string, ipv6 bool) bool {
 	if ipv6 {
 		b, err := hex.DecodeString(hexAddr)
 		if err != nil || len(b) != net.IPv6len {
 			return false
 		}
-		return net.IP(b).Equal(net.IPv6loopback)
+		ip := net.IP(b)
+		return ip.IsLoopback() || ip.IsUnspecified()
 	}
 	if len(hexAddr) != 8 {
 		return false
 	}
-	return strings.EqualFold(hexAddr, "0100007F")
+	// 127.0.0.1 (0100007F, little-endian) and 0.0.0.0 (00000000).
+	return strings.EqualFold(hexAddr, "0100007F") || strings.EqualFold(hexAddr, "00000000")
 }
 
 func mergePorts(groups ...[]int) []int {

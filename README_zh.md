@@ -5,7 +5,7 @@
 **sshx** 是 OpenSSH 的即插即用封装器。设置 `alias ssh=sshx` 后，你现有的 SSH 工作流完全不受影响——所有参数、配置和连接都原样透传。但当连接到启用了 sshx 特性的主机（或 Docker 容器）时，你会获得一个持久化的共享远程服务器，提供以下能力：
 
 - 🔄 **反向命令桥** — 在*远程*执行 `sshx local <cmd>`，命令实际在你的本地机器上运行，stdout、stderr、退出码和 stdin 全部正确传递。
-- 🔌 **自动端口转发** — 远程回环监听端口（如在 `localhost:8080` 上的开发服务器）被自动检测并转发到本地。
+- 🔌 **自动端口转发** — 远程本地监听端口（回环 `127.0.0.1` 与通配 `0.0.0.0`；如在 `0.0.0.0:8080` 或 `localhost:8080` 上的开发服务器）被自动检测并转发到本地。
 - 🌐 **本地域名绑定** — 在本地浏览器中通过 `<主机>.<用户名>.sshx:<端口>` 访问转发端口，无需手动设置 `-L` 参数。
 - 🐳 **Docker 容器支持** — 通过名称或 ID 直接连接运行中的容器：`sshx my-container`。命令桥可通过 `docker exec` 在容器内工作。
 
@@ -59,7 +59,7 @@ sshx local pbcopy < /tmp/some-data
 
 ### 🔌 自动端口检测与转发
 
-当远程有进程在 `127.0.0.1` 上监听（如 `npm run dev` 在端口 3000），sshx 会检测到并：
+当远程有进程在 `127.0.0.1` 或 `0.0.0.0` 上监听（如 `npm run dev` 在端口 3000），sshx 会检测到并：
 
 1. 向本地守护进程广播该端口。
 2. 为 SSH target 分配独立的 loopback IP。
@@ -167,11 +167,13 @@ sshx local uname -s
 
 ### 3. 在远程启动开发服务器
 
-在远程启动一个监听 localhost 的服务器：
+在远程启动一个服务器：
 
 ```sh
-python3 -m http.server 8080 --bind 127.0.0.1
+python3 -m http.server 8080
 ```
+
+`python3 -m http.server` 默认绑定 `0.0.0.0`，sshx 会像对待 `--bind 127.0.0.1` 一样检测到它。显式 `--bind <ip>` 到非回环接口不会被转发。
 
 在**本地**机器上打开：
 
@@ -202,7 +204,7 @@ features:
   # 远程到本地命令桥（在远程执行 sshx local <cmd>）
   commandBridge: true
 
-  # 自动检测远程回环 TCP 监听端口，并通过
+  # 自动检测远程回环和通配 TCP 监听端口，并通过
   # <host>.<user>.sshx:<远程端口> 暴露。
   autoForward: true
 
@@ -231,7 +233,7 @@ commands:
 
 1. **连接**：`sshx remote` 打开一个正常的 SSH 会话，并在远程 `~/.sshx_server/<uuid>` 下启动（或连接到）该 client-target 对应的 `sshx 服务器`。
 2. **桥接通道**：一条隐藏的 `socket-proxy` SSH 通道将本地守护进程连接到远程服务器。
-3. **端口嗅探**：服务器读取 `/proc/net/tcp*`（Linux）来检测回环监听端口。
+3. **端口嗅探**：服务器读取 `/proc/net/tcp*`（Linux）来检测回环（`127.0.0.1` / `::1`）和通配（`0.0.0.0` / `::`）监听端口。
 4. **转发**：检测到的端口通过单个共享本地守护进程使用 `ssh -W` 转发。
 5. **域名**：本地 DNS 应答器将 `<target>.<suffix>` 映射到 localhost。浏览器 URL 中的端口选择对应的本地转发端口。
 

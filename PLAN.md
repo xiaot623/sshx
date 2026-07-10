@@ -143,7 +143,7 @@ v1 uses batch stdin: all stdin data is collected and sent before the command sta
 
 ### Ports & Domains
 
-- The remote Server only sniffs TCP listening ports on `127.0.0.1` / `::1` by default. `0.0.0.0` ports are not sniffed without explicit configuration.
+- The remote Server sniffs TCP listening ports bound to the loopback interface (`127.0.0.1` / `::1`) and the wildcard addresses (`0.0.0.0` / `::`). Wildcard listeners are reachable via `127.0.0.1` on the remote, so they are forwarded identically. Bindings on other interfaces are not sniffed.
 - The Server sends a `port.observed` message when a new port is detected.
 - The local daemon creates forwardings and domain routes.
 - Domain suffix: `${user}.sshx` (e.g., `xiaot.sshx`). Avoids `.local` which conflicts with mDNS/Bonjour.
@@ -187,8 +187,8 @@ features:
   commandBridge: true
   ports:
     auto: true
-    # Only forwards 127.0.0.1 / ::1 ports by default
-    # bindAll: false   # future option to enable 0.0.0.0 ports
+    # Forwards 127.0.0.1 / ::1 and 0.0.0.0 / :: listeners by default.
+    # Bindings on other interfaces are not forwarded.
   domains:
     enabled: true
     suffix: xiaot.sshx   # {user}.sshx
@@ -233,7 +233,7 @@ SSHX_DISABLE=1 sshx remote
 
 ### Feature Integration
 
-- Remote port sniffing creates forwardings and domain routes (localhost ports only).
+- Remote port sniffing creates forwardings and domain routes (loopback and wildcard listeners).
 - Concurrent terminals to the same host share forwarding state — no port conflicts.
 - DNS suffix setup requires authorization only once; subsequent dynamic domain names work without repeated prompts.
 - The user SSH session receives `SSHX_SERVER_HOME=$HOME/.sshx_server/<uuid>` and has that directory prepended to `PATH`, so `sshx local ...` resolves to the isolated remote binary and server-info for the correct client.

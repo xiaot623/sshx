@@ -5,7 +5,7 @@
 **sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host (or Docker container) with sshx-aware features enabled, you unlock a persistent, shared remote server that gives you:
 
 - 🔄 **Reverse command bridge** — run `sshx local <cmd>` *on the remote* to execute commands on your local machine, with stdout, stderr, exit code, and stdin all propagated.
-- 🔌 **Automatic port forwarding** — remote loopback listeners (e.g., a dev server on `localhost:8080`) are automatically detected and forwarded to your local machine.
+- 🔌 **Automatic port forwarding** — remote local listeners (loopback `127.0.0.1` and wildcard `0.0.0.0`; e.g., a dev server on `0.0.0.0:8080` or `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
 - 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. Command bridge support works inside containers via `docker exec`.
 
@@ -59,7 +59,7 @@ sshx local pbcopy < /tmp/some-data
 
 ### 🔌 Automatic Port Detection & Forwarding
 
-When a process on the remote starts listening on `127.0.0.1` (e.g., `npm run dev` on port 3000), sshx detects it and:
+When a process on the remote starts listening on `127.0.0.1` or `0.0.0.0` (e.g., `npm run dev` on port 3000), sshx detects it and:
 
 1. Broadcasts the port to the local daemon.
 2. Assigns the SSH target its own loopback IP.
@@ -167,11 +167,13 @@ sshx local uname -s
 
 ### 3. Start a dev server on the remote
 
-On the remote, start a server listening on `localhost`:
+On the remote, start a server:
 
 ```sh
-python3 -m http.server 8080 --bind 127.0.0.1
+python3 -m http.server 8080
 ```
+
+`python3 -m http.server` binds to `0.0.0.0` by default; sshx detects it the same as a `--bind 127.0.0.1` listener. Explicit `--bind <ip>` to a non-loopback interface is not forwarded.
 
 On your **local** machine, open:
 
@@ -202,7 +204,7 @@ features:
   # Remote-to-local command bridge (`sshx local <cmd>` on the remote)
   commandBridge: true
 
-  # Auto-detect remote loopback TCP listeners and expose them via
+  # Auto-detect remote loopback and wildcard TCP listeners and expose them via
   # <host>.<user>.sshx:<remote-port>.
   autoForward: true
 
@@ -231,7 +233,7 @@ commands:
 
 1. **Connection**: `sshx remote` opens a normal SSH session and starts (or connects to) the client-target `sshx server` under `~/.sshx_server/<uuid>`.
 2. **Bridge channel**: A hidden `socket-proxy` SSH channel links the local daemon to the remote server.
-3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback listeners.
+3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback (`127.0.0.1` / `::1`) and wildcard (`0.0.0.0` / `::`) listeners.
 4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using `ssh -W`.
 5. **Domains**: The local DNS responder maps `<target>.<suffix>` → localhost. The browser's URL port selects the local forwarded port.
 
