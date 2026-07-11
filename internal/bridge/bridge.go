@@ -14,6 +14,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/xiaot623/sshx/internal/ports"
@@ -850,6 +851,19 @@ func ExecuteLocal(ctx context.Context, frame protocol.Frame) protocol.Frame {
 	}
 	defer cancel()
 	cmd := exec.CommandContext(commandCtx, frame.Argv[0], frame.Argv[1:]...)
+	// CommandContext only kills the direct child. Shell commands can leave
+	// descendants running with stdout/stderr still open, which makes Wait block
+	// until those descendants exit. Give the command its own process group and
+	// cancel the whole group so explicit timeouts cover the complete command
+	// tree.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
 	cmd.Stdin = bytes.NewReader(stdin)
 	if frame.Cwd != "" {
 		cmd.Dir = frame.Cwd
