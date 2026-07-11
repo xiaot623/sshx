@@ -16,6 +16,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/locald"
+	"github.com/xiaot623/sshx/internal/loopback"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 	"github.com/xiaot623/sshx/internal/version"
 )
@@ -446,7 +447,7 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 
 func requireTargetLoopback(t *testing.T) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.64.0.2:0")
+	ln, err := net.Listen("tcp", net.JoinHostPort(loopback.Address(0), "0"))
 	if err != nil {
 		t.Skipf("target loopback aliases are unavailable: %v", err)
 	}
@@ -983,27 +984,25 @@ func TestMissingLoopbackAliases(t *testing.T) {
 	inet6 ::1 prefixlen 128
 	nd6 options=201<PERFORMNUD,DAD>
 `
-	missing := missingLoopbackAliases(src, 4)
-	want := []string{"127.64.0.1", "127.64.0.3", "127.64.0.4"}
-	if !reflect.DeepEqual(missing, want) {
-		t.Fatalf("missing = %v, want %v", missing, want)
+	missing := missingLoopbackAliases(src)
+	if len(missing) != loopback.Size-1 || missing[0] != "127.64.0.1" || missing[1] != "127.64.0.3" || missing[len(missing)-1] != "127.64.0.64" {
+		t.Fatalf("unexpected missing aliases: %v", missing)
 	}
 
 	// Fully provisioned pool yields nothing to do.
 	var full strings.Builder
 	full.WriteString("lo0:\n\tinet 127.0.0.1 netmask 0xff000000\n")
-	for i := 1; i <= 8; i++ {
-		full.WriteString("\tinet 127.64.0." + itoa(i) + " netmask 0xff000000\n")
+	for i := 0; i < loopback.Size; i++ {
+		full.WriteString("\tinet " + loopback.Address(i) + " netmask 0xff000000\n")
 	}
-	if got := missingLoopbackAliases(full.String(), 8); len(got) != 0 {
+	if got := missingLoopbackAliases(full.String()); len(got) != 0 {
 		t.Fatalf("got %v, want empty", got)
 	}
 
 	// Empty ifconfig output means provision the whole pool.
-	got := missingLoopbackAliases("", 3)
-	want = []string{"127.64.0.1", "127.64.0.2", "127.64.0.3"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
+	got := missingLoopbackAliases("")
+	if len(got) != loopback.Size || got[0] != "127.64.0.1" || got[len(got)-1] != "127.64.0.64" {
+		t.Fatalf("unexpected full pool: %v", got)
 	}
 }
 

@@ -4,32 +4,23 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
+
+	"github.com/xiaot623/sshx/internal/loopback"
 )
 
-// loopbackPoolSize is how many 127.64.0.x loopback aliases sshx pre-provisions on
-// macOS so that per-target forwarding listeners (allocated by locald starting at
-// 127.64.0.1) can bind without an EADDRNOTAVAIL failure. Linux treats the whole
-// 127.0.0.0/8 as local and needs no aliases, so this is darwin-only.
-const loopbackPoolSize = 64
+var loopbackAliasRE = regexp.MustCompile(`(?m)^\s*inet\s+` + regexp.QuoteMeta(loopback.Prefix) + `(\d+)\s`)
 
-// loopbackAliasBase matches the second octet used by locald's allocator.
-const loopbackAliasBase = 64
-
-var loopbackAliasRE = regexp.MustCompile(`(?m)^\s*inet\s+127\.64\.0\.(\d+)\s`)
-
-// missingLoopbackAliases returns the 127.64.0.x addresses (full "ip:port-less"
-// form, i.e. just the IP) from the pool [1..poolSize] that are NOT present in
-// ifconfigOutput. Pure function for testability.
-func missingLoopbackAliases(ifconfigOutput string, poolSize int) []string {
-	present := make(map[string]bool, poolSize)
+// missingLoopbackAliases returns the provisioned target addresses that are not
+// present in ifconfigOutput. Pure function for testability.
+func missingLoopbackAliases(ifconfigOutput string) []string {
+	present := make(map[string]bool, loopback.Size)
 	for _, m := range loopbackAliasRE.FindAllStringSubmatch(ifconfigOutput, -1) {
-		present["127.64.0."+m[1]] = true
+		present[loopback.Prefix+m[1]] = true
 	}
 	var missing []string
-	for i := 1; i <= poolSize; i++ {
-		ip := "127.64.0." + strconv.Itoa(i)
+	for i := 0; i < loopback.Size; i++ {
+		ip := loopback.Address(i)
 		if !present[ip] {
 			missing = append(missing, ip)
 		}
@@ -49,7 +40,7 @@ func loopbackAliasCommands() []string {
 		// Best-effort: assume nothing present, provision the whole pool.
 		out = nil
 	}
-	missing := missingLoopbackAliases(string(out), loopbackPoolSize)
+	missing := missingLoopbackAliases(string(out))
 	if len(missing) == 0 {
 		return nil
 	}

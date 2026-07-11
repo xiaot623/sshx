@@ -14,6 +14,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/domain"
 	"github.com/xiaot623/sshx/internal/forward"
+	"github.com/xiaot623/sshx/internal/loopback"
 	"github.com/xiaot623/sshx/internal/protocol"
 )
 
@@ -76,7 +77,7 @@ func TestDomainManagerCanBeSharedByRequests(t *testing.T) {
 		if resp.Domain != "debian.it.sshx" {
 			t.Fatalf("domain = %q", resp.Domain)
 		}
-		if resp.ListenIP != "127.64.0.2" {
+		if resp.ListenIP != "127.64.0.1" {
 			t.Fatalf("listen IP = %q", resp.ListenIP)
 		}
 	}
@@ -121,7 +122,7 @@ func TestDomainForwardUsesTargetIPWhenLocalhostPortIsOccupied(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("ensure response = %#v", resp)
 	}
-	if resp.LocalPort != basePort || resp.ListenIP != "127.64.0.2" {
+	if resp.LocalPort != basePort || resp.ListenIP != "127.64.0.1" {
 		t.Fatalf("response = %#v, want target IP port %d", resp, basePort)
 	}
 }
@@ -154,7 +155,7 @@ func TestListPorts(t *testing.T) {
 		t.Fatalf("list response = %#v", resp)
 	}
 	got := resp.Forwards[0]
-	if got.Target != "debian" || got.RemotePort != remotePort || got.LocalPort != remotePort || got.ListenIP != "127.64.0.2" {
+	if got.Target != "debian" || got.RemotePort != remotePort || got.LocalPort != remotePort || got.ListenIP != "127.64.0.1" {
 		t.Fatalf("forward = %#v", got)
 	}
 }
@@ -191,7 +192,7 @@ func TestListPortsIncludesDomainForDirectTarget(t *testing.T) {
 		got.Domain != "debian-192-168-1-100.it.sshx" ||
 		got.RemotePort != remotePort ||
 		got.LocalPort != remotePort ||
-		got.ListenIP != "127.64.0.2" {
+		got.ListenIP != "127.64.0.1" {
 		t.Fatalf("forward = %#v", got)
 	}
 }
@@ -227,6 +228,34 @@ func TestMultipleTargetsCanExposeSameRemotePort(t *testing.T) {
 		if fwd.RemotePort != remotePort || fwd.LocalPort != remotePort {
 			t.Fatalf("forward = %#v", fwd)
 		}
+	}
+}
+
+func TestLoopbackPoolMatchesProvisionedRangeAndReusesReleasedAddresses(t *testing.T) {
+	s := &Server{targets: map[string]*targetRecord{}}
+	for i := 0; i < loopback.Size; i++ {
+		ip, err := s.allocateLoopbackIPLocked()
+		if err != nil {
+			t.Fatalf("allocate address %d: %v", i+1, err)
+		}
+		if want := loopback.Address(i); ip != want {
+			t.Fatalf("address %d = %q, want %q", i+1, ip, want)
+		}
+		s.targets[itoa(i)] = &targetRecord{ListenIP: ip}
+	}
+
+	if ip, err := s.allocateLoopbackIPLocked(); err == nil || ip != "" || !strings.Contains(err.Error(), "pool exhausted") {
+		t.Fatalf("allocation beyond pool = %q, %v", ip, err)
+	}
+
+	const released = 17
+	delete(s.targets, itoa(released))
+	ip, err := s.allocateLoopbackIPLocked()
+	if err != nil {
+		t.Fatalf("reuse released address: %v", err)
+	}
+	if want := loopback.Address(released); ip != want {
+		t.Fatalf("reused address = %q, want %q", ip, want)
 	}
 }
 
@@ -453,7 +482,7 @@ func freeTCPPort(t *testing.T) int {
 
 func requireTargetLoopback(t *testing.T) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.64.0.2:0")
+	ln, err := net.Listen("tcp", net.JoinHostPort(loopback.Address(0), "0"))
 	if err != nil {
 		t.Skipf("target loopback aliases are unavailable: %v", err)
 	}

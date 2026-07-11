@@ -16,6 +16,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/domain"
 	"github.com/xiaot623/sshx/internal/forward"
+	"github.com/xiaot623/sshx/internal/loopback"
 	"github.com/xiaot623/sshx/internal/processlock"
 	"github.com/xiaot623/sshx/internal/protocol"
 )
@@ -104,7 +105,6 @@ type Server struct {
 	forwardRecords map[string]map[int]forwardRecord
 	targets        map[string]*targetRecord
 	domains        map[string]*domain.Manager
-	nextLoopback   int
 	sessions       map[string]*sessionRecord
 	shutdown       chan struct{}
 	shutdownOnce   sync.Once
@@ -538,33 +538,37 @@ func (s *Server) ensureTarget(ctx context.Context, req Request) (*targetRecord, 
 		s.mu.Unlock()
 		return rec, nil
 	}
+	listenIP, err := s.allocateLoopbackIPLocked()
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	rec := &targetRecord{
 		Target:   req.Target,
 		Domain:   dom.NameForTarget(req.Target),
-		ListenIP: s.allocateLoopbackIPLocked(),
+		ListenIP: listenIP,
+	}
+	if err := dom.Register(rec.Domain, net.ParseIP(rec.ListenIP)); err != nil {
+		s.mu.Unlock()
+		return nil, err
 	}
 	s.targets[key] = rec
 	s.mu.Unlock()
-
-	if err := dom.Register(rec.Domain, net.ParseIP(rec.ListenIP)); err != nil {
-		return nil, err
-	}
 	return rec, nil
 }
 
-func (s *Server) allocateLoopbackIPLocked() string {
-	if s.nextLoopback == 0 {
-		s.nextLoopback = 1
+func (s *Server) allocateLoopbackIPLocked() (string, error) {
+	used := make(map[string]struct{}, len(s.targets))
+	for _, rec := range s.targets {
+		used[rec.ListenIP] = struct{}{}
 	}
-	offset := s.nextLoopback
-	s.nextLoopback++
-	second := 64 + offset/(254*254)
-	third := (offset / 254) % 254
-	fourth := offset%254 + 1
-	if second > 126 {
-		second = 126
+	for i := 0; i < loopback.Size; i++ {
+		ip := loopback.Address(i)
+		if _, exists := used[ip]; !exists {
+			return ip, nil
+		}
 	}
-	return fmt.Sprintf("127.%d.%d.%d", second, third, fourth)
+	return "", fmt.Errorf("target loopback address pool exhausted (%d addresses in use)", loopback.Size)
 }
 
 func (s *Server) forwarder(ctx context.Context, sshPath string, sshArgs []string) *forward.Manager {
