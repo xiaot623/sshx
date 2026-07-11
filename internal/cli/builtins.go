@@ -197,7 +197,7 @@ func (r *Runner) runInstallResolver(args []string) int {
 	return 0
 }
 
-func (r *Runner) runLocalBridge(ctx context.Context, argv []string) int {
+func (r *Runner) runLocalBridge(ctx context.Context, argv []string, timeout time.Duration) int {
 	socketPath := os.Getenv("SSHX_BRIDGE_SOCKET")
 	token := os.Getenv("SSHX_BRIDGE_TOKEN")
 	if socketPath == "" && (os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSHX_SERVER_HOME") != "") {
@@ -224,10 +224,10 @@ func (r *Runner) runLocalBridge(ctx context.Context, argv []string) int {
 			token = info.Token
 		}
 	}
-	result, err := bridge.RequestCommand(ctx, socketPath, argv, stdin, nil, "", token)
+	result, err := bridge.RequestCommandWithTimeout(ctx, socketPath, argv, stdin, nil, "", timeout, token)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx local: %v\n", err)
-		return 1
+		return result.ExitCode
 	}
 	_, _ = r.Stdout.Write(result.Stdout)
 	_, _ = r.Stderr.Write(result.Stderr)

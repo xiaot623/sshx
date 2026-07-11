@@ -51,10 +51,12 @@ Run commands on your **local machine** from inside an SSH session:
 sshx local cat ~/my-local-file.txt
 sshx local open -a "Google Chrome" "http://localhost:3000"
 sshx local pbcopy < /tmp/some-data
+sshx local --timeout=30 npm test
 ```
 
 - stdout, stderr, and exit codes propagate correctly.
 - stdin is sent in batch mode — pipe data in and it reaches the local command.
+- Commands have no implicit deadline. Put `--timeout=<duration>` immediately after the target to opt in; bare numbers mean seconds, and values such as `500ms`, `30s`, and `2m` are accepted. Timed-out commands exit with status 124.
 - Policy: a configurable deny list controls which commands are blocked.
 
 ### 🔌 Automatic Port Detection & Forwarding
@@ -137,6 +139,7 @@ The alias is safe — unmatched hosts have zero overhead and zero side effects.
 sshx my-server
 sshx my-server uname -s
 sshx -p 2222 user@my-server hostname
+sshx my-server --timeout=30 npm test
 ```
 
 All existing SSH options work — `-F`, `-o`, `-J`, `ProxyJump`, etc. are handled by OpenSSH.
@@ -152,6 +155,9 @@ sshx 4fa8bc
 
 # Run a command directly
 sshx my-container cat /etc/os-release
+
+# Stop a command after 30 seconds (bare numbers are seconds)
+sshx my-container --timeout=30 npm test
 ```
 
 sshx detects that the target isn't an SSH host and automatically uses `docker exec`. The command bridge and other features work exactly the same inside containers.
@@ -163,6 +169,9 @@ Inside your SSH session on the remote:
 ```sh
 sshx local uname -s
 # → Darwin (your local machine's OS)
+
+# Long-running bridge commands have no implicit deadline; opt in when needed
+sshx local --timeout=30 npm test
 ```
 
 ### 3. Start a dev server on the remote

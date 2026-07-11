@@ -42,6 +42,7 @@ type Frame struct {
 	Env             map[string]string `json:"env,omitempty"`
 	Cwd             string            `json:"cwd,omitempty"`
 	Stdin           string            `json:"stdin,omitempty"`
+	TimeoutMillis   int64             `json:"timeoutMillis,omitempty"`
 	ExitCode        int               `json:"exitCode,omitempty"`
 	Stdout          string            `json:"stdout,omitempty"`
 	Stderr          string            `json:"stderr,omitempty"`

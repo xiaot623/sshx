@@ -36,6 +36,25 @@ func TestExecuteLocalPropagatesBatchStdinOutputStderrAndExitCode(t *testing.T) {
 	}
 }
 
+func TestExecuteLocalHonorsExplicitTimeout(t *testing.T) {
+	started := time.Now()
+	resp := ExecuteLocal(context.Background(), protocol.Frame{
+		Type:          protocol.TypeCommandExec,
+		ID:            "req-timeout",
+		Argv:          []string{"sh", "-c", "sleep 5"},
+		TimeoutMillis: 20,
+	})
+	if resp.Type != protocol.TypeCommandError || !strings.Contains(resp.Error, "timed out after 20ms") {
+		t.Fatalf("response = %#v", resp)
+	}
+	if resp.ExitCode != 124 {
+		t.Fatalf("exit code = %d", resp.ExitCode)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timeout took %s", elapsed)
+	}
+}
+
 func TestServerReturnsClearErrorWithoutClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -387,6 +406,44 @@ func TestHeartbeatContinuesDuringCommandExecution(t *testing.T) {
 	if string(result.Stdout) != "ok" {
 		t.Fatalf("stdout = %q", result.Stdout)
 	}
+	cancel()
+	<-errCh
+}
+
+func TestCommandTimeoutDoesNotRemoveHealthyBridgeClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+
+	ready := make(chan error, 1)
+	go func() {
+		_ = RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{Ready: ready})
+	}()
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+
+	timedOut, err := RequestCommandWithTimeout(ctx, socket, []string{"sh", "-c", "sleep 5"}, nil, nil, "", 20*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 20ms") {
+		t.Fatalf("timeout error = %v", err)
+	}
+	if timedOut.ExitCode != 124 {
+		t.Fatalf("exit code = %d", timedOut.ExitCode)
+	}
+
+	result, err := RequestCommand(ctx, socket, []string{"sh", "-c", "printf still-connected"}, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Stdout) != "still-connected" {
+		t.Fatalf("stdout = %q", result.Stdout)
+	}
+
 	cancel()
 	<-errCh
 }

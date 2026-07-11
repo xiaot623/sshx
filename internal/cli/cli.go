@@ -82,14 +82,19 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	}
 
 	parsed := sshcompat.Parse(args)
+	timeout, err := commandTimeout(&parsed)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "sshx: %v\n", err)
+		return 2
+	}
 	if parsed.Target == "local" {
-		return r.runLocalBridge(ctx, parsed.RemoteCommand)
+		return r.runLocalBridge(ctx, parsed.RemoteCommand, timeout)
 	}
 	if parsed.NoWrap {
-		return r.execSSH(ctx, parsed.Args)
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
 	if os.Getenv("SSHX_DISABLE") == "1" || parsed.InfoMode || parsed.Target == "" {
-		return r.execSSH(ctx, parsed.Args)
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
 
 	if err := config.EnsureDefault(r.ConfigPath); err != nil {
@@ -108,10 +113,10 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 		return 1
 	}
 	if dockerMatched {
-		return r.runDocker(ctx, parsed, dockerTarget, cfg)
+		return r.runDocker(ctx, parsed, dockerTarget, cfg, timeout)
 	}
 	if !features.Enabled() {
-		return r.execSSH(ctx, parsed.Args)
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
 	if err := recordDefaultVersionState(clientVersion()); err != nil {
 		if cfg.Strict {
@@ -128,7 +133,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			return 1
 		}
 		fmt.Fprintf(r.Stderr, "sshx: remote state skipped for %s: %v\n", parsed.Target, err)
-		return r.execSSH(ctx, parsed.Args)
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
 	remoteHome := remoteServerHome(remoteID)
 	r.commandPolicy = cfg.Commands
@@ -164,7 +169,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 		remoteReady = true
 	}
 	if remoteReady {
-		return r.execSSH(ctx, sessionSSHArgs(parsed, remoteHome))
+		return r.execSSHWithTimeout(ctx, sessionSSHArgs(parsed, remoteHome), timeout)
 	}
-	return r.execSSH(ctx, parsed.Args)
+	return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 }

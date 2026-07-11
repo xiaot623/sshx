@@ -205,6 +205,55 @@ func TestNoWrapDelegatesToSSHWithoutNoWrapFlag(t *testing.T) {
 	}
 }
 
+func TestRemoteCommandTimeoutIsHandledBySSHX(t *testing.T) {
+	var stderr bytes.Buffer
+	var gotArgs []string
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	r.Exec = func(ctx context.Context, _ string, args []string) error {
+		gotArgs = append([]string(nil), args...)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	started := time.Now()
+	code := r.Run(context.Background(), []string{"--no-wrap", "remote", "--timeout=20ms", "sh", "-c", "sleep 5"})
+	if code != 124 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timeout took %s", elapsed)
+	}
+	want := []string{"remote", "sh", "-c", "sleep 5"}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("ssh args = %#v, want %#v", gotArgs, want)
+	}
+	if !strings.Contains(stderr.String(), "command timed out after 20ms") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestCommandTimeoutAcceptsBareSecondsAndDuration(t *testing.T) {
+	for value, want := range map[string]time.Duration{
+		"30":    30 * time.Second,
+		"500ms": 500 * time.Millisecond,
+		"2m":    2 * time.Minute,
+	} {
+		got, err := parseCommandTimeout(value)
+		if err != nil {
+			t.Fatalf("parseCommandTimeout(%q): %v", value, err)
+		}
+		if got != want {
+			t.Fatalf("parseCommandTimeout(%q) = %s, want %s", value, got, want)
+		}
+	}
+}
+
+func TestCommandTimeoutRequiresCommand(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"remote", "--timeout=30"})
+	if _, err := commandTimeout(&parsed); err == nil || !strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) {
 	old := version.Version
 	version.Version = "1.2.3-rc.1"

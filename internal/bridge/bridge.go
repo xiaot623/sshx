@@ -483,8 +483,6 @@ func (c *clientConn) request(req protocol.Frame) (protocol.Frame, error) {
 		return resp, nil
 	case <-c.done:
 		return protocol.Frame{}, io.EOF
-	case <-time.After(30 * time.Second):
-		return protocol.Frame{}, errors.New("timed out waiting for bridge command result")
 	}
 }
 
@@ -576,6 +574,10 @@ func (s *Server) removeConnection(conn net.Conn) {
 }
 
 func RequestCommand(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd string, token ...string) (CommandResult, error) {
+	return RequestCommandWithTimeout(ctx, socketPath, argv, stdin, env, cwd, 0, token...)
+}
+
+func RequestCommandWithTimeout(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd string, timeout time.Duration, token ...string) (CommandResult, error) {
 	if len(argv) == 0 {
 		return CommandResult{ExitCode: 2}, errors.New("local command is required")
 	}
@@ -592,12 +594,13 @@ func RequestCommand(ctx context.Context, socketPath string, argv []string, stdin
 	}
 	id := fmt.Sprintf("req-%d", time.Now().UnixNano())
 	if err := enc.Encode(protocol.Frame{
-		Type:  protocol.TypeCommandExec,
-		ID:    id,
-		Argv:  argv,
-		Env:   env,
-		Cwd:   cwd,
-		Stdin: base64.StdEncoding.EncodeToString(stdin),
+		Type:          protocol.TypeCommandExec,
+		ID:            id,
+		Argv:          argv,
+		Env:           env,
+		Cwd:           cwd,
+		Stdin:         base64.StdEncoding.EncodeToString(stdin),
+		TimeoutMillis: durationMillis(timeout),
 	}); err != nil {
 		return CommandResult{ExitCode: 1}, err
 	}
@@ -606,7 +609,11 @@ func RequestCommand(ctx context.Context, socketPath string, argv []string, stdin
 		return CommandResult{ExitCode: 1}, err
 	}
 	if resp.Type == protocol.TypeCommandError || resp.Type == protocol.TypeError {
-		return CommandResult{ExitCode: 1}, errors.New(resp.Error)
+		exitCode := resp.ExitCode
+		if exitCode == 0 {
+			exitCode = 1
+		}
+		return CommandResult{ExitCode: exitCode}, errors.New(resp.Error)
 	}
 	if resp.Type != protocol.TypeCommandResult {
 		return CommandResult{ExitCode: 1}, fmt.Errorf("unexpected response type %q", resp.Type)
@@ -836,7 +843,13 @@ func ExecuteLocal(ctx context.Context, frame protocol.Frame) protocol.Frame {
 	if err != nil {
 		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
 	}
-	cmd := exec.CommandContext(ctx, frame.Argv[0], frame.Argv[1:]...)
+	commandCtx := ctx
+	cancel := func() {}
+	if frame.TimeoutMillis > 0 {
+		commandCtx, cancel = context.WithTimeout(ctx, time.Duration(frame.TimeoutMillis)*time.Millisecond)
+	}
+	defer cancel()
+	cmd := exec.CommandContext(commandCtx, frame.Argv[0], frame.Argv[1:]...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	if frame.Cwd != "" {
 		cmd.Dir = frame.Cwd
@@ -851,6 +864,14 @@ func ExecuteLocal(ctx context.Context, frame protocol.Frame) protocol.Frame {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err = cmd.Run()
+	if frame.TimeoutMillis > 0 && errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+		return protocol.Frame{
+			Type:     protocol.TypeCommandError,
+			ID:       frame.ID,
+			ExitCode: 124,
+			Error:    fmt.Sprintf("command timed out after %s", time.Duration(frame.TimeoutMillis)*time.Millisecond),
+		}
+	}
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -867,6 +888,17 @@ func ExecuteLocal(ctx context.Context, frame protocol.Frame) protocol.Frame {
 		Stdout:   base64.StdEncoding.EncodeToString(stdout.Bytes()),
 		Stderr:   base64.StdEncoding.EncodeToString(stderr.Bytes()),
 	}
+}
+
+func durationMillis(timeout time.Duration) int64 {
+	if timeout <= 0 {
+		return 0
+	}
+	millis := timeout / time.Millisecond
+	if timeout%time.Millisecond != 0 {
+		millis++
+	}
+	return int64(millis)
 }
 
 type syncBuffer struct {
