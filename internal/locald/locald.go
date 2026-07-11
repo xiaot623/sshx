@@ -80,10 +80,11 @@ type forwardRecord struct {
 }
 
 type targetRecord struct {
-	Target   string
-	Domain   string
-	ListenIP string
-	Sessions int
+	Target        string
+	Domain        string
+	ListenIP      string
+	Sessions      int
+	domainManager *domain.Manager
 }
 
 type sessionRecord struct {
@@ -359,6 +360,7 @@ func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Dec
 func (s *Server) releaseSession(sessionID string) {
 	var fwd *forward.Manager
 	var domainName string
+	var domainManager *domain.Manager
 	var shutdown bool
 	s.mu.Lock()
 	session := s.sessions[sessionID]
@@ -373,6 +375,7 @@ func (s *Server) releaseSession(sessionID string) {
 				delete(s.forwarders, session.TargetKey)
 				delete(s.forwardRecords, session.TargetKey)
 				domainName = rec.Domain
+				domainManager = rec.domainManager
 				delete(s.targets, session.TargetKey)
 			}
 		}
@@ -385,23 +388,11 @@ func (s *Server) releaseSession(sessionID string) {
 	if fwd != nil {
 		fwd.Stop()
 	}
-	if domainName != "" {
-		s.unregisterDomain(domainName)
+	if domainManager != nil && domainName != "" {
+		domainManager.Unregister(domainName)
 	}
 	if shutdown {
 		s.initiateShutdown()
-	}
-}
-
-func (s *Server) unregisterDomain(name string) {
-	s.mu.Lock()
-	domains := make([]*domain.Manager, 0, len(s.domains))
-	for _, dom := range s.domains {
-		domains = append(domains, dom)
-	}
-	s.mu.Unlock()
-	for _, dom := range domains {
-		dom.Unregister(name)
 	}
 }
 
@@ -543,14 +534,16 @@ func (s *Server) ensureTarget(ctx context.Context, req Request) (*targetRecord, 
 		s.mu.Unlock()
 		return nil, err
 	}
-	rec := &targetRecord{
-		Target:   req.Target,
-		Domain:   dom.NameForTarget(req.Target),
-		ListenIP: listenIP,
-	}
-	if err := dom.Register(rec.Domain, net.ParseIP(rec.ListenIP)); err != nil {
+	domainName, err := dom.RegisterTarget(req.Target, net.ParseIP(listenIP))
+	if err != nil {
 		s.mu.Unlock()
 		return nil, err
+	}
+	rec := &targetRecord{
+		Target:        req.Target,
+		Domain:        domainName,
+		ListenIP:      listenIP,
+		domainManager: dom,
 	}
 	s.targets[key] = rec
 	s.mu.Unlock()

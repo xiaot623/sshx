@@ -73,8 +73,42 @@ func (m *Manager) Register(name string, ip net.IP) error {
 	if m.records == nil {
 		m.records = map[string]net.IP{}
 	}
-	m.records[normalizeSuffix(name)] = append(net.IP(nil), ip4...)
+	key := normalizeSuffix(name)
+	if _, exists := m.records[key]; exists {
+		return fmt.Errorf("domain record %s is already registered", name)
+	}
+	m.records[key] = append(net.IP(nil), ip4...)
 	return nil
+}
+
+// RegisterTarget registers target under the first available name derived from it.
+// The unsuffixed name is preferred, followed by -1, -2, and so on.
+func (m *Manager) RegisterTarget(target string, ip net.IP) (string, error) {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return "", fmt.Errorf("target %s requires an IPv4 address", target)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.records == nil {
+		m.records = map[string]net.IP{}
+	}
+
+	prefix := TargetPrefix(target)
+	for suffix := 0; ; suffix++ {
+		candidatePrefix := prefix
+		if suffix > 0 {
+			candidatePrefix = fmt.Sprintf("%s-%d", prefix, suffix)
+		}
+		name := fmt.Sprintf("%s.%s", candidatePrefix, m.suffix)
+		key := normalizeSuffix(name)
+		if _, exists := m.records[key]; exists {
+			continue
+		}
+		m.records[key] = append(net.IP(nil), ip4...)
+		return name, nil
+	}
 }
 
 func (m *Manager) Unregister(name string) {

@@ -231,6 +231,157 @@ func TestMultipleTargetsCanExposeSameRemotePort(t *testing.T) {
 	}
 }
 
+func TestTargetsWithCollidingPrefixesGetUniqueDomains(t *testing.T) {
+	requireTargetLoopback(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{SocketPath: shortSocketPath(t), Stderr: io.Discard}
+	remotePort := freeTCPPort(t)
+
+	var domains []string
+	for _, target := range []string{"foo_bar", "foo-bar", "foo bar"} {
+		resp := s.handle(ctx, Request{
+			Type:         TypeEnsureTargetPort,
+			SSHPath:      "ssh",
+			Target:       target,
+			SSHArgs:      []string{target},
+			RemotePort:   remotePort,
+			DomainSuffix: "it.sshx",
+			DNSAddr:      "127.0.0.1:0",
+		})
+		if !resp.OK {
+			t.Fatalf("ensure %q response = %#v", target, resp)
+		}
+		domains = append(domains, resp.Domain)
+	}
+
+	want := []string{"foo-bar.it.sshx", "foo-bar-1.it.sshx", "foo-bar-2.it.sshx"}
+	for i := range want {
+		if domains[i] != want[i] {
+			t.Fatalf("domain %d = %q, want %q", i, domains[i], want[i])
+		}
+	}
+}
+
+func TestSameTargetLabelWithDifferentSSHArgsGetsUniqueDomains(t *testing.T) {
+	requireTargetLoopback(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{SocketPath: shortSocketPath(t), Stderr: io.Discard}
+	remotePort := freeTCPPort(t)
+
+	var domains []string
+	for _, port := range []string{"22", "2222"} {
+		resp := s.handle(ctx, Request{
+			Type:         TypeEnsureTargetPort,
+			SSHPath:      "ssh",
+			Target:       "debian",
+			SSHArgs:      []string{"-p", port, "debian"},
+			RemotePort:   remotePort,
+			DomainSuffix: "it.sshx",
+			DNSAddr:      "127.0.0.1:0",
+		})
+		if !resp.OK {
+			t.Fatalf("ensure SSH port %s response = %#v", port, resp)
+		}
+		domains = append(domains, resp.Domain)
+	}
+	if domains[0] != "debian.it.sshx" || domains[1] != "debian-1.it.sshx" {
+		t.Fatalf("domains = %#v", domains)
+	}
+}
+
+func TestSameTargetConnectionReusesDomain(t *testing.T) {
+	requireTargetLoopback(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{Stderr: io.Discard}
+	req := Request{
+		SSHPath:      "ssh",
+		Target:       "foo_bar",
+		SSHArgs:      []string{"-p", "2222", "foo_bar"},
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
+	}
+
+	first, err := s.ensureTarget(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.ensureTarget(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatal("same SSH target connection created a second target record")
+	}
+	if first.Domain != "foo-bar.it.sshx" || second.Domain != first.Domain || second.ListenIP != first.ListenIP {
+		t.Fatalf("target records = %#v and %#v", first, second)
+	}
+	if len(s.targets) != 1 {
+		t.Fatalf("target record count = %d, want 1", len(s.targets))
+	}
+}
+
+func TestTargetDomainIsReleasedWithoutUnregisteringCollidingTarget(t *testing.T) {
+	requireTargetLoopback(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{
+		Stderr:   io.Discard,
+		sessions: map[string]*sessionRecord{},
+	}
+	baseReq := Request{
+		SSHPath:      "ssh",
+		Target:       "foo_bar",
+		SSHArgs:      []string{"foo_bar"},
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
+	}
+	collidingReq := baseReq
+	collidingReq.Target = "foo-bar"
+	collidingReq.SSHArgs = []string{"foo-bar"}
+
+	first, err := s.ensureTarget(ctx, baseReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.ensureTarget(ctx, collidingReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Sessions = 1
+	second.Sessions = 1
+	firstKey := requestKey(baseReq.SSHPath, baseReq.SSHArgs)
+	secondKey := requestKey(collidingReq.SSHPath, collidingReq.SSHArgs)
+	s.sessions["first"] = &sessionRecord{ID: "first", TargetKey: firstKey}
+	s.sessions["second"] = &sessionRecord{ID: "second", TargetKey: secondKey}
+
+	s.releaseSession("first")
+	if s.targets[secondKey] != second {
+		t.Fatal("releasing first target removed the colliding target")
+	}
+
+	reused, err := s.ensureTarget(ctx, baseReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.Domain != "foo-bar.it.sshx" {
+		t.Fatalf("reused domain = %q", reused.Domain)
+	}
+
+	thirdReq := baseReq
+	thirdReq.Target = "foo bar"
+	thirdReq.SSHArgs = []string{"foo bar"}
+	third, err := s.ensureTarget(ctx, thirdReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Domain != "foo-bar-2.it.sshx" {
+		t.Fatalf("third domain = %q; colliding target domain was unexpectedly released", third.Domain)
+	}
+}
+
 func TestLoopbackPoolMatchesProvisionedRangeAndReusesReleasedAddresses(t *testing.T) {
 	s := &Server{targets: map[string]*targetRecord{}}
 	for i := 0; i < loopback.Size; i++ {

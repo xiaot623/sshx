@@ -38,6 +38,55 @@ func TestTargetPrefix(t *testing.T) {
 	}
 }
 
+func TestManagerRegisterTargetUsesUniqueNamesAndReusesReleasedName(t *testing.T) {
+	m := NewManager("xiaot.sshx", "127.0.0.1:0", io.Discard)
+
+	first, err := m.RegisterTarget("foo_bar", net.IPv4(127, 64, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.RegisterTarget("foo-bar", net.IPv4(127, 64, 0, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := m.RegisterTarget("foo-bar", net.IPv4(127, 64, 0, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != "foo-bar.xiaot.sshx" || second != "foo-bar-1.xiaot.sshx" || third != "foo-bar-2.xiaot.sshx" {
+		t.Fatalf("registered names = %q, %q, %q", first, second, third)
+	}
+	if ip, ok := m.lookup(first); !ok || !ip.Equal(net.IPv4(127, 64, 0, 1)) {
+		t.Fatalf("first record = %v, %v", ip, ok)
+	}
+	if ip, ok := m.lookup(second); !ok || !ip.Equal(net.IPv4(127, 64, 0, 2)) {
+		t.Fatalf("second record = %v, %v", ip, ok)
+	}
+
+	m.Unregister(first)
+	reused, err := m.RegisterTarget("foo_bar", net.IPv4(127, 64, 0, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused != first {
+		t.Fatalf("reused name = %q, want %q", reused, first)
+	}
+}
+
+func TestManagerRegisterRejectsDuplicateName(t *testing.T) {
+	m := NewManager("xiaot.sshx", "127.0.0.1:0", io.Discard)
+	name := "debian.xiaot.sshx"
+	if err := m.Register(name, net.IPv4(127, 64, 0, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Register(name, net.IPv4(127, 64, 0, 2)); err == nil {
+		t.Fatal("duplicate registration succeeded")
+	}
+	if ip, ok := m.lookup(name); !ok || !ip.Equal(net.IPv4(127, 64, 0, 1)) {
+		t.Fatalf("record after duplicate registration = %v, %v", ip, ok)
+	}
+}
+
 func TestManagerDNSResolvesSuffixToLoopback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
