@@ -26,12 +26,11 @@ type Runner struct {
 	ExecOutput      func(context.Context, string, []string) ([]byte, error)
 	DownloadBinary  func(context.Context, string, string) (string, error)
 	StartBridge     func(context.Context, string, []string, string) (func(), error)
-	EnsureResolver  func(context.Context, config.DomainsFeature) error
+	EnsureResolver  func(context.Context) error
 
 	commandPolicy config.CommandPolicy
 	commandBridge bool
-	forwardPorts  bool
-	domains       config.DomainsFeature
+	autoForward   bool
 }
 
 func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
@@ -83,14 +82,19 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	}
 
 	parsed := sshcompat.Parse(args)
+	timeout, err := commandTimeout(&parsed)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "sshx: %v\n", err)
+		return 2
+	}
 	if parsed.Target == "local" {
-		return r.runLocalBridge(ctx, parsed.RemoteCommand)
+		return r.runLocalBridge(ctx, parsed.RemoteCommand, timeout)
 	}
 	if parsed.NoWrap {
-		return r.execSSH(ctx, parsed.Args)
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
 	if os.Getenv("SSHX_DISABLE") == "1" || parsed.InfoMode || parsed.Target == "" {
-		return r.execSSH(ctx, parsed.Args)
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
 
 	if err := config.EnsureDefault(r.ConfigPath); err != nil {
@@ -109,10 +113,10 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 		return 1
 	}
 	if dockerMatched {
-		return r.runDocker(ctx, parsed, dockerTarget, cfg)
+		return r.runDocker(ctx, parsed, dockerTarget, cfg, timeout)
 	}
 	if !features.Enabled() {
-		return r.execSSH(ctx, parsed.Args)
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
 	if err := recordDefaultVersionState(clientVersion()); err != nil {
 		if cfg.Strict {
@@ -129,15 +133,14 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			return 1
 		}
 		fmt.Fprintf(r.Stderr, "sshx: remote state skipped for %s: %v\n", parsed.Target, err)
-		return r.execSSH(ctx, parsed.Args)
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
 	remoteHome := remoteServerHome(remoteID)
 	r.commandPolicy = cfg.Commands
 	r.commandBridge = features.CommandBridge
-	r.forwardPorts = features.Ports.Auto || features.Domains.Enabled
-	r.domains = features.Domains
-	if features.Domains.Enabled {
-		if err := r.EnsureResolver(ctx, features.Domains); err != nil {
+	r.autoForward = features.AutoForward
+	if features.AutoForward {
+		if err := r.EnsureResolver(ctx); err != nil {
 			if cfg.Strict {
 				fmt.Fprintf(r.Stderr, "sshx: resolver setup unavailable for %s: %v\n", parsed.Target, err)
 				return 1
@@ -151,7 +154,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			fmt.Fprintf(r.Stderr, "sshx: remote server unavailable for %s: %v\n", parsed.Target, err)
 			return 1
 		}
-	} else if features.CommandBridge || r.forwardPorts {
+	} else if features.CommandBridge || features.AutoForward {
 		stopBridge, err := r.StartBridge(ctx, parsed.Target, sshArgs, remoteHome)
 		if err != nil {
 			if cfg.Strict {
@@ -166,7 +169,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 		remoteReady = true
 	}
 	if remoteReady {
-		return r.execSSH(ctx, sessionSSHArgs(parsed, remoteHome))
+		return r.execSSHWithTimeout(ctx, sessionSSHArgs(parsed, remoteHome), timeout)
 	}
-	return r.execSSH(ctx, parsed.Args)
+	return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 }

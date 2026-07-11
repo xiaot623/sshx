@@ -13,13 +13,17 @@ type ServerInfo struct {
 	Address  string `json:"address"`
 	Token    string `json:"token,omitempty"`
 	Version  string `json:"version,omitempty"`
+	PID      int    `json:"pid,omitempty"`
 }
 
-func WriteServerInfo(path, socketPath, token string) error {
+func WriteServerInfo(path, socketPath, token, appVersion string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(ServerInfo{Protocol: "unix", Address: socketPath, Token: token, Version: version.Version}, "", "  ")
+	if appVersion == "" {
+		appVersion = version.Version
+	}
+	b, err := json.MarshalIndent(ServerInfo{Protocol: "unix", Address: socketPath, Token: token, Version: appVersion, PID: os.Getpid()}, "", "  ")
 	if err != nil {
 		return err
 	}

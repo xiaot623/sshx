@@ -133,7 +133,7 @@ func shortDockerID(id string) string {
 	return id[:12]
 }
 
-func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target dockerTarget, cfg config.Config) int {
+func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target dockerTarget, cfg config.Config, timeout time.Duration) int {
 	features := cfg.Features
 	remoteHome := ""
 	remoteReady := false
@@ -179,9 +179,9 @@ func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target 
 	}
 	interactive := isInteractiveIO(r.Stdin, r.Stdout)
 	if remoteReady {
-		return r.execDocker(ctx, dockerSessionArgs(parsed, target.Ref, remoteHome, interactive))
+		return r.execDockerWithTimeout(ctx, dockerSessionArgs(parsed, target.Ref, remoteHome, interactive), timeout)
 	}
-	return r.execDocker(ctx, dockerPlainArgs(parsed, target.Ref, interactive))
+	return r.execDockerWithTimeout(ctx, dockerPlainArgs(parsed, target.Ref, interactive), timeout)
 }
 
 func (r *Runner) startDockerBridge(ctx context.Context, container string, remoteHome string) (func(), error) {
@@ -272,7 +272,17 @@ func (r *Runner) fetchDockerToken(ctx context.Context, container string, remoteH
 }
 
 func (r *Runner) execDocker(ctx context.Context, args []string) int {
-	if err := r.Exec(ctx, r.DockerPath, args); err != nil {
+	return r.execDockerWithTimeout(ctx, args, 0)
+}
+
+func (r *Runner) execDockerWithTimeout(ctx context.Context, args []string, timeout time.Duration) int {
+	commandCtx, cancel := withCommandTimeout(ctx, timeout)
+	defer cancel()
+	if err := r.Exec(commandCtx, r.DockerPath, args); err != nil {
+		if timeout > 0 && errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+			fmt.Fprintf(r.Stderr, "sshx: command timed out after %s\n", timeout)
+			return 124
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()

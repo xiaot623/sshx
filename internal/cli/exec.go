@@ -10,10 +10,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func (r *Runner) execSSH(ctx context.Context, args []string) int {
-	if err := r.Exec(ctx, r.SSHPath, args); err != nil {
+	return r.execSSHWithTimeout(ctx, args, 0)
+}
+
+func (r *Runner) execSSHWithTimeout(ctx context.Context, args []string, timeout time.Duration) int {
+	commandCtx, cancel := withCommandTimeout(ctx, timeout)
+	defer cancel()
+	if err := r.Exec(commandCtx, r.SSHPath, args); err != nil {
+		if timeout > 0 && errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+			fmt.Fprintf(r.Stderr, "sshx: command timed out after %s\n", timeout)
+			return 124
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()

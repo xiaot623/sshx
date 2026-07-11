@@ -36,6 +36,25 @@ func TestExecuteLocalPropagatesBatchStdinOutputStderrAndExitCode(t *testing.T) {
 	}
 }
 
+func TestExecuteLocalHonorsExplicitTimeout(t *testing.T) {
+	started := time.Now()
+	resp := ExecuteLocal(context.Background(), protocol.Frame{
+		Type:          protocol.TypeCommandExec,
+		ID:            "req-timeout",
+		Argv:          []string{"sh", "-c", "sleep 5"},
+		TimeoutMillis: 20,
+	})
+	if resp.Type != protocol.TypeCommandError || !strings.Contains(resp.Error, "timed out after 20ms") {
+		t.Fatalf("response = %#v", resp)
+	}
+	if resp.ExitCode != 124 {
+		t.Fatalf("exit code = %d", resp.ExitCode)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timeout took %s", elapsed)
+	}
+}
+
 func TestServerReturnsClearErrorWithoutClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -157,7 +176,7 @@ func TestServerExitsAfterIdleTimeout(t *testing.T) {
 	socket := shortSocketPath(t)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- (&Server{SocketPath: socket, IdleTimeout: 20 * time.Millisecond}).Serve(ctx)
+		errCh <- (&Server{SocketPath: socket, StartupTimeout: 20 * time.Millisecond}).Serve(ctx)
 	}()
 	waitForSocket(t, socket)
 	select {
@@ -171,6 +190,262 @@ func TestServerExitsAfterIdleTimeout(t *testing.T) {
 	if _, err := os.Stat(socket); !os.IsNotExist(err) {
 		t.Fatalf("socket still exists or unexpected stat error: %v", err)
 	}
+}
+
+func TestPortScanDiffDebouncesGonePorts(t *testing.T) {
+	s := &Server{}
+	observed, gone := s.applyPortScan([]int{8080})
+	if len(observed) != 1 || observed[0] != 8080 || len(gone) != 0 {
+		t.Fatalf("first scan observed=%v gone=%v", observed, gone)
+	}
+	observed, gone = s.applyPortScan(nil)
+	if len(observed) != 0 || len(gone) != 0 {
+		t.Fatalf("first miss observed=%v gone=%v", observed, gone)
+	}
+	observed, gone = s.applyPortScan(nil)
+	if len(observed) != 0 || len(gone) != 1 || gone[0] != 8080 {
+		t.Fatalf("second miss observed=%v gone=%v", observed, gone)
+	}
+	observed, gone = s.applyPortScan([]int{8080})
+	if len(observed) != 1 || observed[0] != 8080 || len(gone) != 0 {
+		t.Fatalf("restart observed=%v gone=%v", observed, gone)
+	}
+}
+
+func TestNewClientReceivesCurrentPortSnapshot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serverConn, clientConn := net.Pipe()
+	s := &Server{Version: "test-version", observedPorts: map[int]bool{8080: true}}
+	go s.handleConn(serverConn)
+
+	ready := make(chan error, 1)
+	observed := make(chan int, 1)
+	clientErr := make(chan error, 1)
+	go func() {
+		clientErr <- RunClientConnWithOptions(ctx, clientConn, ClientOptions{
+			Ready:      ready,
+			AppVersion: "test-version",
+			OnPortObserved: func(port int) {
+				observed <- port
+			},
+		})
+	}()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client did not become ready")
+	}
+	select {
+	case port := <-observed:
+		if port != 8080 {
+			t.Fatalf("observed port = %d", port)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client did not receive current port snapshot")
+	}
+	cancel()
+	select {
+	case <-clientErr:
+	case <-time.After(time.Second):
+		t.Fatal("client did not stop")
+	}
+}
+
+func TestServerExitsAfterLastBridgeClientDisconnects(t *testing.T) {
+	serverCtx := context.Background()
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "test-version", DrainTimeout: 20 * time.Millisecond}).Serve(serverCtx)
+	}()
+	waitForSocket(t, socket)
+
+	clientCtx, cancelClient := context.WithCancel(context.Background())
+	ready := make(chan error, 1)
+	go func() {
+		_ = RunClientConnWithOptions(clientCtx, mustDialUnix(t, socket), ClientOptions{
+			Ready:             ready,
+			AppVersion:        "test-version",
+			HeartbeatInterval: 5 * time.Millisecond,
+			HeartbeatTimeout:  50 * time.Millisecond,
+		})
+	}()
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	cancelClient()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not exit after its last bridge client disconnected")
+	}
+}
+
+func TestServerExpiresClientWithoutHeartbeat(t *testing.T) {
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{
+			SocketPath:       socket,
+			Version:          "test-version",
+			HeartbeatTimeout: 30 * time.Millisecond,
+			DrainTimeout:     10 * time.Millisecond,
+		}).Serve(context.Background())
+	}()
+	waitForSocket(t, socket)
+	conn := mustDialUnix(t, socket)
+	defer conn.Close()
+	enc := protocol.NewEncoder(conn)
+	dec := protocol.NewDecoder(conn)
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "test-version"}); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := dec.Decode(); err != nil || frame.Type != protocol.TypeCapabilities {
+		t.Fatalf("capabilities = %#v, %v", frame, err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not expire a bridge client without heartbeat")
+	}
+}
+
+func TestServerExitsOnVersionChange(t *testing.T) {
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "1.0.0"}).Serve(context.Background())
+	}()
+	waitForSocket(t, socket)
+	conn := mustDialUnix(t, socket)
+	enc := protocol.NewEncoder(conn)
+	dec := protocol.NewDecoder(conn)
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "2.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := dec.Decode()
+	if err != nil || frame.Type != protocol.TypeServerDrain {
+		t.Fatalf("drain frame = %#v, %v", frame, err)
+	}
+	_ = conn.Close()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not exit after version change")
+	}
+}
+
+func TestUnauthenticatedVersionChangeDoesNotStopServer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Token: "secret", Version: "1.0.0"}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+	conn := mustDialUnix(t, socket)
+	enc := protocol.NewEncoder(conn)
+	dec := protocol.NewDecoder(conn)
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, Token: "wrong", ProtocolVersion: protocol.Version + 1, AppVersion: "2.0.0"}); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := dec.Decode()
+	if err != nil || frame.Type != protocol.TypeError {
+		t.Fatalf("error frame = %#v, %v", frame, err)
+	}
+	_ = conn.Close()
+	select {
+	case err := <-errCh:
+		t.Fatalf("server exited after unauthenticated version change: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHeartbeatContinuesDuringCommandExecution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "test-version", HeartbeatTimeout: 40 * time.Millisecond}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+	ready := make(chan error, 1)
+	go func() {
+		_ = RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{
+			Ready:             ready,
+			AppVersion:        "test-version",
+			HeartbeatInterval: 5 * time.Millisecond,
+			HeartbeatTimeout:  30 * time.Millisecond,
+		})
+	}()
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	result, err := RequestCommand(ctx, socket, []string{"sh", "-c", "sleep 0.1; printf ok"}, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Stdout) != "ok" {
+		t.Fatalf("stdout = %q", result.Stdout)
+	}
+	cancel()
+	<-errCh
+}
+
+func TestCommandTimeoutDoesNotRemoveHealthyBridgeClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+
+	ready := make(chan error, 1)
+	go func() {
+		_ = RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{Ready: ready})
+	}()
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+
+	timedOut, err := RequestCommandWithTimeout(ctx, socket, []string{"sh", "-c", "sleep 5"}, nil, nil, "", 20*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out after 20ms") {
+		t.Fatalf("timeout error = %v", err)
+	}
+	if timedOut.ExitCode != 124 {
+		t.Fatalf("exit code = %d", timedOut.ExitCode)
+	}
+
+	result, err := RequestCommand(ctx, socket, []string{"sh", "-c", "printf still-connected"}, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Stdout) != "still-connected" {
+		t.Fatalf("stdout = %q", result.Stdout)
+	}
+
+	cancel()
+	<-errCh
 }
 
 func waitForSocket(t *testing.T, path string) {

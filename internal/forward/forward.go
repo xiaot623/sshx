@@ -2,6 +2,7 @@ package forward
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,49 +12,64 @@ import (
 
 type Manager struct {
 	ctx     context.Context
+	cancel  context.CancelFunc
 	sshPath string
 	sshArgs []string
 	stderr  io.Writer
 
 	mu       sync.Mutex
 	byRemote map[int]*Forward
+	active   map[net.Conn]struct{}
+	stopped  bool
+	wg       sync.WaitGroup
 }
 
 type Forward struct {
 	RemotePort int
 	LocalPort  int
+	ListenIP   string
 	listener   net.Listener
 }
 
 type Entry struct {
 	RemotePort int
 	LocalPort  int
+	ListenIP   string
 }
 
 func NewManager(ctx context.Context, sshPath string, sshArgs []string, stderr io.Writer) *Manager {
+	managerCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		ctx:      ctx,
+		ctx:      managerCtx,
+		cancel:   cancel,
 		sshPath:  sshPath,
 		sshArgs:  append([]string(nil), sshArgs...),
 		stderr:   stderr,
 		byRemote: map[int]*Forward{},
+		active:   map[net.Conn]struct{}{},
 	}
 }
 
-func (m *Manager) Ensure(remotePort int, preferRemoteLocalPort bool) (*Forward, error) {
+func (m *Manager) Ensure(remotePort int, listenIP string) (*Forward, error) {
 	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return nil, errors.New("forward manager is stopped")
+	}
 	if f := m.byRemote[remotePort]; f != nil {
 		m.mu.Unlock()
 		return f, nil
 	}
 	m.mu.Unlock()
 
-	ln, err := listenPreferredPort(remotePort, preferRemoteLocalPort)
+	if listenIP == "" {
+		return nil, errors.New("listen IP is required")
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(listenIP, fmt.Sprint(remotePort)))
 	if err != nil {
 		return nil, err
 	}
-	localPort := ln.Addr().(*net.TCPAddr).Port
-	f := &Forward{RemotePort: remotePort, LocalPort: localPort, listener: ln}
+	f := &Forward{RemotePort: remotePort, LocalPort: remotePort, ListenIP: listenIP, listener: ln}
 
 	m.mu.Lock()
 	if existing := m.byRemote[remotePort]; existing != nil {
@@ -68,42 +84,51 @@ func (m *Manager) Ensure(remotePort int, preferRemoteLocalPort bool) (*Forward, 
 	return f, nil
 }
 
-func listenPreferredPort(remotePort int, preferRemoteLocalPort bool) (net.Listener, error) {
-	if preferRemoteLocalPort {
-		var lastErr error
-		for localPort := remotePort; localPort <= 65535; localPort++ {
-			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))
-			if err == nil {
-				return ln, nil
-			}
-			lastErr = err
-		}
-		return nil, fmt.Errorf("no local port available at or above %d: %w", remotePort, lastErr)
-	}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", remotePort))
-	if err == nil {
-		return ln, nil
-	}
-	return net.Listen("tcp", "127.0.0.1:0")
-}
-
 func (m *Manager) List() []Entry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entries := make([]Entry, 0, len(m.byRemote))
 	for _, f := range m.byRemote {
-		entries = append(entries, Entry{RemotePort: f.RemotePort, LocalPort: f.LocalPort})
+		entries = append(entries, Entry{RemotePort: f.RemotePort, LocalPort: f.LocalPort, ListenIP: f.ListenIP})
 	}
 	return entries
 }
 
-func (m *Manager) Stop() {
+func (m *Manager) Remove(remotePort int) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, f := range m.byRemote {
+	f := m.byRemote[remotePort]
+	delete(m.byRemote, remotePort)
+	m.mu.Unlock()
+	if f != nil {
 		_ = f.listener.Close()
 	}
+}
+
+func (m *Manager) Stop() {
+	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return
+	}
+	m.stopped = true
+	forwards := make([]*Forward, 0, len(m.byRemote))
+	for _, f := range m.byRemote {
+		forwards = append(forwards, f)
+	}
+	connections := make([]net.Conn, 0, len(m.active))
+	for conn := range m.active {
+		connections = append(connections, conn)
+	}
 	m.byRemote = map[int]*Forward{}
+	m.mu.Unlock()
+	m.cancel()
+	for _, f := range forwards {
+		_ = f.listener.Close()
+	}
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	m.wg.Wait()
 }
 
 func (m *Manager) acceptLoop(f *Forward) {
@@ -112,7 +137,24 @@ func (m *Manager) acceptLoop(f *Forward) {
 		if err != nil {
 			return
 		}
-		go m.handleConn(conn, f.RemotePort)
+		m.mu.Lock()
+		if m.stopped {
+			m.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		m.active[conn] = struct{}{}
+		m.wg.Add(1)
+		m.mu.Unlock()
+		go func() {
+			defer m.wg.Done()
+			defer func() {
+				m.mu.Lock()
+				delete(m.active, conn)
+				m.mu.Unlock()
+			}()
+			m.handleConn(conn, f.RemotePort)
+		}()
 	}
 }
 

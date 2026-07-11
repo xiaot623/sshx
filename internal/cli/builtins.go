@@ -80,7 +80,9 @@ func (r *Runner) runServer(ctx context.Context, args []string) int {
 	infoPath := fs.String("server-info", defaultServerInfoPath(), "server-info path")
 	token := fs.String("token", "", "server authentication token; generated when empty")
 	portScanInterval := fs.Duration("port-scan-interval", 2*time.Second, "localhost port scan interval; 0 disables scanning")
-	idleTimeout := fs.Duration("idle-timeout", 10*time.Minute, "exit after this long without bridge clients; 0 disables idle exit")
+	startupTimeout := fs.Duration("startup-timeout", bridge.DefaultServerStartTimeout, "exit if no bridge client arrives within this duration")
+	heartbeatTimeout := fs.Duration("heartbeat-timeout", bridge.DefaultHeartbeatTimeout, "disconnect bridge clients that stop renewing their lease")
+	drainTimeout := fs.Duration("drain-timeout", bridge.DefaultServerDrainTimeout, "exit after the last bridge client disconnects")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -96,7 +98,16 @@ func (r *Runner) runServer(ctx context.Context, args []string) int {
 		fmt.Fprintf(r.Stderr, "sshx server: version state: %v\n", err)
 		return 1
 	}
-	s := &bridge.Server{SocketPath: *socketPath, InfoPath: *infoPath, Token: *token, PortScanInterval: *portScanInterval, IdleTimeout: *idleTimeout}
+	s := &bridge.Server{
+		SocketPath:       *socketPath,
+		InfoPath:         *infoPath,
+		Token:            *token,
+		Version:          clientVersion(),
+		PortScanInterval: *portScanInterval,
+		StartupTimeout:   *startupTimeout,
+		HeartbeatTimeout: *heartbeatTimeout,
+		DrainTimeout:     *drainTimeout,
+	}
 	if err := s.Serve(ctx); err != nil {
 		fmt.Fprintf(r.Stderr, "sshx server: %v\n", err)
 		return 1
@@ -147,7 +158,7 @@ func (r *Runner) runLocalDaemon(ctx context.Context, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	s := &locald.Server{SocketPath: *socketPath, Stderr: r.Stderr}
+	s := &locald.Server{SocketPath: *socketPath, Stderr: r.Stderr, Version: clientVersion()}
 	if err := s.Serve(ctx); err != nil {
 		fmt.Fprintf(r.Stderr, "sshx local-daemon: %v\n", err)
 		return 1
@@ -186,7 +197,7 @@ func (r *Runner) runInstallResolver(args []string) int {
 	return 0
 }
 
-func (r *Runner) runLocalBridge(ctx context.Context, argv []string) int {
+func (r *Runner) runLocalBridge(ctx context.Context, argv []string, timeout time.Duration) int {
 	socketPath := os.Getenv("SSHX_BRIDGE_SOCKET")
 	token := os.Getenv("SSHX_BRIDGE_TOKEN")
 	if socketPath == "" && (os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSHX_SERVER_HOME") != "") {
@@ -213,10 +224,10 @@ func (r *Runner) runLocalBridge(ctx context.Context, argv []string) int {
 			token = info.Token
 		}
 	}
-	result, err := bridge.RequestCommand(ctx, socketPath, argv, stdin, nil, "", token)
+	result, err := bridge.RequestCommandWithTimeout(ctx, socketPath, argv, stdin, nil, "", timeout, token)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx local: %v\n", err)
-		return 1
+		return result.ExitCode
 	}
 	_, _ = r.Stdout.Write(result.Stdout)
 	_, _ = r.Stderr.Write(result.Stderr)

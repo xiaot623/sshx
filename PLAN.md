@@ -62,7 +62,7 @@ sshx uses one long-running Server daemon per client target alias, shared by that
 └──────────────────────────────┘     └──────────────────────────────┘
 ```
 
-- **Server lifecycle**: The first matched `sshx <host>` starts the Server on the remote. The Server stays alive after clients disconnect (configurable idle timeout, e.g., exit after 10 minutes with no connected clients).
+- **Server lifecycle**: The first matched `sshx <host>` starts the Server on the remote. Clients hold heartbeat-backed leases; the Server drains and exits after the last lease closes or expires.
 - **Port forwarding**: Centrally managed by the Server — no port conflicts across concurrent terminals.
 - **Discovery**: The client maintains a stable target-alias → UUID mapping locally. The remote Server writes connection info under `~/.sshx_server/<uuid>/server-info` (Unix socket path + auth token). Each new client terminal for that alias reads this isolated file to connect.
 
@@ -143,7 +143,7 @@ v1 uses batch stdin: all stdin data is collected and sent before the command sta
 
 ### Ports & Domains
 
-- The remote Server only sniffs TCP listening ports on `127.0.0.1` / `::1` by default. `0.0.0.0` ports are not sniffed without explicit configuration.
+- The remote Server sniffs TCP listening ports bound to the loopback interface (`127.0.0.1` / `::1`) and the wildcard addresses (`0.0.0.0` / `::`). Wildcard listeners are reachable via `127.0.0.1` on the remote, so they are forwarded identically. Bindings on other interfaces are not sniffed. Privileged ports (< 1024) are not auto-forwarded (unprivileged users cannot bind them locally); manual `sshx forward add` is unaffected.
 - The Server sends a `port.observed` message when a new port is detected.
 - The local daemon creates forwardings and domain routes.
 - Domain suffix: `${user}.sshx` (e.g., `xiaot.sshx`). Avoids `.local` which conflicts with mDNS/Bonjour.
@@ -187,8 +187,8 @@ features:
   commandBridge: true
   ports:
     auto: true
-    # Only forwards 127.0.0.1 / ::1 ports by default
-    # bindAll: false   # future option to enable 0.0.0.0 ports
+    # Forwards 127.0.0.1 / ::1 and 0.0.0.0 / :: listeners by default.
+    # Bindings on other interfaces are not forwarded.
   domains:
     enabled: true
     suffix: xiaot.sshx   # {user}.sshx
@@ -228,12 +228,12 @@ SSHX_DISABLE=1 sshx remote
 
 - The first matched connection installs the remote binary and starts the shared Server.
 - A second concurrent client connects to the same Server (shared port forwarding, domain routing).
-- The Server stays alive through brief disconnects (idle timeout).
+- The local daemon exits with its last client lease. The remote Server exits after its last heartbeat-backed bridge lease closes or expires.
 - On Server exception, fall back to ordinary SSH (unless `strict: true`).
 
 ### Feature Integration
 
-- Remote port sniffing creates forwardings and domain routes (localhost ports only).
+- Remote port sniffing creates forwardings and domain routes (loopback and wildcard listeners).
 - Concurrent terminals to the same host share forwarding state — no port conflicts.
 - DNS suffix setup requires authorization only once; subsequent dynamic domain names work without repeated prompts.
 - The user SSH session receives `SSHX_SERVER_HOME=$HOME/.sshx_server/<uuid>` and has that directory prepended to `PATH`, so `sshx local ...` resolves to the isolated remote binary and server-info for the correct client.

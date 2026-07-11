@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/locald"
+	"github.com/xiaot623/sshx/internal/loopback"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 	"github.com/xiaot623/sshx/internal/version"
 )
@@ -204,6 +206,55 @@ func TestNoWrapDelegatesToSSHWithoutNoWrapFlag(t *testing.T) {
 	}
 }
 
+func TestRemoteCommandTimeoutIsHandledBySSHX(t *testing.T) {
+	var stderr bytes.Buffer
+	var gotArgs []string
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	r.Exec = func(ctx context.Context, _ string, args []string) error {
+		gotArgs = append([]string(nil), args...)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	started := time.Now()
+	code := r.Run(context.Background(), []string{"--no-wrap", "remote", "--timeout=20ms", "sh", "-c", "sleep 5"})
+	if code != 124 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timeout took %s", elapsed)
+	}
+	want := []string{"remote", "sh", "-c", "sleep 5"}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("ssh args = %#v, want %#v", gotArgs, want)
+	}
+	if !strings.Contains(stderr.String(), "command timed out after 20ms") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestCommandTimeoutAcceptsBareSecondsAndDuration(t *testing.T) {
+	for value, want := range map[string]time.Duration{
+		"30":    30 * time.Second,
+		"500ms": 500 * time.Millisecond,
+		"2m":    2 * time.Minute,
+	} {
+		got, err := parseCommandTimeout(value)
+		if err != nil {
+			t.Fatalf("parseCommandTimeout(%q): %v", value, err)
+		}
+		if got != want {
+			t.Fatalf("parseCommandTimeout(%q) = %s, want %s", value, got, want)
+		}
+	}
+}
+
+func TestCommandTimeoutRequiresCommand(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"remote", "--timeout=30"})
+	if _, err := commandTimeout(&parsed); err == nil || !strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) {
 	old := version.Version
 	version.Version = "1.2.3-rc.1"
@@ -251,12 +302,15 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	if string(uploaded) != "binary-data" {
 		t.Fatalf("uploaded = %q", uploaded)
 	}
-	if len(execCalls) != 2 {
+	if len(execCalls) != 3 {
 		t.Fatalf("exec calls = %#v", execCalls)
 	}
-	if !strings.Contains(strings.Join(execCalls[0].args, " "), "SSHX_SERVER_HOME") ||
-		!strings.Contains(strings.Join(execCalls[0].args, " "), ".sshx_server/client-remote") {
-		t.Fatalf("start args = %#v", execCalls[0].args)
+	if !strings.Contains(strings.Join(execCalls[0].args, " "), "kill") {
+		t.Fatalf("stop args = %#v", execCalls[0].args)
+	}
+	if !strings.Contains(strings.Join(execCalls[1].args, " "), "SSHX_SERVER_HOME") ||
+		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/client-remote") {
+		t.Fatalf("start args = %#v", execCalls[1].args)
 	}
 }
 
@@ -283,8 +337,15 @@ func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(execCalls) != 2 {
+	if len(execCalls) != 3 {
 		t.Fatalf("exec calls = %#v", execCalls)
+	}
+}
+
+func TestStopServerScriptHasValidShellSyntax(t *testing.T) {
+	cmd := exec.Command("sh", "-n", "-c", stopServerScript(remoteServerHome("client-remote")))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("shell syntax: %v: %s", err, output)
 	}
 }
 
@@ -313,6 +374,7 @@ func TestInstallResolverPrintsResolverFileWithoutApplying(t *testing.T) {
 }
 
 func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
+	requireTargetLoopback(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir, err := os.MkdirTemp("/tmp", "sshx-cli-")
@@ -321,7 +383,7 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	socket := filepath.Join(dir, "local.sock")
-	srv := &locald.Server{SocketPath: socket}
+	srv := &locald.Server{SocketPath: socket, Version: "test-version"}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.Serve(ctx)
@@ -329,12 +391,30 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 	waitForLocalDaemonSocket(t, socket)
 	t.Setenv("SSHX_LOCAL_DAEMON_SOCKET", socket)
 
+	// EnsureTargetPort requires an active session lease since the lifecycle
+	// hardening commit; open one before issuing the ensure request.
+	session, err := locald.OpenSession(ctx, socket, locald.Request{
+		SSHPath:      "ssh",
+		Target:       "debian",
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
+		SessionID:    "session-typo",
+		AppVersion:   "test-version",
+	}, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
 	remotePort := freeLocalTCPPort(t)
 	resp, err := locald.ClientRequest(ctx, socket, locald.Request{
-		Type:       locald.TypeEnsurePort,
-		SSHPath:    "ssh",
-		Target:     "debian",
-		RemotePort: remotePort,
+		Type:         locald.TypeEnsureTargetPort,
+		SSHPath:      "ssh",
+		Target:       "debian",
+		RemotePort:   remotePort,
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
+		SessionID:    "session-typo",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -349,7 +429,7 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	want := "http://127.0.0.1:" + itoa(resp.LocalPort) + " -> debian:" + itoa(remotePort) + "\n"
+	want := "http://debian.it.sshx:" + itoa(remotePort) + " -> debian:" + itoa(remotePort) + "\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
@@ -363,6 +443,15 @@ func TestForwardTypoAliasListsForwardedPorts(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("server did not stop")
 	}
+}
+
+func requireTargetLoopback(t *testing.T) {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort(loopback.Address(0), "0"))
+	if err != nil {
+		t.Skipf("target loopback aliases are unavailable: %v", err)
+	}
+	_ = ln.Close()
 }
 
 func TestForwardAddressUsesDomainWhenAvailable(t *testing.T) {
@@ -401,21 +490,20 @@ commands:
 	}
 }
 
-func TestGlobalDomainFeatureEnsuresResolver(t *testing.T) {
+func TestGlobalAutoForwardFeatureEnsuresResolver(t *testing.T) {
 	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
-  domains:
-    enabled: true
+  autoForward: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var ensured bool
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
-	r.EnsureResolver = func(_ context.Context, cfg config.DomainsFeature) error {
-		ensured = cfg.Enabled
+	r.EnsureResolver = func(context.Context) error {
+		ensured = true
 		return nil
 	}
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
@@ -436,20 +524,19 @@ features:
 	}
 }
 
-func TestGlobalDomainFeatureStartsBridgeWithoutCommandBridge(t *testing.T) {
+func TestGlobalAutoForwardFeatureStartsBridgeWithoutCommandBridge(t *testing.T) {
 	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 features:
-  domains:
-    enabled: true
+  autoForward: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var bridgeStarted bool
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
-	r.EnsureResolver = func(context.Context, config.DomainsFeature) error { return nil }
+	r.EnsureResolver = func(context.Context) error { return nil }
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
 		return sameVersionRemoteProbe(), nil
 	}
@@ -885,6 +972,37 @@ func TestResolverContentUsesConfiguredDNSAddress(t *testing.T) {
 	}
 	if content != "nameserver 127.0.0.1\nport 53535\n" {
 		t.Fatalf("content = %q", content)
+	}
+}
+
+func TestMissingLoopbackAliases(t *testing.T) {
+	// Realistic ifconfig lo0 excerpt: only 127.0.0.1 and one alias present.
+	src := `lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+	options=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>
+	inet 127.0.0.1 netmask 0xff000000
+	inet 127.64.0.2 netmask 0xff000000
+	inet6 ::1 prefixlen 128
+	nd6 options=201<PERFORMNUD,DAD>
+`
+	missing := missingLoopbackAliases(src)
+	if len(missing) != loopback.Size-1 || missing[0] != "127.64.0.1" || missing[1] != "127.64.0.3" || missing[len(missing)-1] != "127.64.0.64" {
+		t.Fatalf("unexpected missing aliases: %v", missing)
+	}
+
+	// Fully provisioned pool yields nothing to do.
+	var full strings.Builder
+	full.WriteString("lo0:\n\tinet 127.0.0.1 netmask 0xff000000\n")
+	for i := 0; i < loopback.Size; i++ {
+		full.WriteString("\tinet " + loopback.Address(i) + " netmask 0xff000000\n")
+	}
+	if got := missingLoopbackAliases(full.String()); len(got) != 0 {
+		t.Fatalf("got %v, want empty", got)
+	}
+
+	// Empty ifconfig output means provision the whole pool.
+	got := missingLoopbackAliases("")
+	if len(got) != loopback.Size || got[0] != "127.64.0.1" || got[len(got)-1] != "127.64.0.64" {
+		t.Fatalf("unexpected full pool: %v", got)
 	}
 }
 

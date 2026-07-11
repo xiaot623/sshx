@@ -12,10 +12,7 @@ func TestLoadGlobalFeaturesAndCommandPolicy(t *testing.T) {
 strict: true
 features:
   commandBridge: true
-  ports:
-    auto: true
-  domains:
-    enabled: true
+  autoForward: true
 commands:
   deny:
     - rm
@@ -27,7 +24,7 @@ commands:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.Ports.Auto || !cfg.Features.Domains.Enabled {
+	if !cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 	if !cfg.Commands.Allows([]string{"uname", "-a"}) {
@@ -54,7 +51,7 @@ func TestEnsureDefaultWritesEmbeddedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.Ports.Auto || !cfg.Features.Domains.Enabled {
+	if cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward {
 		t.Fatalf("unexpected default config: %#v", cfg)
 	}
 }

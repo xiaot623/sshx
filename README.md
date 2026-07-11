@@ -5,9 +5,9 @@
 **sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host (or Docker container) with sshx-aware features enabled, you unlock a persistent, shared remote server that gives you:
 
 - 🔄 **Reverse command bridge** — run `sshx local <cmd>` *on the remote* to execute commands on your local machine, with stdout, stderr, exit code, and stdin all propagated.
-- 🔌 **Automatic port forwarding** — remote loopback listeners (e.g., a dev server on `localhost:8080`) are automatically detected and forwarded to your local machine.
+- 🔌 **Automatic port forwarding** — remote local listeners (loopback `127.0.0.1` and wildcard `0.0.0.0`; e.g., a dev server on `0.0.0.0:8080` or `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
-- 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. The same bridge, port forwarding, and domain features work inside containers via `docker exec`.
+- 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. Command bridge support works inside containers via `docker exec`.
 
 ## Why sshx?
 
@@ -39,7 +39,7 @@ When the target doesn't match any SSH host, sshx falls back to resolving it as a
 - `sshx <container-name>` — opens a shell in the container via `docker exec`.
 - `sshx <container-id-prefix>` — matches by container ID prefix.
 - Explicit SSH targets (`user@host`, IP addresses, hostnames with dots/colons) are never treated as Docker containers.
-- The full sshx feature set (command bridge, port detection, domain binding) works inside containers.
+- Command bridge support works inside containers.
 - Requires `docker` CLI available on the local machine — gracefully falls back to SSH if Docker isn't found or the container isn't running.
 
 ### 🔄 Remote-to-Local Command Bridge
@@ -51,26 +51,28 @@ Run commands on your **local machine** from inside an SSH session:
 sshx local cat ~/my-local-file.txt
 sshx local open -a "Google Chrome" "http://localhost:3000"
 sshx local pbcopy < /tmp/some-data
+sshx local --timeout=30 npm test
 ```
 
 - stdout, stderr, and exit codes propagate correctly.
 - stdin is sent in batch mode — pipe data in and it reaches the local command.
+- Commands have no implicit deadline. Put `--timeout=<duration>` immediately after the target to opt in; bare numbers mean seconds, and values such as `500ms`, `30s`, and `2m` are accepted. Timed-out commands exit with status 124.
 - Policy: a configurable deny list controls which commands are blocked.
 
 ### 🔌 Automatic Port Detection & Forwarding
 
-When a process on the remote starts listening on `127.0.0.1` (e.g., `npm run dev` on port 3000), sshx detects it and:
+When a process on the remote starts listening on `127.0.0.1` or `0.0.0.0` (e.g., `npm run dev` on port 3000), sshx detects it and:
 
 1. Broadcasts the port to the local daemon.
-2. Creates a shared TCP forward over SSH.
-3. Binds the SSH target domain, e.g. `debian.<your-user>.sshx`.
+2. Assigns the SSH target its own loopback IP.
+3. Exposes a TCP proxy at the target domain, e.g. `debian.<your-user>.sshx:3000`.
 
-sshx first tries to use the same local port as the remote listener. If that local port is already occupied, it automatically tries the next port (`+1`) until it finds a free one. Run `sshx forward` to see the active mapping.
+The URL port is the remote port. sshx does not bind `127.0.0.1:<port>`; it binds the target's private loopback IP instead, so `debian.<your-user>.sshx:8080` and `ubuntu.<your-user>.sshx:8080` can point at different hosts at the same time. Run `sshx forward` to see the active mappings.
 
 ### 🌐 Local Domains (macOS, Linux)
 
-- A local DNS responder on `127.0.0.1:53` resolves `*.sshx` names dynamically.
-- The domain resolves to localhost; the URL port selects the forwarded local listener.
+- A local DNS responder on `127.0.0.1:53` resolves active target names dynamically.
+- Each target domain resolves to a private loopback IP; the URL port selects the remote listener.
 - On macOS, `/etc/resolver/<suffix>` is configured once (with `sudo` when needed).
 - All terminals on the same host share one DNS resolver and forwarding daemon.
 
@@ -79,7 +81,9 @@ sshx first tries to use the same local port as the remote listener. If that loca
 - One **server daemon** per client target alias, installed under `~/.sshx_server/<uuid>` on the remote and shared by that client's concurrent SSH sessions.
 - Client connects via a hidden `socket-proxy` SSH channel.
 - Server manages port sniffing, forwarding state, and command bridge routing centrally.
-- Server stays alive through brief disconnects, exiting after an idle timeout with no clients.
+- Clients renew local and remote leases every 5 seconds. A daemon expires a client after 15 seconds without a heartbeat.
+- The local daemon exits when its last client lease closes. The remote server drains briefly and exits after its last bridge lease closes.
+- Application or protocol version changes drain the existing daemon before the current binary starts a replacement.
 
 ---
 
@@ -135,6 +139,7 @@ The alias is safe — unmatched hosts have zero overhead and zero side effects.
 sshx my-server
 sshx my-server uname -s
 sshx -p 2222 user@my-server hostname
+sshx my-server --timeout=30 npm test
 ```
 
 All existing SSH options work — `-F`, `-o`, `-J`, `ProxyJump`, etc. are handled by OpenSSH.
@@ -150,6 +155,9 @@ sshx 4fa8bc
 
 # Run a command directly
 sshx my-container cat /etc/os-release
+
+# Stop a command after 30 seconds (bare numbers are seconds)
+sshx my-container --timeout=30 npm test
 ```
 
 sshx detects that the target isn't an SSH host and automatically uses `docker exec`. The command bridge and other features work exactly the same inside containers.
@@ -161,15 +169,20 @@ Inside your SSH session on the remote:
 ```sh
 sshx local uname -s
 # → Darwin (your local machine's OS)
+
+# Long-running bridge commands have no implicit deadline; opt in when needed
+sshx local --timeout=30 npm test
 ```
 
 ### 3. Start a dev server on the remote
 
-On the remote, start a server listening on `localhost`:
+On the remote, start a server:
 
 ```sh
-python3 -m http.server 8080 --bind 127.0.0.1
+python3 -m http.server 8080
 ```
+
+`python3 -m http.server` binds to `0.0.0.0` by default; sshx detects it the same as a `--bind 127.0.0.1` listener. Explicit `--bind <ip>` to a non-loopback interface is not forwarded.
 
 On your **local** machine, open:
 
@@ -177,13 +190,12 @@ On your **local** machine, open:
 http://my-server.<your-user>.sshx:8080
 ```
 
-No `-L` flags, no manual forwarding.
-
-If local port `8080` is already occupied, sshx will try `8081`, then `8082`, and so on. Check the chosen port with:
+No `-L` flags, no manual forwarding. Since each target gets its own loopback IP, another target can expose its own `8080` at the same time:
 
 ```sh
 sshx forward
-# 8080 -> my-server:8080
+# http://my-server.<your-user>.sshx:8080 -> my-server:8080
+# http://other-server.<your-user>.sshx:8080 -> other-server:8080
 ```
 
 ---
@@ -201,17 +213,9 @@ features:
   # Remote-to-local command bridge (`sshx local <cmd>` on the remote)
   commandBridge: true
 
-  ports:
-    # Auto-detect loopback TCP listeners on the remote and forward them.
-    auto: true
-    # Future: also detect 0.0.0.0 listeners.
-    # bindAll: false
-
-  domains:
-    # Enable local domain binding (<host>.<user>.sshx:<port>).
-    enabled: true
-    # Custom domain suffix. Default: <local-user>.sshx
-    suffix: user.sshx
+  # Auto-detect remote loopback and wildcard TCP listeners and expose them via
+  # <host>.<user>.sshx:<remote-port>.
+  autoForward: true
 
 commands:
   # Commands blocked from bridge execution.
@@ -238,7 +242,7 @@ commands:
 
 1. **Connection**: `sshx remote` opens a normal SSH session and starts (or connects to) the client-target `sshx server` under `~/.sshx_server/<uuid>`.
 2. **Bridge channel**: A hidden `socket-proxy` SSH channel links the local daemon to the remote server.
-3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback listeners.
+3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback (`127.0.0.1` / `::1`) and wildcard (`0.0.0.0` / `::`) listeners.
 4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using `ssh -W`.
 5. **Domains**: The local DNS responder maps `<target>.<suffix>` → localhost. The browser's URL port selects the local forwarded port.
 

@@ -2,10 +2,7 @@ strict: false
 
 features:
   commandBridge: true
-  ports:
-    auto: true
-  domains:
-    enabled: true
+  autoForward: true
 
 commands:
   deny: []
