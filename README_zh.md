@@ -5,6 +5,7 @@
 **sshx** 是 OpenSSH 的即插即用封装器。设置 `alias ssh=sshx` 后，你现有的 SSH 工作流完全不受影响——所有参数、配置和连接都原样透传。但当连接到启用了 sshx 特性的主机（或 Docker 容器）时，你会获得一个持久化的共享远程服务器，提供以下能力：
 
 - 🔄 **反向命令桥** — 在*远程*执行 `sshx local <cmd>`，命令实际在你的本地机器上运行，stdout、stderr、退出码和 stdin 全部正确传递。
+- 📁 **双向工作区挂载** — 按需开启后，将命令发起侧的当前目录提供给另一侧执行的命令。
 - 🔌 **自动端口转发** — 远程本地监听端口（回环 `127.0.0.1` 与通配 `0.0.0.0`；如在 `0.0.0.0:8080` 或 `localhost:8080` 上的开发服务器）被自动检测并转发到本地。
 - 🌐 **本地域名绑定** — 在本地浏览器中通过 `<主机>.<用户名>.sshx:<端口>` 访问转发端口，无需手动设置 `-L` 参数。
 - 🐳 **Docker 容器支持** — 通过名称或 ID 直接连接运行中的容器：`sshx my-container`。命令桥可通过 `docker exec` 在容器内工作。
@@ -58,6 +59,19 @@ sshx local --timeout=30 npm test
 - stdin 以批量模式发送——管道输入数据会到达本地命令。
 - 命令默认没有隐式截止时间。如需限制，请紧跟 target 指定 `--timeout=<时长>`；裸数字按秒解释，也支持 `500ms`、`30s`、`2m`。超时退出码为 124。
 - 策略：通过可配置的拒绝列表控制哪些命令被阻止。
+
+### 📁 双向工作区挂载（按需开启，Beta）
+
+设置 `features.remoteFs: true` 后，命令发起侧的当前目录会通过可读写 FUSE 挂载暴露给另一侧：
+
+- `sshx remote <cmd>` 在本地当前目录的远程挂载视图中启动远程命令。
+- 交互式 `sshx remote` 仍从远程 HOME 启动，`SSHX_WORKSPACE` 指向挂载后的本地工作区。
+- 在该会话内执行 `sshx local <cmd>` 时，远程当前目录会挂载到本地，本地命令从挂载目录启动。
+- 写入和 `fsync` 会立即回源；元数据与目录项采用短 TTL，重新打开文件时会重新校验。
+
+开启后 FUSE 是硬依赖：即使 `strict` 为 false，挂载失败也会直接终止命令，不会静默回退。Linux 需要 `/dev/fuse` 与 `fusermount`/`fusermount3`；macOS 需要当前版本的 macFUSE，现阶段标记为 Beta。远程 target 必须是可使用 FUSE 的 Linux。
+
+首版只保证工作区内的相对路径，不改写命令中的绝对路径，也不支持额外挂载根、特殊文件、xattr/ACL、Docker target、FUSE-T 或 FSKit。目标负载是源码树与小文件，不追求大文件吞吐。
 
 ### 🔌 自动端口检测与转发
 
@@ -217,6 +231,10 @@ features:
   # <host>.<user>.sshx:<远程端口> 暴露。
   autoForward: true
 
+  # 双向读写工作区挂载。默认：false。
+  # 本地机器和远程 target 都必须具备 FUSE。
+  remoteFs: false
+
 commands:
   # 阻止通过命令桥执行的命令列表。
   deny: []
@@ -241,7 +259,7 @@ commands:
 ```
 
 1. **连接**：`sshx remote` 打开一个正常的 SSH 会话，并在远程 `~/.sshx_server/<uuid>` 下启动（或连接到）该 client-target 对应的 `sshx 服务器`。
-2. **桥接通道**：一条隐藏的 `socket-proxy` SSH 通道将本地守护进程连接到远程服务器。
+2. **桥接通道**：隐藏的 control `socket-proxy` 通道连接客户端与远程服务器；`remoteFs` 另建一条按 session ID 精确配对、有界 framing 的数据通道。
 3. **端口嗅探**：服务器读取 `/proc/net/tcp*`（Linux）来检测回环（`127.0.0.1` / `::1`）和通配（`0.0.0.0` / `::`）监听端口。
 4. **转发**：检测到的端口通过单个共享本地守护进程使用 `ssh -W` 转发。
 5. **域名**：本地 DNS 应答器将 `<target>.<suffix>` 映射到 localhost。浏览器 URL 中的端口选择对应的本地转发端口。
@@ -255,6 +273,8 @@ commands:
 - `sshx --no-wrap ...` — 跳过所有 sshx 行为，直接调用原始 `ssh`。
 - `SSHX_DISABLE=1 sshx ...` — 与 `--no-wrap` 相同，适用于脚本场景。
 - 在**客户端**上执行 `sshx local ...`（非远程会话中）— 立即报错并给出清晰提示。`local` 是全局保留名称。
+- `remoteFs` 不会静默回退到未挂载的命令；FUSE 挂载失败即失败。
+- 工作区导出使用 Go `os.Root` 锚定，拒绝路径穿越和符号链接逃逸。
 - Docker 容器未运行或不可达时纯透传——sshx 回退到原始 `ssh`，无副作用。
 - 不匹配的主机纯透传——不创建文件，不启动进程。
 
@@ -271,6 +291,7 @@ commands:
 - **客户端**：macOS 和 Linux 完全支持。
 - **服务器**：远程 sshx 服务器需要 Linux（使用 `/proc/net/tcp*` 进行端口检测）。
 - **Docker 客户端**：macOS 和 Linux——通过 `docker exec` 连接任意运行中的 Docker 容器。
+- **remoteFs**：Linux 已支持；macOS 客户端依赖 macFUSE，当前为 Beta；不支持 Docker target。
 
 ---
 
@@ -285,6 +306,7 @@ sshx/
 │   ├── config/        # YAML 配置
 │   ├── protocol/      # 客户端-服务器通信协议
 │   ├── bridge/        # 命令桥（远程 → 本地执行）
+│   ├── remotefs/      # FS 协议、安全后端与 FUSE adapter
 │   ├── ports/         # 端口嗅探（/proc/net/tcp*）
 │   ├── forward/       # TCP 转发
 │   ├── domain/        # DNS 解析器
@@ -300,7 +322,8 @@ sshx/
 ## 路线图
 
 - [x] **v1** — 命令桥（非交互式）、自动端口转发、域名绑定、共享服务器
-- [ ] **v2** — 命令桥流式 stdin、远程 FUSE 挂载、GitHub 二进制发布、Windows 客户端支持
+- [ ] **v2** — 命令桥流式 stdin、GitHub 二进制发布、Windows 客户端支持
+- [x] **remoteFs Beta** — Linux/macOS 客户端与 Linux target 的双向读写工作区挂载
 
 ---
 

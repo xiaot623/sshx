@@ -6,7 +6,7 @@ import (
 	"io"
 )
 
-const Version = 2
+const Version = 3
 
 const (
 	TypeHello         = "hello"
@@ -41,6 +41,9 @@ type Frame struct {
 	Argv            []string          `json:"argv,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
 	Cwd             string            `json:"cwd,omitempty"`
+	RemoteFS        bool              `json:"remoteFs,omitempty"`
+	MountID         string            `json:"mountId,omitempty"`
+	MountPath       string            `json:"mountPath,omitempty"`
 	Stdin           string            `json:"stdin,omitempty"`
 	TimeoutMillis   int64             `json:"timeoutMillis,omitempty"`
 	ExitCode        int               `json:"exitCode,omitempty"`

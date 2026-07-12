@@ -13,6 +13,7 @@ strict: true
 features:
   commandBridge: true
   autoForward: true
+  remoteFs: true
 commands:
   deny:
     - rm
@@ -24,7 +25,7 @@ commands:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward {
+	if !cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward || !cfg.Features.RemoteFS {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 	if !cfg.Commands.Allows([]string{"uname", "-a"}) {
@@ -51,7 +52,7 @@ func TestEnsureDefaultWritesEmbeddedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward {
+	if cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward || cfg.Features.RemoteFS {
 		t.Fatalf("unexpected default config: %#v", cfg)
 	}
 }
@@ -93,5 +94,8 @@ func TestFeaturesEnabled(t *testing.T) {
 	}
 	if !(Features{CommandBridge: true}).Enabled() {
 		t.Fatal("command bridge should enable features")
+	}
+	if !(Features{RemoteFS: true}).Enabled() {
+		t.Fatal("remote fs should enable features")
 	}
 }

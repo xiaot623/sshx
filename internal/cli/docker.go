@@ -135,6 +135,10 @@ func shortDockerID(id string) string {
 
 func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target dockerTarget, cfg config.Config, timeout time.Duration) int {
 	features := cfg.Features
+	if features.RemoteFS {
+		fmt.Fprintln(r.Stderr, "sshx: remoteFs does not support Docker targets yet")
+		return 1
+	}
 	remoteHome := ""
 	remoteReady := false
 	if features.CommandBridge {

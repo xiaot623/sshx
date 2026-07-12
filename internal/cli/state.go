@@ -98,6 +98,18 @@ func remoteServerEnvScript(remoteHome string) string {
 	return "SSHX_SERVER_HOME=\"" + strings.ReplaceAll(remoteHome, `"`, `\"`) + "\"; export SSHX_SERVER_HOME; case \":$PATH:\" in *\":$SSHX_SERVER_HOME:\"*) ;; *) PATH=\"$SSHX_SERVER_HOME:$PATH\" ;; esac; export PATH"
 }
 
+func remoteBridgeEnvScript(remoteHome string, session *BridgeSession) string {
+	script := remoteServerEnvScript(remoteHome)
+	if session == nil || session.SessionID == "" {
+		return script
+	}
+	script += "; SSHX_SESSION_ID=" + shellQuote(session.SessionID) + "; export SSHX_SESSION_ID"
+	if session.Workspace != "" {
+		script += "; SSHX_WORKSPACE=" + shellQuote(session.Workspace) + "; SSHX_REMOTE_FS=1; export SSHX_WORKSPACE SSHX_REMOTE_FS"
+	}
+	return script
+}
+
 type versionState struct {
 	CurrentVersion string `json:"current_version"`
 	LastVersion    string `json:"last_version,omitempty"`

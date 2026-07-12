@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"github.com/xiaot623/sshx/internal/ports"
 	"github.com/xiaot623/sshx/internal/processlock"
 	"github.com/xiaot623/sshx/internal/protocol"
+	"github.com/xiaot623/sshx/internal/remotefs"
 	"github.com/xiaot623/sshx/internal/version"
 )
 
@@ -36,6 +38,7 @@ type CommandAllowed func([]string) bool
 type ClientOptions struct {
 	Ready             chan<- error
 	Allow             CommandAllowed
+	Execute           func(context.Context, protocol.Frame) protocol.Frame
 	OnPortObserved    func(port int)
 	OnPortGone        func(port int)
 	AppVersion        string
@@ -61,9 +64,16 @@ type Server struct {
 	HeartbeatTimeout time.Duration
 	DrainTimeout     time.Duration
 	Version          string
+	FSSocketPath     string
+	MountRoot        string
+	MountDriver      remotefs.MountDriver
 
 	mu            sync.Mutex
 	clients       []*clientConn
+	fsPeers       map[string]*remotefs.Peer
+	fsConnecting  map[string]bool
+	fsMounts      map[string]remotefs.Mount
+	fsMounting    map[string]bool
 	observedPorts map[int]bool
 	portMisses    map[int]int
 	lastActive    time.Time
@@ -81,6 +91,7 @@ type clientConn struct {
 	enc       *protocol.Encoder
 	dec       *protocol.Decoder
 	c         net.Conn
+	sessionID string
 	writeMu   sync.Mutex
 	pendingMu sync.Mutex
 	pending   map[string]chan protocol.Frame
@@ -111,6 +122,28 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.connections == nil {
 		s.connections = map[net.Conn]struct{}{}
 	}
+	if s.fsPeers == nil {
+		s.fsPeers = map[string]*remotefs.Peer{}
+	}
+	if s.fsConnecting == nil {
+		s.fsConnecting = map[string]bool{}
+	}
+	if s.fsMounts == nil {
+		s.fsMounts = map[string]remotefs.Mount{}
+	}
+	if s.fsMounting == nil {
+		s.fsMounting = map[string]bool{}
+	}
+	if s.FSSocketPath == "" {
+		s.FSSocketPath = s.SocketPath + ".fs"
+	}
+	if s.MountRoot == "" {
+		s.MountRoot = filepath.Join(filepath.Dir(s.SocketPath), "mounts")
+	}
+	if s.MountDriver == nil {
+		s.MountDriver = remotefs.GoFuseDriver{}
+	}
+	s.cleanupStaleMounts()
 	serveCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	defer cancel()
@@ -139,6 +172,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := os.Chmod(s.SocketPath, 0o600); err != nil {
 		return err
 	}
+	fsListener, err := s.listenFS(serveCtx)
+	if err != nil {
+		return err
+	}
+	defer fsListener.Close()
 	if s.InfoPath != "" {
 		if err := WriteServerInfo(s.InfoPath, s.SocketPath, s.Token, s.Version); err != nil {
 			return err
@@ -178,6 +216,250 @@ func (s *Server) Serve(ctx context.Context) error {
 			s.handleConn(c)
 		}()
 	}
+}
+
+func (s *Server) listenFS(ctx context.Context) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(s.FSSocketPath), 0o700); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(s.FSSocketPath)
+	listener, err := net.Listen("unix", s.FSSocketPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(s.FSSocketPath, 0o600); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	ownedSocket, _ := os.Stat(s.FSSocketPath)
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+	go func() {
+		defer removeSocketIfOwned(s.FSSocketPath, ownedSocket)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			s.mu.Lock()
+			if s.draining {
+				s.mu.Unlock()
+				_ = conn.Close()
+				continue
+			}
+			s.connections[conn] = struct{}{}
+			s.connWG.Add(1)
+			s.mu.Unlock()
+			go func() {
+				defer s.connWG.Done()
+				defer s.removeConnection(conn)
+				s.handleFSConn(ctx, conn)
+			}()
+		}
+	}()
+	return listener, nil
+}
+
+func (s *Server) handleFSConn(ctx context.Context, conn net.Conn) {
+	var sessionID string
+	reserved := false
+	peer, err := remotefs.Accept(ctx, conn, func(candidate, token string) error {
+		if s.Token != "" && token != s.Token {
+			return errors.New("invalid sshx server token")
+		}
+		if !safeSessionID(candidate) {
+			return errors.New("invalid remote fs sessionId")
+		}
+		if s.pickClient(candidate) == nil {
+			return ErrNoClient
+		}
+		s.mu.Lock()
+		if s.fsPeers[candidate] != nil || s.fsConnecting[candidate] {
+			s.mu.Unlock()
+			return errors.New("remote fs data session already exists")
+		}
+		s.fsConnecting[candidate] = true
+		reserved = true
+		s.mu.Unlock()
+		sessionID = candidate
+		return nil
+	}, remotefs.PeerOptions{
+		OnMount: func(_ context.Context, peer *remotefs.Peer, mountID string) (string, error) {
+			return s.mountRemoteFS(ctx, sessionID, peer, mountID)
+		},
+		OnUnmount: func(unmountCtx context.Context, mountID string) error {
+			return s.unmountRemoteFS(unmountCtx, sessionID, mountID)
+		},
+	})
+	if reserved {
+		s.mu.Lock()
+		delete(s.fsConnecting, sessionID)
+		s.mu.Unlock()
+	}
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	hasClient := false
+	for _, client := range s.clients {
+		if client.sessionID == sessionID {
+			hasClient = true
+			break
+		}
+	}
+	if existing := s.fsPeers[sessionID]; existing != nil || s.draining || !hasClient {
+		s.mu.Unlock()
+		_ = peer.Close()
+		return
+	}
+	s.fsPeers[sessionID] = peer
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+	<-peer.Done()
+	s.mu.Lock()
+	if s.fsPeers[sessionID] == peer {
+		delete(s.fsPeers, sessionID)
+	}
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+}
+
+func safeSessionID(sessionID string) bool {
+	return sessionID != "" && sessionID != "." && sessionID != ".." &&
+		filepath.Base(sessionID) == sessionID && !strings.ContainsAny(sessionID, `/\`)
+}
+
+func fsMountKey(sessionID, mountID string) string {
+	return sessionID + "\x00" + mountID
+}
+
+func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remotefs.Peer, mountID string) (string, error) {
+	if mountID == "" {
+		return "", errors.New("remote fs mountId is required")
+	}
+	key := fsMountKey(sessionID, mountID)
+	s.mu.Lock()
+	if s.fsMounting[sessionID] || s.hasFSMountForSessionLocked(sessionID) {
+		s.mu.Unlock()
+		return "", errors.New("remote fs mount already exists")
+	}
+	s.fsMounting[sessionID] = true
+	s.mu.Unlock()
+	path := filepath.Join(s.MountRoot, sessionID, "workspace")
+	_ = syscall.Unmount(path, 0)
+	if err := os.RemoveAll(path); err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	mount, err := s.MountDriver.Mount(ctx, path, peer.RemoteBackend(mountID), remotefs.MountOptions{})
+	if err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	s.mu.Lock()
+	delete(s.fsMounting, sessionID)
+	peerClosed := false
+	select {
+	case <-peer.Done():
+		peerClosed = true
+	default:
+	}
+	if s.draining || peerClosed {
+		s.mu.Unlock()
+		_ = mount.Unmount(context.Background())
+		return "", errors.New("remote fs session closed while mounting")
+	}
+	s.fsMounts[key] = mount
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+	return path, nil
+}
+
+func (s *Server) unmountRemoteFS(ctx context.Context, sessionID, mountID string) error {
+	key := fsMountKey(sessionID, mountID)
+	s.mu.Lock()
+	if s.fsMounting[sessionID] {
+		s.mu.Unlock()
+		return syscall.EBUSY
+	}
+	mount := s.fsMounts[key]
+	delete(s.fsMounts, key)
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+	if mount == nil {
+		return nil
+	}
+	err := mount.Unmount(ctx)
+	if err == nil {
+		_ = os.RemoveAll(filepath.Join(s.MountRoot, sessionID))
+	}
+	return err
+}
+
+func (s *Server) hasFSMountForSessionLocked(sessionID string) bool {
+	prefix := sessionID + "\x00"
+	for key := range s.fsMounts {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) cleanupStaleMounts() {
+	entries, err := os.ReadDir(s.MountRoot)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !safeSessionID(entry.Name()) {
+			continue
+		}
+		sessionPath := filepath.Join(s.MountRoot, entry.Name())
+		mountPath := filepath.Join(sessionPath, "workspace")
+		if mounted, statErr := managedPathMounted(mountPath); statErr == nil && !mounted {
+			_ = os.RemoveAll(sessionPath)
+			continue
+		}
+		unmountErr := syscall.Unmount(mountPath, 0)
+		detached := unmountErr == nil || errors.Is(unmountErr, syscall.EINVAL) || errors.Is(unmountErr, syscall.ENOENT)
+		if !detached {
+			if binary, lookErr := exec.LookPath("fusermount3"); lookErr == nil {
+				detached = exec.Command(binary, "-uz", mountPath).Run() == nil
+			} else if binary, lookErr := exec.LookPath("fusermount"); lookErr == nil {
+				detached = exec.Command(binary, "-uz", mountPath).Run() == nil
+			}
+		}
+		if detached {
+			_ = os.RemoveAll(sessionPath)
+		}
+	}
+}
+
+func managedPathMounted(path string) (bool, error) {
+	parentInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return false, err
+	}
+	pathInfo, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	parentStat, parentOK := parentInfo.Sys().(*syscall.Stat_t)
+	pathStat, pathOK := pathInfo.Sys().(*syscall.Stat_t)
+	if !parentOK || !pathOK {
+		return true, nil
+	}
+	return parentStat.Dev != pathStat.Dev, nil
 }
 
 func removeSocketIfOwned(path string, owned os.FileInfo) {
@@ -367,27 +649,32 @@ func (s *Server) handleConn(c net.Conn) {
 			s.initiateShutdown()
 			return
 		}
-		cc := &clientConn{enc: enc, dec: dec, c: c, pending: map[string]chan protocol.Frame{}, lastSeen: time.Now(), done: make(chan struct{})}
+		if hello.SessionID == "" {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeError, Error: "client sessionId is required"})
+			_ = c.Close()
+			return
+		}
+		cc := &clientConn{enc: enc, dec: dec, c: c, sessionID: hello.SessionID, pending: map[string]chan protocol.Frame{}, lastSeen: time.Now(), done: make(chan struct{})}
 		if !s.addClient(cc) {
 			_ = cc.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolVersion: protocol.Version, AppVersion: s.Version, Error: "sshx server is draining"})
 			cc.close()
 			return
 		}
-		if err := cc.send(protocol.Frame{Type: protocol.TypeCapabilities, ProtocolVersion: protocol.Version, AppVersion: s.Version, Capabilities: []string{"command.exec.batch-stdin", "heartbeat.v1"}}); err != nil {
+		if err := cc.send(protocol.Frame{Type: protocol.TypeCapabilities, ProtocolVersion: protocol.Version, AppVersion: s.Version, Capabilities: []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}}); err != nil {
 			s.removeClient(cc)
 			return
 		}
 		s.sendCurrentPorts(cc)
 		cc.readLoop(s)
 	case protocol.RoleRequester:
-		s.handleRequester(c, dec, enc)
+		s.handleRequester(c, dec, enc, hello.SessionID)
 	default:
 		_ = enc.Encode(protocol.Frame{Type: protocol.TypeError, Error: "unknown bridge role"})
 		_ = c.Close()
 	}
 }
 
-func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protocol.Encoder) {
+func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protocol.Encoder, requesterSessionID string) {
 	defer c.Close()
 	s.markActive()
 	req, err := dec.Decode()
@@ -398,9 +685,40 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 		_ = enc.Encode(protocol.Frame{Type: protocol.TypeError, ID: req.ID, Error: "expected command.exec"})
 		return
 	}
+	if requesterSessionID != "" && req.SessionID != requesterSessionID {
+		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requester sessionId does not match command sessionId"})
+		return
+	}
+	if req.RemoteFS {
+		if req.SessionID == "" || req.Cwd == "" {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs requires sessionId and cwd"})
+			return
+		}
+		s.mu.Lock()
+		fsPeer := s.fsPeers[req.SessionID]
+		s.mu.Unlock()
+		if fsPeer == nil {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs data session is unavailable"})
+			return
+		}
+		backend, err := remotefs.OpenRootBackend(req.Cwd)
+		if err != nil {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: fmt.Sprintf("open remote workspace: %v", err)})
+			return
+		}
+		mountID := "request-" + req.ID
+		if err := fsPeer.RegisterBackend(mountID, backend); err != nil {
+			_ = backend.CloseBackend()
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: err.Error()})
+			return
+		}
+		defer fsPeer.UnregisterBackend(mountID)
+		req.MountID = mountID
+		req.Cwd = ""
+	}
 	var lastErr error
 	for {
-		client := s.pickClient()
+		client := s.pickClient(req.SessionID)
 		if client == nil {
 			msg := ErrNoClient.Error()
 			if lastErr != nil {
@@ -426,6 +744,11 @@ func (s *Server) addClient(c *clientConn) bool {
 	if s.draining {
 		return false
 	}
+	for _, existing := range s.clients {
+		if existing.sessionID == c.sessionID {
+			return false
+		}
+	}
 	s.clients = append(s.clients, c)
 	s.everHadClient = true
 	s.lastActive = time.Now()
@@ -435,6 +758,7 @@ func (s *Server) addClient(c *clientConn) bool {
 func (s *Server) removeClient(c *clientConn) {
 	s.mu.Lock()
 	found := false
+	var fsPeer *remotefs.Peer
 	for i, existing := range s.clients {
 		if existing == c {
 			s.clients = append(s.clients[:i], s.clients[i+1:]...)
@@ -444,10 +768,15 @@ func (s *Server) removeClient(c *clientConn) {
 	}
 	if found {
 		s.lastActive = time.Now()
+		fsPeer = s.fsPeers[c.sessionID]
+		delete(s.fsPeers, c.sessionID)
 	}
 	s.mu.Unlock()
 	if found {
 		c.close()
+		if fsPeer != nil {
+			_ = fsPeer.Close()
+		}
 	}
 }
 
@@ -457,9 +786,17 @@ func (s *Server) markActive() {
 	s.lastActive = time.Now()
 }
 
-func (s *Server) pickClient() *clientConn {
+func (s *Server) pickClient(sessionID string) *clientConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if sessionID != "" {
+		for _, client := range s.clients {
+			if client.sessionID == sessionID {
+				return client
+			}
+		}
+		return nil
+	}
 	if len(s.clients) == 0 {
 		return nil
 	}
@@ -575,10 +912,14 @@ func (s *Server) removeConnection(conn net.Conn) {
 }
 
 func RequestCommand(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd string, token ...string) (CommandResult, error) {
-	return RequestCommandWithTimeout(ctx, socketPath, argv, stdin, env, cwd, 0, token...)
+	return RequestCommandForSessionWithTimeout(ctx, socketPath, argv, stdin, env, cwd, "", false, 0, token...)
 }
 
 func RequestCommandWithTimeout(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd string, timeout time.Duration, token ...string) (CommandResult, error) {
+	return RequestCommandForSessionWithTimeout(ctx, socketPath, argv, stdin, env, cwd, "", false, timeout, token...)
+}
+
+func RequestCommandForSessionWithTimeout(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, sessionID string, remoteFS bool, timeout time.Duration, token ...string) (CommandResult, error) {
 	if len(argv) == 0 {
 		return CommandResult{ExitCode: 2}, errors.New("local command is required")
 	}
@@ -590,7 +931,7 @@ func RequestCommandWithTimeout(ctx context.Context, socketPath string, argv []st
 	defer c.Close()
 	enc := protocol.NewEncoder(c)
 	dec := protocol.NewDecoder(c)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, Role: protocol.RoleRequester, Token: firstToken(token)}); err != nil {
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, Role: protocol.RoleRequester, SessionID: sessionID, Token: firstToken(token)}); err != nil {
 		return CommandResult{ExitCode: 1}, err
 	}
 	id := fmt.Sprintf("req-%d", time.Now().UnixNano())
@@ -600,6 +941,8 @@ func RequestCommandWithTimeout(ctx context.Context, socketPath string, argv []st
 		Argv:          argv,
 		Env:           env,
 		Cwd:           cwd,
+		SessionID:     sessionID,
+		RemoteFS:      remoteFS,
 		Stdin:         base64.StdEncoding.EncodeToString(stdin),
 		TimeoutMillis: durationMillis(timeout),
 	}); err != nil {
@@ -783,7 +1126,11 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 			continue
 		}
 		go func(frame protocol.Frame) {
-			resp := ExecuteLocal(clientCtx, frame)
+			execute := opts.Execute
+			if execute == nil {
+				execute = ExecuteLocal
+			}
+			resp := execute(clientCtx, frame)
 			_ = send(resp)
 		}(frame)
 	}

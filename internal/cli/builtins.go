@@ -224,7 +224,17 @@ func (r *Runner) runLocalBridge(ctx context.Context, argv []string, timeout time
 			token = info.Token
 		}
 	}
-	result, err := bridge.RequestCommandWithTimeout(ctx, socketPath, argv, stdin, nil, "", timeout, token)
+	sessionID := os.Getenv("SSHX_SESSION_ID")
+	remoteFS := os.Getenv("SSHX_REMOTE_FS") == "1"
+	cwd := ""
+	if remoteFS {
+		cwd, err = os.Getwd()
+		if err != nil {
+			fmt.Fprintf(r.Stderr, "sshx local: current directory: %v\n", err)
+			return 1
+		}
+	}
+	result, err := bridge.RequestCommandForSessionWithTimeout(ctx, socketPath, argv, stdin, nil, cwd, sessionID, remoteFS, timeout, token)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx local: %v\n", err)
 		return result.ExitCode

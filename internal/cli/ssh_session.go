@@ -21,16 +21,32 @@ func internalSSHArgs(sshArgs []string, remoteCommand string) []string {
 }
 
 func sshCommandArgs(sshArgs []string, remoteCommand string) []string {
-	args := make([]string, 0, len(sshArgs)+1)
-	args = append(args, sshArgs...)
+	if len(sshArgs) == 0 {
+		return []string{remoteCommand}
+	}
+	// Internal control/data transports must never inherit a user-requested
+	// pseudo-terminal: TTY processing would corrupt framed and binary streams.
+	args := make([]string, 0, len(sshArgs)+2)
+	args = append(args, sshArgs[:len(sshArgs)-1]...)
+	args = append(args, "-T", sshArgs[len(sshArgs)-1])
 	args = append(args, remoteCommand)
 	return args
 }
 
 func sessionSSHArgs(parsed sshcompat.Parsed, remoteHome string) []string {
+	return sessionSSHArgsForBridge(parsed, remoteHome, nil)
+}
+
+func sessionSSHArgsForBridge(parsed sshcompat.Parsed, remoteHome string, session *BridgeSession) []string {
 	args := baseSSHArgs(parsed)
 	if len(args) == 0 {
 		return append([]string(nil), parsed.Args...)
+	}
+	envLine := remoteServerEnvScript(remoteHome)
+	workspace := ""
+	if session != nil {
+		envLine = remoteBridgeEnvScript(remoteHome, session)
+		workspace = session.Workspace
 	}
 	if len(parsed.RemoteCommand) == 0 {
 		if hasSSHSessionlessFlag(args) {
@@ -39,13 +55,16 @@ func sessionSSHArgs(parsed sshcompat.Parsed, remoteHome string) []string {
 		if !hasSSHDisableTTYFlag(args) && !hasSSHForceTTYFlag(args) {
 			args = append([]string{"-t"}, args...)
 		}
-		return append(args, remoteLoginShell(remoteHome))
+		return append(args, remoteLoginShellWithEnv(envLine))
 	}
-	return append(args, remoteExecShell(remoteHome, parsed.RemoteCommand))
+	return append(args, remoteExecShellWithEnv(envLine, workspace, parsed.RemoteCommand))
 }
 
 func remoteLoginShell(remoteHome string) string {
-	envLine := remoteServerEnvScript(remoteHome)
+	return remoteLoginShellWithEnv(remoteServerEnvScript(remoteHome))
+}
+
+func remoteLoginShellWithEnv(envLine string) string {
 	script := strings.Join([]string{
 		envLine,
 		"mkdir -p \"$SSHX_SERVER_HOME\"",
@@ -61,15 +80,20 @@ func remoteLoginShell(remoteHome string) string {
 }
 
 func remoteExecShell(remoteHome string, argv []string) string {
+	return remoteExecShellWithEnv(remoteServerEnvScript(remoteHome), "", argv)
+}
+
+func remoteExecShellWithEnv(envLine, workspace string, argv []string) string {
 	if len(argv) == 1 {
-		return remoteExecCommandShell(remoteHome, argv[0])
+		return remoteExecCommandShellWithEnv(envLine, workspace, argv[0])
 	}
-	envLine := remoteServerEnvScript(remoteHome)
+	cdLine := remoteWorkspaceCD(workspace)
 	parts := []string{
 		"sh",
 		"-lc",
 		strings.Join([]string{
 			envLine,
+			cdLine,
 			"mkdir -p \"$SSHX_SERVER_HOME\"",
 			"shell=${SHELL:-sh}",
 			"name=${shell##*/}",
@@ -90,10 +114,15 @@ func remoteExecShell(remoteHome string, argv []string) string {
 }
 
 func remoteExecCommandShell(remoteHome string, command string) string {
-	envLine := remoteServerEnvScript(remoteHome)
-	commandLine := envLine + "; " + command
+	return remoteExecCommandShellWithEnv(remoteServerEnvScript(remoteHome), "", command)
+}
+
+func remoteExecCommandShellWithEnv(envLine, workspace, command string) string {
+	cdLine := remoteWorkspaceCD(workspace)
+	commandLine := envLine + "; " + cdLine + "; " + command
 	script := strings.Join([]string{
 		envLine,
+		cdLine,
 		"mkdir -p \"$SSHX_SERVER_HOME\"",
 		"shell=${SHELL:-sh}",
 		"name=${shell##*/}",
@@ -104,6 +133,13 @@ func remoteExecCommandShell(remoteHome string, command string) string {
 		"esac",
 	}, "\n")
 	return remoteShell(script)
+}
+
+func remoteWorkspaceCD(workspace string) string {
+	if workspace == "" {
+		return ":"
+	}
+	return "cd -- \"$SSHX_WORKSPACE\""
 }
 
 func remoteShell(script string) string {

@@ -19,6 +19,7 @@ type Config struct {
 type Features struct {
 	CommandBridge bool `yaml:"commandBridge"`
 	AutoForward   bool `yaml:"autoForward"`
+	RemoteFS      bool `yaml:"remoteFs"`
 }
 
 type CommandPolicy struct {
@@ -70,7 +71,7 @@ func Load(path string) (Config, error) {
 }
 
 func (f Features) Enabled() bool {
-	return f.CommandBridge || f.AutoForward
+	return f.CommandBridge || f.AutoForward || f.RemoteFS
 }
 
 func (p CommandPolicy) Allows(argv []string) bool {

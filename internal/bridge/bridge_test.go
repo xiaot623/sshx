@@ -304,7 +304,7 @@ func TestServerExpiresClientWithoutHeartbeat(t *testing.T) {
 	defer conn.Close()
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "test-version"}); err != nil {
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "test-version", SessionID: "lease-test"}); err != nil {
 		t.Fatal(err)
 	}
 	if frame, err := dec.Decode(); err != nil || frame.Type != protocol.TypeCapabilities {
@@ -330,7 +330,7 @@ func TestServerExitsOnVersionChange(t *testing.T) {
 	conn := mustDialUnix(t, socket)
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "2.0.0"}); err != nil {
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "2.0.0", SessionID: "version-test"}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := dec.Decode()

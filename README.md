@@ -5,6 +5,7 @@
 **sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host (or Docker container) with sshx-aware features enabled, you unlock a persistent, shared remote server that gives you:
 
 - 🔄 **Reverse command bridge** — run `sshx local <cmd>` *on the remote* to execute commands on your local machine, with stdout, stderr, exit code, and stdin all propagated.
+- 📁 **Bidirectional workspace mount** — opt in to make the command initiator's current directory available to commands running on the other side.
 - 🔌 **Automatic port forwarding** — remote local listeners (loopback `127.0.0.1` and wildcard `0.0.0.0`; e.g., a dev server on `0.0.0.0:8080` or `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
 - 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. Command bridge support works inside containers via `docker exec`.
@@ -58,6 +59,19 @@ sshx local --timeout=30 npm test
 - stdin is sent in batch mode — pipe data in and it reaches the local command.
 - Commands have no implicit deadline. Put `--timeout=<duration>` immediately after the target to opt in; bare numbers mean seconds, and values such as `500ms`, `30s`, and `2m` are accepted. Timed-out commands exit with status 124.
 - Policy: a configurable deny list controls which commands are blocked.
+
+### 📁 Bidirectional Workspace Mount (opt-in, beta)
+
+Set `features.remoteFs: true` to expose the command initiator's current directory through a read-write FUSE mount:
+
+- `sshx remote <cmd>` starts the remote command in a mounted view of the local current directory.
+- An interactive `sshx remote` shell still starts in the remote home. `SSHX_WORKSPACE` points to the mounted local workspace.
+- From that shell, `sshx local <cmd>` mounts the remote current directory locally and starts the local command there.
+- Writes and `fsync` are sent to the source immediately. Metadata and directory entries use short TTLs and are revalidated when files are reopened.
+
+FUSE is a hard dependency when this feature is enabled: a mount failure aborts the command even when `strict` is false. Linux needs `/dev/fuse` plus `fusermount`/`fusermount3`; macOS needs a current macFUSE installation and is currently beta. The remote target must be Linux with FUSE available.
+
+The first version guarantees workspace-relative paths only. It does not rewrite absolute command arguments, add extra mount roots, expose special files/xattrs/ACLs, or support Docker targets, FUSE-T, or FSKit. It is optimized for source trees and small files rather than large-file throughput.
 
 ### 🔌 Automatic Port Detection & Forwarding
 
@@ -217,6 +231,10 @@ features:
   # <host>.<user>.sshx:<remote-port>.
   autoForward: true
 
+  # Read-write workspace mounts in both command directions. Default: false.
+  # Requires FUSE on the local machine and remote target.
+  remoteFs: false
+
 commands:
   # Commands blocked from bridge execution.
   deny: []
@@ -241,7 +259,7 @@ commands:
 ```
 
 1. **Connection**: `sshx remote` opens a normal SSH session and starts (or connects to) the client-target `sshx server` under `~/.sshx_server/<uuid>`.
-2. **Bridge channel**: A hidden `socket-proxy` SSH channel links the local daemon to the remote server.
+2. **Bridge channels**: A hidden control `socket-proxy` channel links the client to the remote server. `remoteFs` adds a separately framed, bounded data channel paired by session ID.
 3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback (`127.0.0.1` / `::1`) and wildcard (`0.0.0.0` / `::`) listeners.
 4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using `ssh -W`.
 5. **Domains**: The local DNS responder maps `<target>.<suffix>` → localhost. The browser's URL port selects the local forwarded port.
@@ -255,6 +273,8 @@ When `sshx` is invoked for a **non-matching host** (no sshx config, or host not 
 - `sshx --no-wrap ...` — skip all sshx behavior and call raw `ssh`.
 - `SSHX_DISABLE=1 sshx ...` — same as `--no-wrap`, useful in scripts.
 - `sshx local ...` on a **client** (not inside a remote session) — errors immediately with a clear message. `local` is globally reserved.
+- `remoteFs` never silently falls back to an unmounted command. A failed FUSE mount fails the invocation.
+- Workspace exports are anchored with Go's `os.Root`; path traversal and symlink escapes are rejected.
 - Docker containers that aren't running or can't be reached are pure passthrough — sshx falls back to raw `ssh` with no side effects.
 - Unmatched hosts are pure passthrough — no files created, no processes started.
 
@@ -271,6 +291,7 @@ When `sshx` is invoked for a **non-matching host** (no sshx config, or host not 
 - **Client**: macOS and Linux are fully supported.
 - **Server**: Linux is required for the remote sshx server (uses `/proc/net/tcp*` for port detection).
 - **Docker Client**: macOS and Linux — targets any running Docker container via `docker exec`.
+- **remoteFs**: Linux is supported; macOS clients require macFUSE and are beta. Docker targets are not supported.
 
 ---
 
@@ -285,6 +306,7 @@ sshx/
 │   ├── config/        # YAML configuration
 │   ├── protocol/      # Client-server wire protocol
 │   ├── bridge/        # Command bridge (remote → local execution)
+│   ├── remotefs/      # FS protocol, secure backend, and FUSE adapter
 │   ├── ports/         # Port sniffing (/proc/net/tcp*)
 │   ├── forward/       # TCP forwarding
 │   ├── domain/        # DNS resolver
@@ -300,7 +322,8 @@ sshx/
 ## Roadmap
 
 - [x] **v1** — Command bridge (non-interactive), auto port forwarding, domain binding, shared server
-- [ ] **v2** — Streaming stdin for command bridge, remote FUSE mounting, GitHub binary releases, Windows client support
+- [ ] **v2** — Streaming stdin for command bridge, GitHub binary releases, Windows client support
+- [x] **remoteFs beta** — Bidirectional read-write workspace mounting on Linux/macOS clients and Linux targets
 
 ---
 

@@ -5,11 +5,46 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 	"github.com/xiaot623/sshx/internal/sshconfig"
 )
+
+type BridgeSession struct {
+	SessionID string
+	Workspace string
+	Done      <-chan struct{}
+	stop      func()
+	stopOnce  sync.Once
+}
+
+func (s *BridgeSession) Stop() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		if s.stop != nil {
+			s.stop()
+		}
+	})
+}
+
+func (s *BridgeSession) CommandContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	if s == nil || s.Done == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-s.Done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
 
 type Runner struct {
 	Stdin  io.Reader
@@ -25,12 +60,13 @@ type Runner struct {
 	ExecInput       func(context.Context, string, []string, io.Reader) error
 	ExecOutput      func(context.Context, string, []string) ([]byte, error)
 	DownloadBinary  func(context.Context, string, string) (string, error)
-	StartBridge     func(context.Context, string, []string, string) (func(), error)
+	StartBridge     func(context.Context, string, []string, string) (*BridgeSession, error)
 	EnsureResolver  func(context.Context) error
 
 	commandPolicy config.CommandPolicy
 	commandBridge bool
 	autoForward   bool
+	remoteFS      bool
 }
 
 func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
@@ -128,7 +164,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	sshArgs := baseSSHArgs(parsed)
 	remoteID, err := remoteIDForTarget(r.RemoteHostsPath, parsed.Target)
 	if err != nil {
-		if cfg.Strict {
+		if cfg.Strict || features.RemoteFS {
 			fmt.Fprintf(r.Stderr, "sshx: remote state unavailable for %s: %v\n", parsed.Target, err)
 			return 1
 		}
@@ -139,6 +175,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	r.commandPolicy = cfg.Commands
 	r.commandBridge = features.CommandBridge
 	r.autoForward = features.AutoForward
+	r.remoteFS = features.RemoteFS
 	if features.AutoForward {
 		if err := r.EnsureResolver(ctx); err != nil {
 			if cfg.Strict {
@@ -150,20 +187,23 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	}
 	remoteReady := false
 	if err := r.ensureRemoteServer(ctx, sshArgs, features, remoteHome); err != nil {
-		if cfg.Strict {
+		if cfg.Strict || features.RemoteFS {
 			fmt.Fprintf(r.Stderr, "sshx: remote server unavailable for %s: %v\n", parsed.Target, err)
 			return 1
 		}
-	} else if features.CommandBridge || features.AutoForward {
-		stopBridge, err := r.StartBridge(ctx, parsed.Target, sshArgs, remoteHome)
+	} else if features.CommandBridge || features.AutoForward || features.RemoteFS {
+		bridgeSession, err := r.StartBridge(ctx, parsed.Target, sshArgs, remoteHome)
 		if err != nil {
-			if cfg.Strict {
+			if cfg.Strict || features.RemoteFS {
 				fmt.Fprintf(r.Stderr, "sshx: command bridge unavailable for %s: %v\n", parsed.Target, err)
 				return 1
 			}
 		} else {
 			remoteReady = true
-			defer stopBridge()
+			defer bridgeSession.Stop()
+			commandCtx, cancel := bridgeSession.CommandContext(ctx)
+			defer cancel()
+			return r.execSSHWithTimeout(commandCtx, sessionSSHArgsForBridge(parsed, remoteHome, bridgeSession), timeout)
 		}
 	} else {
 		remoteReady = true

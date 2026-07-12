@@ -540,9 +540,9 @@ features:
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
 		return sameVersionRemoteProbe(), nil
 	}
-	r.StartBridge = func(context.Context, string, []string, string) (func(), error) {
+	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
 		bridgeStarted = true
-		return func() {}, nil
+		return &BridgeSession{SessionID: "test", stop: func() {}}, nil
 	}
 	r.Exec = func(_ context.Context, _ string, args []string) error {
 		if strings.Contains(strings.Join(args, " "), "test -S \"$SSHX_SERVER_HOME/sock\"") {
@@ -577,12 +577,12 @@ features:
 		probeArgs = append([]string(nil), args...)
 		return sameVersionRemoteProbe(), nil
 	}
-	r.StartBridge = func(_ context.Context, _ string, sshArgs []string, remoteHome string) (func(), error) {
+	r.StartBridge = func(_ context.Context, _ string, sshArgs []string, remoteHome string) (*BridgeSession, error) {
 		bridgeArgs = append([]string(nil), sshArgs...)
 		if !strings.Contains(remoteHome, ".sshx_server/") {
 			t.Fatalf("remote home = %q", remoteHome)
 		}
-		return func() {}, nil
+		return &BridgeSession{SessionID: "test", stop: func() {}}, nil
 	}
 	r.Exec = func(_ context.Context, name string, args []string) error {
 		calls = append(calls, execCall{name: name, args: append([]string(nil), args...)})
@@ -599,10 +599,11 @@ features:
 	if len(calls) != 1 {
 		t.Fatalf("calls = %#v", calls)
 	}
-	if !reflect.DeepEqual(probeArgs[:len(wantBase)+1], append([]string{"-n"}, wantBase...)) {
+	wantInternal := []string{"-n", "-p", "2222", "-J", "jump", "-T", "remote"}
+	if !reflect.DeepEqual(probeArgs[:len(wantInternal)], wantInternal) {
 		t.Fatalf("internal ssh args = %#v", probeArgs)
 	}
-	if len(probeArgs) != len(wantBase)+2 || !strings.HasPrefix(probeArgs[len(probeArgs)-1], "sh -lc ") {
+	if len(probeArgs) != len(wantInternal)+1 || !strings.HasPrefix(probeArgs[len(probeArgs)-1], "sh -lc ") {
 		t.Fatalf("internal ssh args = %#v", probeArgs)
 	}
 	if !reflect.DeepEqual(calls[0].args[:len(wantBase)], wantBase) {
@@ -635,8 +636,8 @@ features:
 		probeArgs = append([]string(nil), args...)
 		return sameVersionRemoteProbe(), nil
 	}
-	r.StartBridge = func(context.Context, string, []string, string) (func(), error) {
-		return func() {}, nil
+	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
+		return &BridgeSession{SessionID: "test", stop: func() {}}, nil
 	}
 	r.Exec = func(_ context.Context, name string, args []string) error {
 		calls = append(calls, execCall{name: name, args: append([]string(nil), args...)})
@@ -664,7 +665,7 @@ features:
 
 func TestSSHCommandArgsCanKeepStdioOpen(t *testing.T) {
 	got := sshCommandArgs([]string{"-p", "2222", "remote"}, "socket-proxy")
-	want := []string{"-p", "2222", "remote", "socket-proxy"}
+	want := []string{"-p", "2222", "-T", "remote", "socket-proxy"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ssh command args = %#v, want %#v", got, want)
 	}
