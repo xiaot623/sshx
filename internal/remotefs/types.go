@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2
 	MaxMetadataSize = 64 << 10
 	MaxDataSize     = 256 << 10
 	MaxInFlight     = 64

@@ -39,6 +39,7 @@ type wireFrame struct {
 	Entries   []DirEntry `json:"entries,omitempty"`
 	StatFS    StatFS     `json:"statfs,omitempty"`
 	MountPath string     `json:"mountPath,omitempty"`
+	ReadOnly  bool       `json:"readOnly,omitempty"`
 	ErrorCode ErrorCode  `json:"errorCode,omitempty"`
 	Error     string     `json:"error,omitempty"`
 	Data      []byte     `json:"-"`

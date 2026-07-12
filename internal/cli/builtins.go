@@ -226,6 +226,7 @@ func (r *Runner) runLocalBridge(ctx context.Context, argv []string, timeout time
 	}
 	sessionID := os.Getenv("SSHX_SESSION_ID")
 	remoteFS := os.Getenv("SSHX_REMOTE_FS") == "1"
+	readOnly := os.Getenv("FS_READ_ONLY") == "1"
 	cwd := ""
 	if remoteFS {
 		cwd, err = os.Getwd()
@@ -234,7 +235,7 @@ func (r *Runner) runLocalBridge(ctx context.Context, argv []string, timeout time
 			return 1
 		}
 	}
-	result, err := bridge.RequestCommandForSessionWithTimeout(ctx, socketPath, argv, stdin, nil, cwd, sessionID, remoteFS, timeout, token)
+	result, err := bridge.RequestCommandForSessionWithMountOptions(ctx, socketPath, argv, stdin, nil, cwd, sessionID, remoteFS, readOnly, timeout, token)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx local: %v\n", err)
 		return result.ExitCode

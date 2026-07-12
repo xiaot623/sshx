@@ -17,13 +17,30 @@ import (
 type RootBackend struct {
 	root      *os.Root
 	rootPath  string
+	excluded  []string
+	options   RootBackendOptions
 	next      atomic.Uint64
 	mu        sync.Mutex
 	handles   map[uint64]*os.File
 	closeOnce sync.Once
 }
 
+type RootBackendOptions struct {
+	DisableDelete bool
+}
+
 func OpenRootBackend(path string) (*RootBackend, error) {
+	return OpenRootBackendWithOptions(path, RootBackendOptions{})
+}
+
+// OpenRootBackendExcluding hides paths below root. It is used to keep managed
+// sshx mount directories out of a home export, which would otherwise create a
+// recursive RemoteFS view during reverse commands.
+func OpenRootBackendExcluding(path string, excludedPaths ...string) (*RootBackend, error) {
+	return OpenRootBackendWithOptions(path, RootBackendOptions{}, excludedPaths...)
+}
+
+func OpenRootBackendWithOptions(path string, options RootBackendOptions, excludedPaths ...string) (*RootBackend, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -32,9 +49,34 @@ func OpenRootBackend(path string) (*RootBackend, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := &RootBackend{root: root, rootPath: absolute, handles: map[uint64]*os.File{}}
+	excluded := make([]string, 0, len(excludedPaths))
+	for _, candidate := range excludedPaths {
+		candidate, err = filepath.Abs(candidate)
+		if err != nil {
+			_ = root.Close()
+			return nil, err
+		}
+		rel, relErr := filepath.Rel(absolute, candidate)
+		if relErr == nil && pathWithinRoot(rel) {
+			excluded = append(excluded, filepath.Clean(rel))
+		}
+	}
+	b := &RootBackend{root: root, rootPath: absolute, excluded: excluded, options: options, handles: map[uint64]*os.File{}}
 	b.next.Store(1)
 	return b, nil
+}
+
+func (b *RootBackend) cleanPath(name string) (string, error) {
+	name, err := cleanPath(name)
+	if err != nil {
+		return "", err
+	}
+	for _, excluded := range b.excluded {
+		if name == excluded || strings.HasPrefix(name, excluded+string(filepath.Separator)) {
+			return "", syscall.EPERM
+		}
+	}
+	return name, nil
 }
 
 func cleanPath(name string) (string, error) {
@@ -56,7 +98,7 @@ func isVisibleMode(mode fs.FileMode) bool {
 }
 
 func (b *RootBackend) Lookup(_ context.Context, name string) (Attr, error) {
-	name, err := cleanPath(name)
+	name, err := b.cleanPath(name)
 	if err != nil {
 		return Attr{}, err
 	}
@@ -71,7 +113,7 @@ func (b *RootBackend) Lookup(_ context.Context, name string) (Attr, error) {
 }
 
 func (b *RootBackend) ReadDir(_ context.Context, name string) ([]DirEntry, error) {
-	name, err := cleanPath(name)
+	name, err := b.cleanPath(name)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +128,9 @@ func (b *RootBackend) ReadDir(_ context.Context, name string) ([]DirEntry, error
 	}
 	out := make([]DirEntry, 0, len(entries))
 	for _, entry := range entries {
+		if _, err := b.cleanPath(filepath.Join(name, entry.Name())); err != nil {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			return nil, err
@@ -100,7 +145,7 @@ func (b *RootBackend) ReadDir(_ context.Context, name string) ([]DirEntry, error
 }
 
 func (b *RootBackend) Open(_ context.Context, name string, flags OpenFlags, mode uint32) (uint64, Attr, error) {
-	name, err := cleanPath(name)
+	name, err := b.cleanPath(name)
 	if err != nil {
 		return 0, Attr{}, err
 	}
@@ -219,7 +264,7 @@ func (b *RootBackend) Fsync(_ context.Context, handle uint64) error {
 }
 
 func (b *RootBackend) Mkdir(_ context.Context, name string, mode uint32) (Attr, error) {
-	name, err := cleanPath(name)
+	name, err := b.cleanPath(name)
 	if err != nil {
 		return Attr{}, err
 	}
@@ -234,7 +279,10 @@ func (b *RootBackend) Mkdir(_ context.Context, name string, mode uint32) (Attr, 
 }
 
 func (b *RootBackend) Unlink(_ context.Context, name string) error {
-	name, err := cleanPath(name)
+	if b.options.DisableDelete {
+		return syscall.EPERM
+	}
+	name, err := b.cleanPath(name)
 	if err != nil {
 		return err
 	}
@@ -249,7 +297,10 @@ func (b *RootBackend) Unlink(_ context.Context, name string) error {
 }
 
 func (b *RootBackend) Rmdir(_ context.Context, name string) error {
-	name, err := cleanPath(name)
+	if b.options.DisableDelete {
+		return syscall.EPERM
+	}
+	name, err := b.cleanPath(name)
 	if err != nil {
 		return err
 	}
@@ -264,11 +315,14 @@ func (b *RootBackend) Rmdir(_ context.Context, name string) error {
 }
 
 func (b *RootBackend) Rename(_ context.Context, oldName, newName string) error {
-	oldName, err := cleanPath(oldName)
+	if b.options.DisableDelete {
+		return syscall.EPERM
+	}
+	oldName, err := b.cleanPath(oldName)
 	if err != nil {
 		return err
 	}
-	newName, err = cleanPath(newName)
+	newName, err = b.cleanPath(newName)
 	if err != nil {
 		return err
 	}
@@ -276,11 +330,11 @@ func (b *RootBackend) Rename(_ context.Context, oldName, newName string) error {
 }
 
 func (b *RootBackend) Link(_ context.Context, oldName, newName string) (Attr, error) {
-	oldName, err := cleanPath(oldName)
+	oldName, err := b.cleanPath(oldName)
 	if err != nil {
 		return Attr{}, err
 	}
-	newName, err = cleanPath(newName)
+	newName, err = b.cleanPath(newName)
 	if err != nil {
 		return Attr{}, err
 	}
@@ -295,7 +349,7 @@ func (b *RootBackend) Link(_ context.Context, oldName, newName string) (Attr, er
 }
 
 func (b *RootBackend) Symlink(_ context.Context, target, newName string) (Attr, error) {
-	newName, err := cleanPath(newName)
+	newName, err := b.cleanPath(newName)
 	if err != nil {
 		return Attr{}, err
 	}
@@ -310,7 +364,7 @@ func (b *RootBackend) Symlink(_ context.Context, target, newName string) (Attr, 
 }
 
 func (b *RootBackend) Readlink(_ context.Context, name string) (string, error) {
-	name, err := cleanPath(name)
+	name, err := b.cleanPath(name)
 	if err != nil {
 		return "", err
 	}
@@ -318,7 +372,7 @@ func (b *RootBackend) Readlink(_ context.Context, name string) (string, error) {
 }
 
 func (b *RootBackend) Setattr(_ context.Context, name string, handle uint64, change SetAttr) (Attr, error) {
-	name, err := cleanPath(name)
+	name, err := b.cleanPath(name)
 	if err != nil {
 		return Attr{}, err
 	}

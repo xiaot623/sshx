@@ -5,7 +5,7 @@
 **sshx** 是 OpenSSH 的即插即用封装器。设置 `alias ssh=sshx` 后，你现有的 SSH 工作流完全不受影响——所有参数、配置和连接都原样透传。但当连接到启用了 sshx 特性的主机（或 Docker 容器）时，你会获得一个持久化的共享远程服务器，提供以下能力：
 
 - 🔄 **反向命令桥** — 在*远程*执行 `sshx local <cmd>`，命令实际在你的本地机器上运行，stdout、stderr、退出码和 stdin 全部正确传递。
-- 📁 **双向工作区挂载** — 按需开启后，将命令发起侧的当前目录提供给另一侧执行的命令。
+- 📁 **双向 HOME 挂载** — 按需开启后挂载命令发起侧的 HOME，同时保留来源路径层级与当前工作目录位置。
 - 🔌 **自动端口转发** — 远程本地监听端口（回环 `127.0.0.1` 与通配 `0.0.0.0`；如在 `0.0.0.0:8080` 或 `localhost:8080` 上的开发服务器）被自动检测并转发到本地。
 - 🌐 **本地域名绑定** — 在本地浏览器中通过 `<主机>.<用户名>.sshx:<端口>` 访问转发端口，无需手动设置 `-L` 参数。
 - 🐳 **Docker 容器支持** — 通过名称或 ID 直接连接运行中的容器：`sshx my-container`。命令桥可通过 `docker exec` 在容器内工作。
@@ -62,12 +62,23 @@ sshx local --timeout=30 npm test
 
 ### 📁 双向工作区挂载（按需开启，Beta）
 
-设置 `features.remoteFs: true` 后，命令发起侧的当前目录会通过可读写 FUSE 挂载暴露给另一侧：
+设置 `features.remoteFs: true` 后，命令发起侧的 HOME 目录会通过可读写 FUSE 挂载暴露给另一侧。来源绝对路径的层级会保留在受管理的 session 目录下，例如 `/Users/xiaot` 会映射成 `<session>/Users/xiaot`：
 
-- `sshx remote <cmd>` 在本地当前目录的远程挂载视图中启动远程命令。
-- 交互式 `sshx remote` 仍从远程 HOME 启动，`SSHX_WORKSPACE` 指向挂载后的本地工作区。
-- 在该会话内执行 `sshx local <cmd>` 时，远程当前目录会挂载到本地，本地命令从挂载目录启动。
+- `sshx remote <cmd>` 在本地 HOME 挂载视图中与来源当前目录对应的位置启动远程命令。
+- 交互式 `sshx remote` 仍从远程 HOME 启动；`SSHX_MOUNT_ROOT` 指向来源根目录的挂载点，`SSHX_WORKSPACE` 指向映射后的来源工作目录。
+- 在该会话内执行 `sshx local <cmd>` 时，远程 HOME 会挂载到本地，本地命令从对应的映射位置启动。
+- 如果来源工作目录位于 HOME 之外，sshx 会安全地退回为导出该目录，同时仍在 session 目录下保留其绝对路径层级。
 - 写入和 `fsync` 会立即回源；元数据与目录项采用短 TTL，重新打开文件时会重新校验。
+
+挂载后的 HOME 允许读取、写入和新建，但双向均禁止删除文件/目录及重命名。它仍可能包含 shell 配置、SSH 凭据等敏感文件，请只对可信 target 开启 `remoteFs`。反向导出时，sshx 会排除自身管理的挂载树，避免形成递归挂载。
+
+在 client 启动 sshx 时设置 `FS_READ_ONLY=1`，即可让该会话的挂载只读：
+
+```sh
+FS_READ_ONLY=1 sshx debian@orb pwd
+```
+
+client 的值会被导出到远端会话；之后执行 `sshx local <cmd>` 会继承该值，因此反向挂载同样保持只读。
 
 开启后 FUSE 是硬依赖：即使 `strict` 为 false，挂载失败也会直接终止命令，不会静默回退。Linux 需要 `/dev/fuse` 与 `fusermount`/`fusermount3`；macOS 需要当前版本的 macFUSE，现阶段标记为 Beta。远程 target 必须是可使用 FUSE 的 Linux。
 
@@ -121,7 +132,7 @@ ls /dev/macfuse*
 
 **macOS 15.4+ FSKit 说明：**macFUSE 5 提供纯用户态 FSKit 后端，不需要内核扩展、恢复模式安全设置或重启，但它对 sshx 当前的挂载实现并非零改动透明，因此尚未启用。macFUSE 要求显式传入 `-o backend=fskit`；FSKit 只允许挂载到 `/Volumes` 下，并且不支持多项传统 mount option。sshx 当前在运行时临时目录下创建私有挂载点，并传入面向 VFS 的选项。支持 FSKit 需要增加专用的挂载路径和选项适配层，但 RemoteFS 线协议与文件操作后端无需改变。
 
-首版只保证工作区内的相对路径，不改写命令中的绝对路径，也不支持额外挂载根、特殊文件、xattr/ACL、Docker target、FUSE-T 或 FSKit。目标负载是源码树与小文件，不追求大文件吞吐。
+来源绝对路径会作为层级保留在 sshx 的私有 session 目录下，但命令参数中的绝对路径不会被改写。RemoteFS 不暴露特殊文件、xattr/ACL，也不支持 Docker target、FUSE-T 或 FSKit。目标负载是源码树与小文件，不追求大文件吞吐。
 
 ### 🔌 自动端口检测与转发
 

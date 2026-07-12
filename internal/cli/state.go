@@ -105,7 +105,16 @@ func remoteBridgeEnvScript(remoteHome string, session *BridgeSession) string {
 	}
 	script += "; SSHX_SESSION_ID=" + shellQuote(session.SessionID) + "; export SSHX_SESSION_ID"
 	if session.Workspace != "" {
-		script += "; SSHX_WORKSPACE=" + shellQuote(session.Workspace) + "; SSHX_REMOTE_FS=1; export SSHX_WORKSPACE SSHX_REMOTE_FS"
+		script += "; SSHX_WORKSPACE=" + shellQuote(session.Workspace)
+		if session.MountRoot != "" {
+			script += "; SSHX_MOUNT_ROOT=" + shellQuote(session.MountRoot)
+		}
+		if session.ReadOnly {
+			script += "; FS_READ_ONLY=1"
+		} else {
+			script += "; FS_READ_ONLY=0"
+		}
+		script += "; SSHX_REMOTE_FS=1; export SSHX_WORKSPACE SSHX_MOUNT_ROOT SSHX_REMOTE_FS FS_READ_ONLY"
 	}
 	return script
 }

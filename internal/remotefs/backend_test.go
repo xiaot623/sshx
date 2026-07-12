@@ -180,6 +180,47 @@ func TestOpenFlagsTranslateAtLocalBoundary(t *testing.T) {
 	}
 }
 
+func TestRootBackendDisableDeleteKeepsWritesAndCreates(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := OpenRootBackendWithOptions(root, RootBackendOptions{DisableDelete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.CloseBackend()
+	ctx := context.Background()
+
+	handle, _, err := backend.Open(ctx, "created.txt", OpenWrite|OpenCreate, 0o600)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := backend.Write(ctx, handle, 0, []byte("created")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := backend.Close(ctx, handle); err != nil {
+		t.Fatal(err)
+	}
+	for operation, err := range map[string]error{
+		"unlink": backend.Unlink(ctx, "note.txt"),
+		"rmdir":  backend.Rmdir(ctx, "dir"),
+		"rename": backend.Rename(ctx, "note.txt", "renamed.txt"),
+	} {
+		if !errors.Is(err, syscall.EPERM) {
+			t.Fatalf("%s error = %v, want EPERM", operation, err)
+		}
+	}
+	for _, name := range []string{"note.txt", "dir", "created.txt"} {
+		if _, err := os.Lstat(filepath.Join(root, name)); err != nil {
+			t.Fatalf("%s was removed: %v", name, err)
+		}
+	}
+}
+
 func TestErrnoMappingIsStable(t *testing.T) {
 	tests := []struct {
 		err  error

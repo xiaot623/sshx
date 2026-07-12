@@ -14,13 +14,15 @@ import (
 
 func TestRemoteFSSessionCommandUsesMountedWorkspace(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"remote", "sh", "-c", "cat note.txt"})
-	session := &BridgeSession{SessionID: "session-1", Workspace: "/tmp/sshx-workspace"}
+	session := &BridgeSession{SessionID: "session-1", MountRoot: "/tmp/mounts/session-1/Users/xiaot", Workspace: "/tmp/mounts/session-1/Users/xiaot/workspace/sshx", ReadOnly: true}
 	args := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/id", session)
 	command := args[len(args)-1]
 	for _, want := range []string{
 		"SSHX_SESSION_ID",
 		"SSHX_WORKSPACE",
+		"SSHX_MOUNT_ROOT",
 		"SSHX_REMOTE_FS=1",
+		"FS_READ_ONLY=1",
 		`cd -- "$SSHX_WORKSPACE"`,
 		"cat note.txt",
 	} {
@@ -32,7 +34,7 @@ func TestRemoteFSSessionCommandUsesMountedWorkspace(t *testing.T) {
 
 func TestRemoteFSInteractiveShellKeepsRemoteHome(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"remote"})
-	session := &BridgeSession{SessionID: "session-1", Workspace: "/tmp/sshx-workspace"}
+	session := &BridgeSession{SessionID: "session-1", MountRoot: "/tmp/mounts/session-1/Users/xiaot", Workspace: "/tmp/mounts/session-1/Users/xiaot/workspace/sshx"}
 	args := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/id", session)
 	command := args[len(args)-1]
 	if !strings.Contains(command, "SSHX_WORKSPACE") {

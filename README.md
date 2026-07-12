@@ -5,7 +5,7 @@
 **sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host (or Docker container) with sshx-aware features enabled, you unlock a persistent, shared remote server that gives you:
 
 - 🔄 **Reverse command bridge** — run `sshx local <cmd>` *on the remote* to execute commands on your local machine, with stdout, stderr, exit code, and stdin all propagated.
-- 📁 **Bidirectional workspace mount** — opt in to make the command initiator's current directory available to commands running on the other side.
+- 📁 **Bidirectional home mount** — opt in to mount the command initiator's home while preserving the source path hierarchy and working directory.
 - 🔌 **Automatic port forwarding** — remote local listeners (loopback `127.0.0.1` and wildcard `0.0.0.0`; e.g., a dev server on `0.0.0.0:8080` or `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
 - 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. Command bridge support works inside containers via `docker exec`.
@@ -62,12 +62,23 @@ sshx local --timeout=30 npm test
 
 ### 📁 Bidirectional Workspace Mount (opt-in, beta)
 
-Set `features.remoteFs: true` to expose the command initiator's current directory through a read-write FUSE mount:
+Set `features.remoteFs: true` to expose the command initiator's home directory through a read-write FUSE mount. Its absolute hierarchy is preserved below the managed session directory (for example, `/Users/xiaot` becomes `<session>/Users/xiaot`):
 
-- `sshx remote <cmd>` starts the remote command in a mounted view of the local current directory.
-- An interactive `sshx remote` shell still starts in the remote home. `SSHX_WORKSPACE` points to the mounted local workspace.
-- From that shell, `sshx local <cmd>` mounts the remote current directory locally and starts the local command there.
+- `sshx remote <cmd>` starts the remote command at the corresponding path inside the mounted local home.
+- An interactive `sshx remote` shell still starts in the remote home. `SSHX_MOUNT_ROOT` points to the mounted source root and `SSHX_WORKSPACE` points to the mapped source working directory.
+- From that shell, `sshx local <cmd>` mounts the remote home locally and starts the local command at the corresponding mapped path.
+- If the source working directory is outside its home, sshx exports that directory as a safe fallback and still preserves its absolute hierarchy below the session directory.
 - Writes and `fsync` are sent to the source immediately. Metadata and directory entries use short TTLs and are revalidated when files are reopened.
+
+The mounted home permits reads, writes, and creation, but blocks file/directory deletion and rename in both directions. It can still include sensitive files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust. sshx excludes its managed mount tree from reverse exports to avoid recursive mounts.
+
+Set `FS_READ_ONLY=1` on the client when starting sshx to make the session mounts read-only:
+
+```sh
+FS_READ_ONLY=1 sshx debian@orb pwd
+```
+
+The client value is exported into the remote session. A later `sshx local <cmd>` inherits it, so the reverse mount is read-only as well.
 
 FUSE is a hard dependency when this feature is enabled: a mount failure aborts the command even when `strict` is false. Linux needs `/dev/fuse` plus `fusermount`/`fusermount3`; macOS needs a current macFUSE installation and is currently beta. The remote target must be Linux with FUSE available.
 
@@ -121,7 +132,7 @@ ls /dev/macfuse*
 
 **macOS 15.4+ FSKit note:** macFUSE 5 provides a userspace FSKit backend that does not require a kernel extension, Recovery-mode security changes, or a restart. It is not transparent to the current sshx mount implementation and is not enabled yet: macFUSE requires the explicit `-o backend=fskit` option, FSKit only supports mount points below `/Volumes`, and several traditional mount options are unavailable. sshx currently creates private mounts below the runtime temporary directory and supplies VFS-oriented options. Supporting FSKit therefore requires a dedicated mount-path/options adapter, although the RemoteFS wire protocol and file-operation backend can remain unchanged.
 
-The first version guarantees workspace-relative paths only. It does not rewrite absolute command arguments, add extra mount roots, expose special files/xattrs/ACLs, or support Docker targets, FUSE-T, or FSKit. It is optimized for source trees and small files rather than large-file throughput.
+Absolute source paths are preserved as a hierarchy below sshx's private session directory, but absolute command arguments are not rewritten. RemoteFS does not expose special files/xattrs/ACLs or support Docker targets, FUSE-T, or FSKit. It is optimized for source trees and small files rather than large-file throughput.
 
 ### 🔌 Automatic Port Detection & Forwarding
 

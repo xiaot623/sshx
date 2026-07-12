@@ -12,7 +12,7 @@ import (
 )
 
 type PeerOptions struct {
-	OnMount   func(context.Context, *Peer, string) (string, error)
+	OnMount   func(context.Context, *Peer, string, string, MountOptions) (string, error)
 	OnUnmount func(context.Context, string) error
 }
 
@@ -173,7 +173,15 @@ func (p *Peer) UnregisterBackend(mountID string) error {
 }
 
 func (p *Peer) CreateMount(ctx context.Context, mountID string) (string, error) {
-	response, err := p.request(ctx, wireFrame{MountID: mountID, Op: "mount.create"})
+	return p.CreateMountAt(ctx, mountID, "workspace")
+}
+
+func (p *Peer) CreateMountAt(ctx context.Context, mountID, mountPath string) (string, error) {
+	return p.CreateMountAtWithOptions(ctx, mountID, mountPath, MountOptions{})
+}
+
+func (p *Peer) CreateMountAtWithOptions(ctx context.Context, mountID, mountPath string, options MountOptions) (string, error) {
+	response, err := p.request(ctx, wireFrame{MountID: mountID, MountPath: mountPath, ReadOnly: options.ReadOnly, Op: "mount.create"})
 	if err != nil {
 		return "", err
 	}
@@ -325,7 +333,7 @@ func (p *Peer) handleRequest(ctx context.Context, request wireFrame) wireFrame {
 		if p.opts.OnMount == nil {
 			return errorFrame(syscall.ENOTSUP)
 		}
-		path, err := p.opts.OnMount(ctx, p, request.MountID)
+		path, err := p.opts.OnMount(ctx, p, request.MountID, request.MountPath, MountOptions{ReadOnly: request.ReadOnly})
 		if err != nil {
 			return errorFrame(err)
 		}

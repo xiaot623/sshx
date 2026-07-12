@@ -14,7 +14,9 @@ import (
 
 type BridgeSession struct {
 	SessionID string
+	MountRoot string
 	Workspace string
+	ReadOnly  bool
 	Done      <-chan struct{}
 	stop      func()
 	stopOnce  sync.Once

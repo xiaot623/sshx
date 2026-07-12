@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 type captureMountDriver struct {
 	backend chan remotefs.Backend
+	options chan remotefs.MountOptions
 }
 
 type blockingMountDriver struct {
@@ -36,8 +38,11 @@ func (d *blockingMountDriver) Mount(_ context.Context, path string, _ remotefs.B
 	return &testMount{path: path, done: make(chan error)}, nil
 }
 
-func (d *captureMountDriver) Mount(_ context.Context, path string, backend remotefs.Backend, _ remotefs.MountOptions) (remotefs.Mount, error) {
+func (d *captureMountDriver) Mount(_ context.Context, path string, backend remotefs.Backend, options remotefs.MountOptions) (remotefs.Mount, error) {
 	d.backend <- backend
+	if d.options != nil {
+		d.options <- options
+	}
 	return &testMount{path: path, done: make(chan error)}, nil
 }
 
@@ -60,7 +65,7 @@ func (m *testMount) Unmount(context.Context) error {
 func startRemoteFSServer(t *testing.T, driver remotefs.MountDriver) (context.Context, context.CancelFunc, string, *Server) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	socket := filepath.Join(t.TempDir(), "bridge.sock")
+	socket := shortSocketPath(t)
 	server := &Server{
 		SocketPath:   socket,
 		Token:        "secret",
@@ -116,7 +121,7 @@ func connectRemoteFSPair(t *testing.T, ctx context.Context, socket string, execu
 }
 
 func TestRemoteFSSessionMountsClientExportOnServer(t *testing.T) {
-	driver := &captureMountDriver{backend: make(chan remotefs.Backend, 1)}
+	driver := &captureMountDriver{backend: make(chan remotefs.Backend, 1), options: make(chan remotefs.MountOptions, 1)}
 	ctx, _, socket, _ := startRemoteFSServer(t, driver)
 	clientPeer, _ := connectRemoteFSPair(t, ctx, socket, nil)
 	root := t.TempDir()
@@ -130,12 +135,15 @@ func TestRemoteFSSessionMountsClientExportOnServer(t *testing.T) {
 	if err := clientPeer.RegisterBackend("workspace", backend); err != nil {
 		t.Fatal(err)
 	}
-	path, err := clientPeer.CreateMount(ctx, "workspace")
+	path, err := clientPeer.CreateMountAtWithOptions(ctx, "workspace", "Users/xiaot", remotefs.MountOptions{ReadOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(path) != "workspace" {
+	if !strings.HasSuffix(filepath.ToSlash(path), "/session-1/Users/xiaot") {
 		t.Fatalf("mount path = %q", path)
+	}
+	if options := <-driver.options; !options.ReadOnly {
+		t.Fatal("server mount was not read-only")
 	}
 	var mountedBackend remotefs.Backend
 	select {
@@ -165,7 +173,7 @@ func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 	var peerMu sync.RWMutex
 	var clientPeer *remotefs.Peer
 	execute := func(commandCtx context.Context, frame protocol.Frame) protocol.Frame {
-		if !frame.RemoteFS || frame.MountID == "" || frame.SessionID != "session-1" {
+		if !frame.RemoteFS || !frame.MountReadOnly || frame.MountID == "" || frame.SessionID != "session-1" {
 			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "missing remote fs identity"}
 		}
 		peerMu.RLock()
@@ -207,7 +215,7 @@ func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(remoteRoot, "remote.txt"), []byte("from-remote"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := RequestCommandForSessionWithTimeout(
+	result, err := RequestCommandForSessionWithMountOptions(
 		ctx,
 		socket,
 		[]string{"read-remote"},
@@ -215,6 +223,7 @@ func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 		nil,
 		remoteRoot,
 		"session-1",
+		true,
 		true,
 		time.Second,
 		"secret",
@@ -348,10 +357,14 @@ func TestRemoteFSRejectsDuplicateDataSession(t *testing.T) {
 func TestRemoteFSCleansStaleManagedDirectories(t *testing.T) {
 	root := t.TempDir()
 	sessionPath := filepath.Join(root, "session-1")
-	if err := os.MkdirAll(filepath.Join(sessionPath, "workspace"), 0o700); err != nil {
+	mountPath := filepath.Join(sessionPath, "Users", "xiaot")
+	if err := os.MkdirAll(mountPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sessionPath, "workspace", "stale"), []byte("stale"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(sessionPath, ".mount-path"), []byte("Users/xiaot\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mountPath, "stale"), []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	server := &Server{MountRoot: root}

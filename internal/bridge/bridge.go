@@ -286,8 +286,8 @@ func (s *Server) handleFSConn(ctx context.Context, conn net.Conn) {
 		sessionID = candidate
 		return nil
 	}, remotefs.PeerOptions{
-		OnMount: func(_ context.Context, peer *remotefs.Peer, mountID string) (string, error) {
-			return s.mountRemoteFS(ctx, sessionID, peer, mountID)
+		OnMount: func(_ context.Context, peer *remotefs.Peer, mountID, mountPath string, options remotefs.MountOptions) (string, error) {
+			return s.mountRemoteFS(ctx, sessionID, peer, mountID, mountPath, options)
 		},
 		OnUnmount: func(unmountCtx context.Context, mountID string) error {
 			return s.unmountRemoteFS(unmountCtx, sessionID, mountID)
@@ -335,7 +335,7 @@ func fsMountKey(sessionID, mountID string) string {
 	return sessionID + "\x00" + mountID
 }
 
-func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remotefs.Peer, mountID string) (string, error) {
+func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remotefs.Peer, mountID, mountHierarchy string, options remotefs.MountOptions) (string, error) {
 	if mountID == "" {
 		return "", errors.New("remote fs mountId is required")
 	}
@@ -347,7 +347,14 @@ func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remo
 	}
 	s.fsMounting[sessionID] = true
 	s.mu.Unlock()
-	path := filepath.Join(s.MountRoot, sessionID, "workspace")
+	sessionPath := filepath.Join(s.MountRoot, sessionID)
+	path, err := remotefs.MountPathBelow(sessionPath, mountHierarchy)
+	if err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
 	_ = syscall.Unmount(path, 0)
 	if err := os.RemoveAll(path); err != nil {
 		s.mu.Lock()
@@ -355,8 +362,21 @@ func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remo
 		s.mu.Unlock()
 		return "", err
 	}
-	mount, err := s.MountDriver.Mount(ctx, path, peer.RemoteBackend(mountID), remotefs.MountOptions{})
+	if err := os.MkdirAll(sessionPath, 0o700); err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(sessionPath, ".mount-path"), []byte(mountHierarchy+"\n"), 0o600); err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	mount, err := s.MountDriver.Mount(ctx, path, peer.RemoteBackend(mountID), options)
 	if err != nil {
+		_ = os.RemoveAll(sessionPath)
 		s.mu.Lock()
 		delete(s.fsMounting, sessionID)
 		s.mu.Unlock()
@@ -423,6 +443,13 @@ func (s *Server) cleanupStaleMounts() {
 		}
 		sessionPath := filepath.Join(s.MountRoot, entry.Name())
 		mountPath := filepath.Join(sessionPath, "workspace")
+		if marker, readErr := os.ReadFile(filepath.Join(sessionPath, ".mount-path")); readErr == nil {
+			if resolved, resolveErr := remotefs.MountPathBelow(sessionPath, strings.TrimSpace(string(marker))); resolveErr == nil {
+				mountPath = resolved
+			} else {
+				continue
+			}
+		}
 		if mounted, statErr := managedPathMounted(mountPath); statErr == nil && !mounted {
 			_ = os.RemoveAll(sessionPath)
 			continue
@@ -701,7 +728,12 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs data session is unavailable"})
 			return
 		}
-		backend, err := remotefs.OpenRootBackend(req.Cwd)
+		layout, err := remotefs.CurrentExportLayout(req.Cwd)
+		if err != nil {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: fmt.Sprintf("resolve remote home mount: %v", err)})
+			return
+		}
+		backend, err := remotefs.OpenRootBackendWithOptions(layout.RootPath, remotefs.RootBackendOptions{DisableDelete: true}, s.MountRoot)
 		if err != nil {
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: fmt.Sprintf("open remote workspace: %v", err)})
 			return
@@ -714,7 +746,8 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 		}
 		defer fsPeer.UnregisterBackend(mountID)
 		req.MountID = mountID
-		req.Cwd = ""
+		req.MountPath = layout.MountPath
+		req.Cwd = filepath.ToSlash(layout.RelativeCwd)
 	}
 	var lastErr error
 	for {
@@ -920,6 +953,10 @@ func RequestCommandWithTimeout(ctx context.Context, socketPath string, argv []st
 }
 
 func RequestCommandForSessionWithTimeout(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, sessionID string, remoteFS bool, timeout time.Duration, token ...string) (CommandResult, error) {
+	return RequestCommandForSessionWithMountOptions(ctx, socketPath, argv, stdin, env, cwd, sessionID, remoteFS, false, timeout, token...)
+}
+
+func RequestCommandForSessionWithMountOptions(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, sessionID string, remoteFS, readOnly bool, timeout time.Duration, token ...string) (CommandResult, error) {
 	if len(argv) == 0 {
 		return CommandResult{ExitCode: 2}, errors.New("local command is required")
 	}
@@ -943,6 +980,7 @@ func RequestCommandForSessionWithTimeout(ctx context.Context, socketPath string,
 		Cwd:           cwd,
 		SessionID:     sessionID,
 		RemoteFS:      remoteFS,
+		MountReadOnly: readOnly,
 		Stdin:         base64.StdEncoding.EncodeToString(stdin),
 		TimeoutMillis: durationMillis(timeout),
 	}); err != nil {

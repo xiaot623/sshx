@@ -347,8 +347,10 @@ func TestPeerHandlesConcurrentRequestsInBothDirections(t *testing.T) {
 
 func TestPeerMountLifecycleCallbacks(t *testing.T) {
 	unmounted := make(chan string, 1)
+	mountOptions := make(chan MountOptions, 1)
 	client, _ := peerPair(t, PeerOptions{}, PeerOptions{
-		OnMount: func(_ context.Context, _ *Peer, mountID string) (string, error) {
+		OnMount: func(_ context.Context, _ *Peer, mountID, _ string, options MountOptions) (string, error) {
+			mountOptions <- options
 			return "/tmp/" + mountID, nil
 		},
 		OnUnmount: func(_ context.Context, mountID string) error {
@@ -356,12 +358,15 @@ func TestPeerMountLifecycleCallbacks(t *testing.T) {
 			return nil
 		},
 	})
-	path, err := client.CreateMount(context.Background(), "workspace")
+	path, err := client.CreateMountAtWithOptions(context.Background(), "workspace", "Users/xiaot", MountOptions{ReadOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if path != "/tmp/workspace" {
 		t.Fatalf("mount path = %q", path)
+	}
+	if options := <-mountOptions; !options.ReadOnly {
+		t.Fatal("read-only mount option was not transmitted")
 	}
 	if err := client.ReleaseMount(context.Background(), "workspace"); err != nil {
 		t.Fatal(err)
