@@ -71,6 +71,56 @@ Set `features.remoteFs: true` to expose the command initiator's current director
 
 FUSE is a hard dependency when this feature is enabled: a mount failure aborts the command even when `strict` is false. Linux needs `/dev/fuse` plus `fusermount`/`fusermount3`; macOS needs a current macFUSE installation and is currently beta. The remote target must be Linux with FUSE available.
 
+#### FUSE setup
+
+The machine receiving the mounted view needs a working FUSE runtime. The Linux target therefore always needs FUSE for `sshx remote`; a macOS client also needs macFUSE when a remote shell runs `sshx local` and mounts the remote working directory back on the Mac.
+
+**Linux target/client**
+
+Install the FUSE 3 userspace tools (the kernel normally already includes the FUSE driver):
+
+```sh
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y fuse3
+
+# Fedora / RHEL-family
+sudo dnf install -y fuse3
+
+# Arch Linux
+sudo pacman -S fuse3
+```
+
+Verify both the device and unmount helper:
+
+```sh
+test -r /dev/fuse && test -w /dev/fuse
+command -v fusermount3 || command -v fusermount
+```
+
+If `/dev/fuse` is missing on a normal Linux host, load the kernel module with `sudo modprobe fuse`. Containers and restricted VMs must also expose `/dev/fuse` and permit FUSE mounts; installing `fuse3` alone is not sufficient. Docker targets are not supported by `remoteFs` yet.
+
+**macOS client (current sshx backend)**
+
+Install the latest macFUSE release from [macfuse.io](https://macfuse.io/) (recommended by the macFUSE project) or with `brew install --cask macfuse`. The current sshx implementation uses macFUSE's kernel/VFS backend.
+
+On Apple Silicon, first-time kernel-backend setup requires:
+
+1. Shut down, then hold the power/Touch ID button to enter macOS Recovery.
+2. Open Startup Security Utility, select the system volume, and choose **Reduced Security**.
+3. Enable **Allow user management of kernel extensions from identified developers**, then restart.
+4. In **System Settings → Privacy & Security**, allow the macFUSE system software when prompted, then restart again.
+
+Intel Macs do not need the Startup Security Utility change, but may still require approving macFUSE in Privacy & Security and restarting. macFUSE does not require disabling SIP or Gatekeeper.
+
+After approval, trigger a mount once and verify that macFUSE loaded:
+
+```sh
+ls /Library/Filesystems/macfuse.fs
+ls /dev/macfuse*
+```
+
+**macOS 15.4+ FSKit note:** macFUSE 5 provides a userspace FSKit backend that does not require a kernel extension, Recovery-mode security changes, or a restart. It is not transparent to the current sshx mount implementation and is not enabled yet: macFUSE requires the explicit `-o backend=fskit` option, FSKit only supports mount points below `/Volumes`, and several traditional mount options are unavailable. sshx currently creates private mounts below the runtime temporary directory and supplies VFS-oriented options. Supporting FSKit therefore requires a dedicated mount-path/options adapter, although the RemoteFS wire protocol and file-operation backend can remain unchanged.
+
 The first version guarantees workspace-relative paths only. It does not rewrite absolute command arguments, add extra mount roots, expose special files/xattrs/ACLs, or support Docker targets, FUSE-T, or FSKit. It is optimized for source trees and small files rather than large-file throughput.
 
 ### 🔌 Automatic Port Detection & Forwarding

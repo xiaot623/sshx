@@ -71,6 +71,56 @@ sshx local --timeout=30 npm test
 
 开启后 FUSE 是硬依赖：即使 `strict` 为 false，挂载失败也会直接终止命令，不会静默回退。Linux 需要 `/dev/fuse` 与 `fusermount`/`fusermount3`；macOS 需要当前版本的 macFUSE，现阶段标记为 Beta。远程 target 必须是可使用 FUSE 的 Linux。
 
+#### FUSE 环境配置
+
+哪台机器接收挂载视图，哪台机器就需要可用的 FUSE 运行环境。因此，执行 `sshx remote` 时 Linux target 始终需要 FUSE；远程 shell 执行 `sshx local`、将远程工作目录反向挂到 Mac 时，macOS client 也需要 macFUSE。
+
+**Linux target/client**
+
+安装 FUSE 3 用户态工具（通常内核已经包含 FUSE 驱动）：
+
+```sh
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y fuse3
+
+# Fedora / RHEL 系
+sudo dnf install -y fuse3
+
+# Arch Linux
+sudo pacman -S fuse3
+```
+
+检查设备和卸载工具：
+
+```sh
+test -r /dev/fuse && test -w /dev/fuse
+command -v fusermount3 || command -v fusermount
+```
+
+普通 Linux 主机缺少 `/dev/fuse` 时，可执行 `sudo modprobe fuse` 加载内核模块。容器和受限虚拟机还必须暴露 `/dev/fuse` 并允许 FUSE 挂载，只安装 `fuse3` 并不够。`remoteFs` 目前尚不支持 Docker target。
+
+**macOS client（sshx 当前使用的后端）**
+
+从 [macfuse.io](https://macfuse.io/) 安装最新版 macFUSE（macFUSE 项目推荐），也可以执行 `brew install --cask macfuse`。sshx 当前使用 macFUSE 的内核/VFS 后端。
+
+Apple Silicon 首次启用内核后端需要：
+
+1. 完全关机，长按电源键/Touch ID 进入 macOS 恢复模式。
+2. 打开“启动安全性实用工具”，选择系统卷并设置为“降低安全性”。
+3. 勾选“允许用户管理来自被认可开发者的内核扩展”，然后重启。
+4. 在“系统设置 → 隐私与安全性”中允许 macFUSE 系统软件，再按提示重启。
+
+Intel Mac 不需要修改“启动安全性实用工具”，但仍可能需要在“隐私与安全性”中允许 macFUSE 并重启。macFUSE 不要求关闭 SIP 或 Gatekeeper。
+
+批准后先触发一次挂载，再检查 macFUSE 是否已加载：
+
+```sh
+ls /Library/Filesystems/macfuse.fs
+ls /dev/macfuse*
+```
+
+**macOS 15.4+ FSKit 说明：**macFUSE 5 提供纯用户态 FSKit 后端，不需要内核扩展、恢复模式安全设置或重启，但它对 sshx 当前的挂载实现并非零改动透明，因此尚未启用。macFUSE 要求显式传入 `-o backend=fskit`；FSKit 只允许挂载到 `/Volumes` 下，并且不支持多项传统 mount option。sshx 当前在运行时临时目录下创建私有挂载点，并传入面向 VFS 的选项。支持 FSKit 需要增加专用的挂载路径和选项适配层，但 RemoteFS 线协议与文件操作后端无需改变。
+
 首版只保证工作区内的相对路径，不改写命令中的绝对路径，也不支持额外挂载根、特殊文件、xattr/ACL、Docker target、FUSE-T 或 FSKit。目标负载是源码树与小文件，不追求大文件吞吐。
 
 ### 🔌 自动端口检测与转发

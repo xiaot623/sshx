@@ -218,8 +218,8 @@ func (p *Peer) request(ctx context.Context, request wireFrame) (wireFrame, error
 	}
 	select {
 	case response := <-responseCh:
-		if response.Errno != 0 {
-			return response, syscall.Errno(response.Errno)
+		if response.ErrorCode != ErrorNone {
+			return response, errorFromCode(response.ErrorCode)
 		}
 		if response.Error != "" {
 			return response, errors.New(response.Error)
@@ -296,7 +296,7 @@ func (p *Peer) readLoop(ctx context.Context) {
 					p.sendResponse(response)
 				}(frame)
 			default:
-				p.sendResponse(wireFrame{Type: frameResponse, ID: frame.ID, Errno: int32(syscall.EBUSY), Error: "too many remote fs requests"})
+				p.sendResponse(wireFrame{Type: frameResponse, ID: frame.ID, ErrorCode: ErrorBusy, Error: "too many remote fs requests"})
 			}
 		default:
 			p.close(fmt.Errorf("unexpected remote fs frame %q", frame.Type))
@@ -309,10 +309,10 @@ func (p *Peer) sendResponse(response wireFrame) {
 	err := p.send(response)
 	if errors.Is(err, ErrFrameTooLarge) {
 		err = p.send(wireFrame{
-			Type:  frameResponse,
-			ID:    response.ID,
-			Errno: int32(syscall.E2BIG),
-			Error: err.Error(),
+			Type:      frameResponse,
+			ID:        response.ID,
+			ErrorCode: ErrorTooLarge,
+			Error:     err.Error(),
 		})
 	}
 	if err != nil {
@@ -370,7 +370,10 @@ func (p *Peer) handleRequest(ctx context.Context, request wireFrame) wireFrame {
 		}
 		return wireFrame{Entries: entries}
 	case "open":
-		handle, attr, err := backend.Open(ctx, request.Path, request.Flags, request.Mode)
+		if !request.OpenFlags.Valid() {
+			return errorFrame(syscall.EINVAL)
+		}
+		handle, attr, err := backend.Open(ctx, request.Path, request.OpenFlags, request.Mode)
 		if err != nil {
 			return errorFrame(err)
 		}
@@ -444,7 +447,86 @@ func errorFrame(err error) wireFrame {
 	if err == nil {
 		return wireFrame{}
 	}
-	return wireFrame{Errno: int32(errnoOf(err)), Error: err.Error()}
+	return wireFrame{ErrorCode: errorCodeOf(err), Error: err.Error()}
+}
+
+func errorCodeOf(err error) ErrorCode {
+	errno := errnoOf(err)
+	switch errno {
+	case 0:
+		return ErrorNone
+	case syscall.EPERM:
+		return ErrorNotPermitted
+	case syscall.EACCES:
+		return ErrorPermission
+	case syscall.ENOENT:
+		return ErrorNotFound
+	case syscall.EEXIST:
+		return ErrorExists
+	case syscall.EBADF:
+		return ErrorBadHandle
+	case syscall.EISDIR:
+		return ErrorIsDir
+	case syscall.ENOTDIR:
+		return ErrorNotDir
+	case syscall.EXDEV:
+		return ErrorCrossDev
+	case syscall.EBUSY:
+		return ErrorBusy
+	case syscall.E2BIG:
+		return ErrorTooLarge
+	case syscall.ENOTSUP:
+		return ErrorUnsupported
+	case syscall.ENOSYS:
+		return ErrorNotImplemented
+	case syscall.EINVAL:
+		return ErrorInvalid
+	case syscall.EINTR:
+		return ErrorInterrupted
+	case syscall.ETIMEDOUT:
+		return ErrorTimedOut
+	default:
+		return ErrorIO
+	}
+}
+
+func errorFromCode(code ErrorCode) error {
+	switch code {
+	case ErrorNotPermitted:
+		return syscall.EPERM
+	case ErrorPermission:
+		return syscall.EACCES
+	case ErrorNotFound:
+		return syscall.ENOENT
+	case ErrorExists:
+		return syscall.EEXIST
+	case ErrorBadHandle:
+		return syscall.EBADF
+	case ErrorIsDir:
+		return syscall.EISDIR
+	case ErrorNotDir:
+		return syscall.ENOTDIR
+	case ErrorCrossDev:
+		return syscall.EXDEV
+	case ErrorBusy:
+		return syscall.EBUSY
+	case ErrorTooLarge:
+		return syscall.E2BIG
+	case ErrorUnsupported:
+		return syscall.ENOTSUP
+	case ErrorNotImplemented:
+		return syscall.ENOSYS
+	case ErrorInvalid:
+		return syscall.EINVAL
+	case ErrorInterrupted:
+		return syscall.EINTR
+	case ErrorTimedOut:
+		return syscall.ETIMEDOUT
+	case ErrorIO, ErrorNone:
+		return syscall.EIO
+	default:
+		return syscall.EIO
+	}
 }
 
 func errnoOf(err error) syscall.Errno {
@@ -540,8 +622,8 @@ func (b *remoteBackend) ReadDir(ctx context.Context, path string) ([]DirEntry, e
 	return response.Entries, err
 }
 
-func (b *remoteBackend) Open(ctx context.Context, path string, flags, mode uint32) (uint64, Attr, error) {
-	response, err := b.call(ctx, wireFrame{Op: "open", Path: path, Flags: flags, Mode: mode})
+func (b *remoteBackend) Open(ctx context.Context, path string, flags OpenFlags, mode uint32) (uint64, Attr, error) {
+	response, err := b.call(ctx, wireFrame{Op: "open", Path: path, OpenFlags: flags, Mode: mode})
 	return response.Handle, response.Attr, err
 }
 

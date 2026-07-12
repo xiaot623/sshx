@@ -204,7 +204,11 @@ func (n *fuseNode) Setattr(ctx context.Context, file fs.FileHandle, in *fuse.Set
 }
 
 func (n *fuseNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	handle, _, err := n.state.backend.Open(ctx, n.relPath(), flags, 0)
+	openFlags, err := portableOpenFlags(flags)
+	if err != nil {
+		return nil, 0, errnoOf(err)
+	}
+	handle, _, err := n.state.backend.Open(ctx, n.relPath(), openFlags, 0)
 	if err != nil {
 		return nil, 0, errnoOf(err)
 	}
@@ -213,12 +217,47 @@ func (n *fuseNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 
 func (n *fuseNode) Create(ctx context.Context, name string, flags, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	path := filepath.Join(n.relPath(), name)
-	handle, attr, err := n.state.backend.Open(ctx, path, flags|syscall.O_CREAT, mode)
+	openFlags, err := portableOpenFlags(flags)
+	if err != nil {
+		return nil, nil, 0, errnoOf(err)
+	}
+	openFlags |= OpenCreate
+	handle, attr, err := n.state.backend.Open(ctx, path, openFlags, mode)
 	if err != nil {
 		return nil, nil, 0, errnoOf(err)
 	}
 	fillEntry(out, attr, n.state.options)
 	return n.child(attr), &fuseFile{state: n.state, path: path, handle: handle}, fuse.FOPEN_DIRECT_IO, 0
+}
+
+func portableOpenFlags(flags uint32) (OpenFlags, error) {
+	var portable OpenFlags
+	switch flags & uint32(syscall.O_ACCMODE) {
+	case uint32(syscall.O_RDONLY):
+		portable |= OpenRead
+	case uint32(syscall.O_WRONLY):
+		portable |= OpenWrite
+	case uint32(syscall.O_RDWR):
+		portable |= OpenRead | OpenWrite
+	default:
+		return 0, syscall.EINVAL
+	}
+	if flags&uint32(syscall.O_CREAT) != 0 {
+		portable |= OpenCreate
+	}
+	if flags&uint32(syscall.O_EXCL) != 0 {
+		portable |= OpenExclusive
+	}
+	if flags&uint32(syscall.O_TRUNC) != 0 {
+		portable |= OpenTruncate
+	}
+	if flags&uint32(syscall.O_APPEND) != 0 {
+		portable |= OpenAppend
+	}
+	if syncFlag := uint32(syscall.O_SYNC); syncFlag != 0 && flags&syncFlag == syncFlag {
+		portable |= OpenSync
+	}
+	return portable, nil
 }
 
 func (n *fuseNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {

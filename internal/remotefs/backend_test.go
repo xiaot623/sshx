@@ -28,7 +28,7 @@ func TestRootBackendReadWriteRenameAndMetadata(t *testing.T) {
 	if attr.Size != 5 || attr.Mode&syscall.S_IFMT != syscall.S_IFREG {
 		t.Fatalf("unexpected attr: %#v", attr)
 	}
-	handle, _, err := backend.Open(ctx, "note.txt", uint32(os.O_RDWR), 0)
+	handle, _, err := backend.Open(ctx, "note.txt", OpenRead|OpenWrite, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestRootBackendRejectsEscapesAndSpecialFiles(t *testing.T) {
 	if attr.Mode&syscall.S_IFMT != syscall.S_IFLNK {
 		t.Fatalf("symlink mode = %#o", attr.Mode)
 	}
-	if _, _, err := backend.Open(ctx, "escape", uint32(os.O_RDONLY), 0); err == nil {
+	if _, _, err := backend.Open(ctx, "escape", OpenRead, 0); err == nil {
 		t.Fatal("opening an escaping symlink succeeded")
 	}
 	if _, err := backend.Lookup(ctx, "../secret.txt"); !errors.Is(err, syscall.EPERM) {
@@ -95,7 +95,7 @@ func TestRootBackendRejectsEscapesAndSpecialFiles(t *testing.T) {
 	if _, err := backend.Symlink(ctx, outside, "created-escape"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := backend.Open(ctx, "created-escape", uint32(os.O_RDONLY), 0); err == nil {
+	if _, _, err := backend.Open(ctx, "created-escape", OpenRead, 0); err == nil {
 		t.Fatal("opening a newly-created escaping symlink succeeded")
 	}
 }
@@ -112,7 +112,7 @@ func TestRootBackendDirectoryAndSymlinkOperations(t *testing.T) {
 	if _, err := backend.Mkdir(ctx, "dir", 0o750); err != nil {
 		t.Fatal(err)
 	}
-	handle, _, err := backend.Open(ctx, "dir/file", uint32(os.O_CREATE|os.O_RDWR), 0o600)
+	handle, _, err := backend.Open(ctx, "dir/file", OpenRead|OpenWrite|OpenCreate, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestRootBackendDirectoryAndSymlinkOperations(t *testing.T) {
 	if target != "file" {
 		t.Fatalf("target = %q", target)
 	}
-	linkHandle, _, err := backend.Open(ctx, "dir/link", uint32(os.O_RDONLY), 0)
+	linkHandle, _, err := backend.Open(ctx, "dir/link", OpenRead, 0)
 	if err != nil {
 		t.Fatalf("opening in-root symlink: %v", err)
 	}
@@ -154,6 +154,32 @@ func TestRootBackendDirectoryAndSymlinkOperations(t *testing.T) {
 	}
 }
 
+func TestOpenFlagsTranslateAtLocalBoundary(t *testing.T) {
+	portable, err := portableOpenFlags(uint32(os.O_RDWR | os.O_CREATE | os.O_EXCL | os.O_TRUNC | os.O_APPEND | os.O_SYNC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := OpenRead | OpenWrite | OpenCreate | OpenExclusive | OpenTruncate | OpenAppend | OpenSync
+	if portable != want {
+		t.Fatalf("portable flags = %#x, want %#x", portable, want)
+	}
+	local, err := localOpenFlags(portable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []int{os.O_RDWR, os.O_CREATE, os.O_EXCL, os.O_TRUNC, os.O_SYNC} {
+		if local&flag != flag {
+			t.Fatalf("local flags %#x missing %#x", local, flag)
+		}
+	}
+	if local&os.O_APPEND != 0 {
+		t.Fatalf("local flags %#x unexpectedly contain O_APPEND", local)
+	}
+	if _, err := localOpenFlags(0); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("invalid flags error = %v", err)
+	}
+}
+
 func TestErrnoMappingIsStable(t *testing.T) {
 	tests := []struct {
 		err  error
@@ -170,6 +196,38 @@ func TestErrnoMappingIsStable(t *testing.T) {
 	for _, test := range tests {
 		if got := errnoOf(test.err); got != test.want {
 			t.Fatalf("errnoOf(%v) = %v, want %v", test.err, got, test.want)
+		}
+	}
+}
+
+func TestWireErrorCodesMapToLocalErrnos(t *testing.T) {
+	tests := []struct {
+		code ErrorCode
+		want syscall.Errno
+	}{
+		{ErrorNotPermitted, syscall.EPERM},
+		{ErrorPermission, syscall.EACCES},
+		{ErrorNotFound, syscall.ENOENT},
+		{ErrorExists, syscall.EEXIST},
+		{ErrorBadHandle, syscall.EBADF},
+		{ErrorIsDir, syscall.EISDIR},
+		{ErrorNotDir, syscall.ENOTDIR},
+		{ErrorCrossDev, syscall.EXDEV},
+		{ErrorBusy, syscall.EBUSY},
+		{ErrorTooLarge, syscall.E2BIG},
+		{ErrorUnsupported, syscall.ENOTSUP},
+		{ErrorNotImplemented, syscall.ENOSYS},
+		{ErrorInvalid, syscall.EINVAL},
+		{ErrorInterrupted, syscall.EINTR},
+		{ErrorTimedOut, syscall.ETIMEDOUT},
+		{ErrorIO, syscall.EIO},
+	}
+	for _, test := range tests {
+		if got := errorFromCode(test.code); !errors.Is(got, test.want) {
+			t.Fatalf("errorFromCode(%q) = %v, want %v", test.code, got, test.want)
+		}
+		if got := errorCodeOf(test.want); got != test.code {
+			t.Fatalf("errorCodeOf(%v) = %q, want %q", test.want, got, test.code)
 		}
 	}
 }

@@ -32,14 +32,14 @@ type wireFrame struct {
 	Handle    uint64     `json:"handle,omitempty"`
 	Offset    int64      `json:"offset,omitempty"`
 	Size      uint32     `json:"size,omitempty"`
-	Flags     uint32     `json:"flags,omitempty"`
+	OpenFlags OpenFlags  `json:"openFlags,omitempty"`
 	Mode      uint32     `json:"mode,omitempty"`
 	Attr      Attr       `json:"attr,omitempty"`
 	Change    SetAttr    `json:"change,omitempty"`
 	Entries   []DirEntry `json:"entries,omitempty"`
 	StatFS    StatFS     `json:"statfs,omitempty"`
 	MountPath string     `json:"mountPath,omitempty"`
-	Errno     int32      `json:"errno,omitempty"`
+	ErrorCode ErrorCode  `json:"errorCode,omitempty"`
 	Error     string     `json:"error,omitempty"`
 	Data      []byte     `json:"-"`
 }

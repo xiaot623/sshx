@@ -80,7 +80,7 @@ func TestPeerProxiesFilesystemOperationsBothDirections(t *testing.T) {
 
 	ctx := context.Background()
 	serverView := server.RemoteBackend("client-root")
-	handle, _, err := serverView.Open(ctx, "client.txt", uint32(os.O_RDWR), 0)
+	handle, _, err := serverView.Open(ctx, "client.txt", OpenRead|OpenWrite, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestPeerProxiesFilesystemOperationsBothDirections(t *testing.T) {
 	}
 
 	clientView := client.RemoteBackend("server-root")
-	handle, _, err = clientView.Open(ctx, "server.txt", uint32(os.O_RDONLY), 0)
+	handle, _, err = clientView.Open(ctx, "server.txt", OpenRead, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +118,47 @@ func TestPeerProxiesFilesystemOperationsBothDirections(t *testing.T) {
 	}
 	if string(got) != "client-updated" {
 		t.Fatalf("updated data = %q", got)
+	}
+}
+
+func TestPeerUsesPortableCreateTruncateAndExclusiveFlags(t *testing.T) {
+	client, server := peerPair(t, PeerOptions{}, PeerOptions{})
+	root := t.TempDir()
+	backend, err := OpenRootBackend(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.RegisterBackend("root", backend); err != nil {
+		t.Fatal(err)
+	}
+	remote := client.RemoteBackend("root")
+	ctx := context.Background()
+	handle, _, err := remote.Open(ctx, "created.txt", OpenWrite|OpenCreate|OpenExclusive, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Write(ctx, handle, 0, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Close(ctx, handle); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := remote.Open(ctx, "created.txt", OpenWrite|OpenCreate|OpenExclusive, 0o600); !errors.Is(err, syscall.EEXIST) {
+		t.Fatalf("exclusive create error = %v", err)
+	}
+	handle, _, err = remote.Open(ctx, "created.txt", OpenWrite|OpenTruncate, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Close(ctx, handle); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "created.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("truncated content = %q", data)
 	}
 }
 
@@ -192,7 +233,7 @@ func TestPeerHandlesConcurrentRequests(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			handle, _, err := remote.Open(context.Background(), "value.txt", uint32(os.O_RDONLY), 0)
+			handle, _, err := remote.Open(context.Background(), "value.txt", OpenRead, 0)
 			if err != nil {
 				errs <- err
 				return
@@ -265,7 +306,7 @@ func TestPeerHandlesConcurrentRequestsInBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := func(backend Backend, want string) error {
-		handle, _, err := backend.Open(context.Background(), "value.txt", uint32(os.O_RDONLY), 0)
+		handle, _, err := backend.Open(context.Background(), "value.txt", OpenRead, 0)
 		if err != nil {
 			return err
 		}
@@ -351,7 +392,7 @@ func TestPeerRejectsExportsAfterClose(t *testing.T) {
 }
 
 func TestWireFrameRoundTripAndLimits(t *testing.T) {
-	frame := wireFrame{Type: frameRequest, ID: 42, Op: "write", MountID: "workspace", Data: []byte("hello")}
+	frame := wireFrame{Type: frameRequest, ID: 42, Op: "write", MountID: "workspace", OpenFlags: OpenWrite | OpenCreate, ErrorCode: ErrorExists, Data: []byte("hello")}
 	var buffer bytes.Buffer
 	if err := writeWireFrame(&buffer, frame); err != nil {
 		t.Fatal(err)
@@ -360,7 +401,7 @@ func TestWireFrameRoundTripAndLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != frame.ID || got.Op != frame.Op || !bytes.Equal(got.Data, frame.Data) {
+	if got.ID != frame.ID || got.Op != frame.Op || got.OpenFlags != frame.OpenFlags || got.ErrorCode != frame.ErrorCode || !bytes.Equal(got.Data, frame.Data) {
 		t.Fatalf("round trip = %#v", got)
 	}
 	frame.Data = make([]byte, MaxDataSize+1)

@@ -143,7 +143,7 @@ func TestRemoteFSSessionMountsClientExportOnServer(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("mount driver was not called")
 	}
-	handle, _, err := mountedBackend.Open(ctx, "local.txt", uint32(os.O_RDONLY), 0)
+	handle, _, err := mountedBackend.Open(ctx, "local.txt", remotefs.OpenRead, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "remote fs peer unavailable"}
 		}
 		backend := peer.RemoteBackend(frame.MountID)
-		handle, _, err := backend.Open(commandCtx, "remote.txt", uint32(os.O_RDONLY), 0)
+		handle, _, err := backend.Open(commandCtx, "remote.txt", remotefs.OpenRead, 0)
 		if err != nil {
 			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
 		}

@@ -13,6 +13,51 @@ const (
 	MaxInFlight     = 64
 )
 
+// OpenFlags is the platform-independent representation carried by the remote
+// filesystem protocol. It must never contain values from os.O_* or syscall.O_*;
+// those values differ between Darwin and Linux.
+type OpenFlags uint16
+
+const (
+	OpenRead OpenFlags = 1 << iota
+	OpenWrite
+	OpenCreate
+	OpenExclusive
+	OpenTruncate
+	OpenAppend
+	OpenSync
+)
+
+func (f OpenFlags) Valid() bool {
+	const known = OpenRead | OpenWrite | OpenCreate | OpenExclusive | OpenTruncate | OpenAppend | OpenSync
+	return f != 0 && f&^known == 0 && f&(OpenRead|OpenWrite) != 0
+}
+
+// ErrorCode is a stable wire-level error identity. Local syscall errno values
+// are deliberately translated at the protocol boundary because their numeric
+// values are operating-system ABI, not protocol data.
+type ErrorCode string
+
+const (
+	ErrorNone           ErrorCode = ""
+	ErrorPermission     ErrorCode = "permission"
+	ErrorNotPermitted   ErrorCode = "not_permitted"
+	ErrorNotFound       ErrorCode = "not_found"
+	ErrorExists         ErrorCode = "exists"
+	ErrorBadHandle      ErrorCode = "bad_handle"
+	ErrorIsDir          ErrorCode = "is_directory"
+	ErrorNotDir         ErrorCode = "not_directory"
+	ErrorCrossDev       ErrorCode = "cross_device"
+	ErrorBusy           ErrorCode = "busy"
+	ErrorTooLarge       ErrorCode = "too_large"
+	ErrorUnsupported    ErrorCode = "unsupported"
+	ErrorNotImplemented ErrorCode = "not_implemented"
+	ErrorInvalid        ErrorCode = "invalid"
+	ErrorInterrupted    ErrorCode = "interrupted"
+	ErrorTimedOut       ErrorCode = "timed_out"
+	ErrorIO             ErrorCode = "io"
+)
+
 type Attr struct {
 	Ino       uint64 `json:"ino,omitempty"`
 	Size      uint64 `json:"size,omitempty"`
@@ -51,7 +96,7 @@ type StatFS struct {
 type Backend interface {
 	Lookup(context.Context, string) (Attr, error)
 	ReadDir(context.Context, string) ([]DirEntry, error)
-	Open(context.Context, string, uint32, uint32) (uint64, Attr, error)
+	Open(context.Context, string, OpenFlags, uint32) (uint64, Attr, error)
 	Close(context.Context, uint64) error
 	Read(context.Context, uint64, int64, uint32) ([]byte, error)
 	Write(context.Context, uint64, int64, []byte) (uint32, error)

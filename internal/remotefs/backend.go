@@ -99,16 +99,16 @@ func (b *RootBackend) ReadDir(_ context.Context, name string) ([]DirEntry, error
 	return out, nil
 }
 
-func (b *RootBackend) Open(_ context.Context, name string, flags uint32, mode uint32) (uint64, Attr, error) {
+func (b *RootBackend) Open(_ context.Context, name string, flags OpenFlags, mode uint32) (uint64, Attr, error) {
 	name, err := cleanPath(name)
 	if err != nil {
 		return 0, Attr{}, err
 	}
-	// FUSE supplies the authoritative write offset even when the caller opened
-	// the file with O_APPEND. os.File.WriteAt rejects O_APPEND descriptors, so
-	// leave append positioning to the kernel/FUSE request.
-	flags &^= uint32(os.O_APPEND)
-	f, err := b.root.OpenFile(name, int(flags), fs.FileMode(mode&0o777))
+	localFlags, err := localOpenFlags(flags)
+	if err != nil {
+		return 0, Attr{}, err
+	}
+	f, err := b.root.OpenFile(name, localFlags, fs.FileMode(mode&0o777))
 	if err != nil {
 		return 0, Attr{}, err
 	}
@@ -126,6 +126,39 @@ func (b *RootBackend) Open(_ context.Context, name string, flags uint32, mode ui
 	b.handles[id] = f
 	b.mu.Unlock()
 	return id, fileInfoToAttr(info), nil
+}
+
+func localOpenFlags(flags OpenFlags) (int, error) {
+	if !flags.Valid() {
+		return 0, syscall.EINVAL
+	}
+	local := 0
+	switch flags & (OpenRead | OpenWrite) {
+	case OpenRead:
+		local = os.O_RDONLY
+	case OpenWrite:
+		local = os.O_WRONLY
+	case OpenRead | OpenWrite:
+		local = os.O_RDWR
+	default:
+		return 0, syscall.EINVAL
+	}
+	if flags&OpenCreate != 0 {
+		local |= os.O_CREATE
+	}
+	if flags&OpenExclusive != 0 {
+		local |= os.O_EXCL
+	}
+	if flags&OpenTruncate != 0 {
+		local |= os.O_TRUNC
+	}
+	if flags&OpenSync != 0 {
+		local |= os.O_SYNC
+	}
+	// FUSE supplies the authoritative write offset for append operations.
+	// Opening with O_APPEND would make os.File.WriteAt fail, so OpenAppend is
+	// intentionally represented on the wire but not applied to the source fd.
+	return local, nil
 }
 
 func (b *RootBackend) file(handle uint64) (*os.File, error) {
