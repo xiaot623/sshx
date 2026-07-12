@@ -53,21 +53,44 @@ func EnsureDefault(path string) error {
 }
 
 func Load(path string) (Config, error) {
-	if path == "" {
-		return Config{}, nil
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return Config{}, nil
-		}
-		return Config{}, err
-	}
 	var cfg Config
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return Config{}, err
+	if path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return Config{}, err
+			}
+		} else if err := yaml.Unmarshal(b, &cfg); err != nil {
+			return Config{}, err
+		}
 	}
+	applyFeatureEnvOverrides(&cfg)
 	return cfg, nil
+}
+
+// applyFeatureEnvOverrides lets COMMANDBRIDGE / AUTOFORWARD / REMOTEFS=1|0
+// override the corresponding features from the config file.
+func applyFeatureEnvOverrides(cfg *Config) {
+	overrides := []struct {
+		env string
+		dst *bool
+	}{
+		{"COMMANDBRIDGE", &cfg.Features.CommandBridge},
+		{"AUTOFORWARD", &cfg.Features.AutoForward},
+		{"REMOTEFS", &cfg.Features.RemoteFS},
+	}
+	for _, o := range overrides {
+		v, ok := os.LookupEnv(o.env)
+		if !ok {
+			continue
+		}
+		switch v {
+		case "1":
+			*o.dst = true
+		case "0":
+			*o.dst = false
+		}
+	}
 }
 
 func (f Features) Enabled() bool {
