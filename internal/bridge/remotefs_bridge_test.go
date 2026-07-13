@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -27,15 +28,19 @@ type blockingMountDriver struct {
 	calls   atomic.Int32
 }
 
-func (d *blockingMountDriver) Mount(_ context.Context, path string, _ remotefs.Backend, _ remotefs.MountOptions) (remotefs.Mount, error) {
+func (d *blockingMountDriver) Mount(ctx context.Context, path string, _ remotefs.Backend, _ remotefs.MountOptions) (remotefs.Mount, error) {
 	d.calls.Add(1)
 	select {
 	case <-d.started:
 	default:
 		close(d.started)
 	}
-	<-d.release
-	return &testMount{path: path, done: make(chan error)}, nil
+	select {
+	case <-d.release:
+		return &testMount{path: path, done: make(chan error)}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (d *captureMountDriver) Mount(_ context.Context, path string, backend remotefs.Backend, options remotefs.MountOptions) (remotefs.Mount, error) {
@@ -368,6 +373,50 @@ func TestRemoteFSRejectsConcurrentMountsForOneSession(t *testing.T) {
 		t.Fatalf("mount driver calls = %d", calls)
 	}
 	if err := clientPeer.ReleaseMount(ctx, "first"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoteFSCancelsInFlightMount(t *testing.T) {
+	driver := &blockingMountDriver{started: make(chan struct{}), release: make(chan struct{})}
+	ctx, _, socket, server := startRemoteFSServer(t, driver)
+	clientPeer, _ := connectRemoteFSPair(t, ctx, socket, nil)
+	mountCtx, mountCancel := context.WithCancel(ctx)
+	defer mountCancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := clientPeer.CreateMount(mountCtx, "workspace")
+		result <- err
+	}()
+	select {
+	case <-driver.started:
+	case <-time.After(time.Second):
+		t.Fatal("mount did not start")
+	}
+	mountCancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("CreateMount error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CreateMount did not return after cancel")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		mounting := server.fsMounting["session-1"]
+		server.mu.Unlock()
+		if !mounting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fsMounting still set after canceled mount")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(driver.release)
+	if _, err := clientPeer.CreateMount(ctx, "workspace"); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -287,8 +287,8 @@ func (s *Server) handleFSConn(ctx context.Context, conn net.Conn) {
 		sessionID = candidate
 		return nil
 	}, remotefs.PeerOptions{
-		OnMount: func(_ context.Context, peer *remotefs.Peer, mountID, mountPath string, options remotefs.MountOptions) (string, error) {
-			return s.mountRemoteFS(ctx, sessionID, peer, mountID, mountPath, options)
+		OnMount: func(mountCtx context.Context, peer *remotefs.Peer, mountID, mountPath string, options remotefs.MountOptions) (string, error) {
+			return s.mountRemoteFS(mountCtx, sessionID, peer, mountID, mountPath, options)
 		},
 		OnUnmount: func(unmountCtx context.Context, mountID string) error {
 			return s.unmountRemoteFS(unmountCtx, sessionID, mountID)
@@ -391,9 +391,12 @@ func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remo
 		peerClosed = true
 	default:
 	}
-	if s.draining || peerClosed {
+	if s.draining || peerClosed || ctx.Err() != nil {
 		s.mu.Unlock()
 		_ = mount.Unmount(context.Background())
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		return "", errors.New("remote fs session closed while mounting")
 	}
 	s.fsMounts[key] = mount
