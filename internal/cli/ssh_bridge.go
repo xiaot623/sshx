@@ -242,6 +242,13 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			var cwd string
 			cwd, err = os.Getwd()
 			if err == nil {
+				if within, withinErr := remotefs.PathWithin(localReverseMountsRoot(), cwd); withinErr != nil {
+					err = withinErr
+				} else if within {
+					err = bridge.ErrMountedCwd
+				}
+			}
+			if err == nil {
 				var layout remotefs.ExportLayout
 				layout, err = remotefs.CurrentExportLayout(cwd)
 				if err == nil {
@@ -312,11 +319,7 @@ func (r *Runner) executeLocalWithRemoteFS(ctx context.Context, frame protocol.Fr
 	if !safeMountComponent(frame.MountID) || !safeMountComponent(frame.SessionID) || !safeMountComponent(frame.ID) {
 		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "remote fs command is missing mount/session identity"}
 	}
-	base := os.Getenv("XDG_RUNTIME_DIR")
-	if base == "" {
-		base = os.TempDir()
-	}
-	requestMountRoot := filepath.Join(base, fmt.Sprintf("sshx-%d", os.Getuid()), "mounts", frame.SessionID, frame.ID)
+	requestMountRoot := filepath.Join(localReverseMountsRoot(), frame.SessionID, frame.ID)
 	mountPath, err := remotefs.MountPathBelow(requestMountRoot, frame.MountPath)
 	if err != nil {
 		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
@@ -370,6 +373,14 @@ func (r *Runner) executeLocalWithRemoteFS(ctx context.Context, frame protocol.Fr
 		}
 	}
 	return response
+}
+
+func localReverseMountsRoot() string {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, fmt.Sprintf("sshx-%d", os.Getuid()), "mounts")
 }
 
 func safeMountComponent(value string) bool {

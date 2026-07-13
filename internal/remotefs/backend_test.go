@@ -9,6 +9,39 @@ import (
 	"testing"
 )
 
+func TestPathWithin(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "session", "workspace")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	within, err := PathWithin(root, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !within {
+		t.Fatalf("expected %q within %q", child, root)
+	}
+	within, err = PathWithin(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !within {
+		t.Fatal("expected root within itself")
+	}
+	sibling := root + "-other"
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	within, err = PathWithin(root, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if within {
+		t.Fatalf("did not expect %q within %q", sibling, root)
+	}
+}
+
 func TestRootBackendReadWriteRenameAndMetadata(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hello"), 0o640); err != nil {

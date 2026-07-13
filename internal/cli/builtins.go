@@ -13,6 +13,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/bridge"
 	"github.com/xiaot623/sshx/internal/locald"
+	"github.com/xiaot623/sshx/internal/remotefs"
 	"github.com/xiaot623/sshx/internal/sshconfig"
 )
 
@@ -232,6 +233,14 @@ func (r *Runner) runLocalBridge(ctx context.Context, argv []string, timeout time
 		cwd, err = os.Getwd()
 		if err != nil {
 			fmt.Fprintf(r.Stderr, "sshx local: current directory: %v\n", err)
+			return 1
+		}
+		mountRoot := filepath.Join(filepath.Dir(socketPath), "mounts")
+		if within, withinErr := remotefs.PathWithin(mountRoot, cwd); withinErr != nil {
+			fmt.Fprintf(r.Stderr, "sshx local: %v\n", withinErr)
+			return 1
+		} else if within {
+			fmt.Fprintf(r.Stderr, "sshx local: %v\n", bridge.ErrMountedCwd)
 			return 1
 		}
 	}

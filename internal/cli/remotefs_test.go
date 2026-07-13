@@ -9,8 +9,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xiaot623/sshx/internal/remotefs"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 )
+
+func TestLocalReverseMountsRootDetectsNestedCwd(t *testing.T) {
+	root := localReverseMountsRoot()
+	nested := filepath.Join(root, "session-1", "req-1", "workspace")
+	within, err := remotefs.PathWithin(root, nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !within {
+		t.Fatalf("expected %q within %q", nested, root)
+	}
+	outside := t.TempDir()
+	within, err = remotefs.PathWithin(root, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if within {
+		t.Fatalf("did not expect %q within %q", outside, root)
+	}
+}
 
 func TestRemoteFSSessionCommandUsesMountedWorkspace(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"remote", "sh", "-c", "cat note.txt"})

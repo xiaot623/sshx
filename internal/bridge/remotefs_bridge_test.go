@@ -168,6 +168,39 @@ func TestRemoteFSSessionMountsClientExportOnServer(t *testing.T) {
 	}
 }
 
+func TestRequesterRejectsCwdUnderMountRoot(t *testing.T) {
+	ctx, _, socket, server := startRemoteFSServer(t, &captureMountDriver{backend: make(chan remotefs.Backend, 1)})
+	deadline := time.Now().Add(time.Second)
+	for server.MountRoot == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("MountRoot was not initialized")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mounted := filepath.Join(server.MountRoot, "session-1", "workspace")
+	if err := os.MkdirAll(mounted, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := RequestCommandForSessionWithTimeout(
+		ctx,
+		socket,
+		[]string{"true"},
+		nil,
+		nil,
+		mounted,
+		"session-1",
+		true,
+		time.Second,
+		"secret",
+	)
+	if err == nil {
+		t.Fatal("expected mounted cwd to be rejected")
+	}
+	if !strings.Contains(err.Error(), ErrMountedCwd.Error()) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 	ctx, _, socket, server := startRemoteFSServer(t, &captureMountDriver{backend: make(chan remotefs.Backend, 1)})
 	var peerMu sync.RWMutex

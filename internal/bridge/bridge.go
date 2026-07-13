@@ -26,6 +26,7 @@ import (
 )
 
 var ErrNoClient = errors.New("no active sshx client bridge session")
+var ErrMountedCwd = errors.New("cwd is inside an sshx mount; leave the mount before running this command")
 
 type CommandResult struct {
 	ExitCode int
@@ -719,6 +720,13 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 	if req.RemoteFS {
 		if req.SessionID == "" || req.Cwd == "" {
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs requires sessionId and cwd"})
+			return
+		}
+		if within, err := remotefs.PathWithin(s.MountRoot, req.Cwd); err != nil {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: fmt.Sprintf("resolve cwd: %v", err)})
+			return
+		} else if within {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: ErrMountedCwd.Error()})
 			return
 		}
 		s.mu.Lock()
