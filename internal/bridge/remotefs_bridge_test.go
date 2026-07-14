@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +26,17 @@ type captureMountDriver struct {
 type blockingMountDriver struct {
 	started chan struct{}
 	release chan struct{}
+	calls   atomic.Int32
+}
+
+type retryMountDriver struct {
+	mount *retryMount
+}
+
+type retryMount struct {
+	path    string
+	done    chan error
+	retried chan struct{}
 	calls   atomic.Int32
 }
 
@@ -51,6 +63,11 @@ func (d *captureMountDriver) Mount(_ context.Context, path string, backend remot
 	return &testMount{path: path, done: make(chan error)}, nil
 }
 
+func (d *retryMountDriver) Mount(_ context.Context, path string, _ remotefs.Backend, _ remotefs.MountOptions) (remotefs.Mount, error) {
+	d.mount.path = path
+	return d.mount, nil
+}
+
 type testMount struct {
 	path string
 	done chan error
@@ -63,6 +80,25 @@ func (m *testMount) Unmount(context.Context) error {
 	case <-m.done:
 	default:
 		close(m.done)
+	}
+	return nil
+}
+
+func (m *retryMount) Path() string       { return m.path }
+func (m *retryMount) Done() <-chan error { return m.done }
+func (m *retryMount) Unmount(context.Context) error {
+	if m.calls.Add(1) == 1 {
+		return syscall.EBUSY
+	}
+	select {
+	case <-m.done:
+	default:
+		close(m.done)
+	}
+	select {
+	case <-m.retried:
+	default:
+		close(m.retried)
 	}
 	return nil
 }
@@ -203,6 +239,51 @@ func TestRequesterRejectsCwdUnderMountRoot(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), ErrMountedCwd.Error()) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRemoteFSRetriesFailedUnmountWhenPeerCloses(t *testing.T) {
+	mount := &retryMount{done: make(chan error), retried: make(chan struct{})}
+	driver := &retryMountDriver{mount: mount}
+	ctx, _, socket, server := startRemoteFSServer(t, driver)
+	clientPeer, _ := connectRemoteFSPair(t, ctx, socket, nil)
+	if _, err := clientPeer.CreateMount(ctx, "workspace"); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientPeer.ReleaseMount(ctx, "workspace"); !errors.Is(err, syscall.EBUSY) {
+		t.Fatalf("release error = %v, want EBUSY", err)
+	}
+	key := fsMountKey("session-1", "workspace")
+	server.mu.Lock()
+	trackedAfterFailure := server.fsMounts[key] != nil
+	server.mu.Unlock()
+	if !trackedAfterFailure {
+		t.Fatal("mount was no longer tracked after failed unmount")
+	}
+
+	if err := clientPeer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-mount.retried:
+	case <-time.After(time.Second):
+		t.Fatal("peer close did not retry unmount")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		_, tracked := server.fsMounts[key]
+		server.mu.Unlock()
+		if !tracked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("mount was still tracked after successful retry")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if calls := mount.calls.Load(); calls != 2 {
+		t.Fatalf("unmount calls = %d, want 2", calls)
 	}
 }
 
