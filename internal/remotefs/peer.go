@@ -234,7 +234,13 @@ func (p *Peer) request(ctx context.Context, request wireFrame) (wireFrame, error
 		}
 		return response, nil
 	case <-ctx.Done():
-		_ = p.send(wireFrame{Type: frameCancel, ID: id})
+		cancelFrame := wireFrame{Type: frameCancel, ID: id}
+		if request.Op == "mount.create" {
+			// A canceled caller does not take ownership of a mount even if the
+			// successful response crossed the cancellation on the wire.
+			cancelFrame.MountID = request.MountID
+		}
+		_ = p.send(cancelFrame)
 		return wireFrame{}, ctx.Err()
 	case <-p.done:
 		if err := p.Err(); err != nil {
@@ -279,6 +285,14 @@ func (p *Peer) readLoop(ctx context.Context) {
 			p.activeMu.Unlock()
 			if cancel != nil {
 				cancel()
+			}
+			if frame.MountID != "" && p.opts.OnUnmount != nil {
+				p.mountMu.Lock()
+				delete(p.mounts, frame.MountID)
+				p.mountMu.Unlock()
+				go func(mountID string) {
+					_ = p.opts.OnUnmount(context.Background(), mountID)
+				}(frame.MountID)
 			}
 		case frameRequest:
 			select {
@@ -338,10 +352,13 @@ func (p *Peer) handleRequest(ctx context.Context, request wireFrame) wireFrame {
 			return errorFrame(err)
 		}
 		p.mountMu.Lock()
-		if p.mountClosed {
+		if p.mountClosed || ctx.Err() != nil {
 			p.mountMu.Unlock()
 			if p.opts.OnUnmount != nil {
 				_ = p.opts.OnUnmount(context.Background(), request.MountID)
+			}
+			if err := ctx.Err(); err != nil {
+				return errorFrame(err)
 			}
 			return errorFrame(io.ErrClosedPipe)
 		}

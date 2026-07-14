@@ -292,7 +292,7 @@ func (s *Server) handleFSConn(ctx context.Context, conn net.Conn) {
 		return nil
 	}, remotefs.PeerOptions{
 		OnMount: func(mountCtx context.Context, peer *remotefs.Peer, mountID, mountPath string, options remotefs.MountOptions) (string, error) {
-			return s.mountRemoteFS(mountCtx, sessionID, peer, mountID, mountPath, options)
+			return s.mountRemoteFS(mountCtx, ctx, sessionID, peer, mountID, mountPath, options)
 		},
 		OnUnmount: func(unmountCtx context.Context, mountID string) error {
 			return s.unmountRemoteFS(unmountCtx, sessionID, mountID)
@@ -340,7 +340,7 @@ func fsMountKey(sessionID, mountID string) string {
 	return sessionID + "\x00" + mountID
 }
 
-func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remotefs.Peer, mountID, mountHierarchy string, options remotefs.MountOptions) (string, error) {
+func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionID string, peer *remotefs.Peer, mountID, mountHierarchy string, options remotefs.MountOptions) (string, error) {
 	if mountID == "" {
 		return "", errors.New("remote fs mountId is required")
 	}
@@ -379,8 +379,15 @@ func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remo
 		s.mu.Unlock()
 		return "", err
 	}
-	mount, err := s.MountDriver.Mount(ctx, path, peer.RemoteBackend(mountID), options)
+	// The request context only owns mount setup. A successful mount must outlive
+	// the mount.create handler and is released explicitly when the peer asks for
+	// it, disconnects, or the server shuts down.
+	mountCtx, mountCancel := context.WithCancel(lifetimeCtx)
+	stopRequestCancel := context.AfterFunc(requestCtx, mountCancel)
+	mount, err := s.MountDriver.Mount(mountCtx, path, peer.RemoteBackend(mountID), options)
+	stopRequestCancel()
 	if err != nil {
+		mountCancel()
 		_ = os.RemoveAll(sessionPath)
 		s.mu.Lock()
 		delete(s.fsMounting, sessionID)
@@ -395,18 +402,34 @@ func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remo
 		peerClosed = true
 	default:
 	}
-	if s.draining || peerClosed || ctx.Err() != nil {
+	if s.draining || peerClosed || requestCtx.Err() != nil {
 		s.mu.Unlock()
 		_ = mount.Unmount(context.Background())
-		if err := ctx.Err(); err != nil {
+		mountCancel()
+		if err := requestCtx.Err(); err != nil {
 			return "", err
 		}
 		return "", errors.New("remote fs session closed while mounting")
 	}
-	s.fsMounts[key] = mount
+	s.fsMounts[key] = &lifetimeMount{Mount: mount, cancel: mountCancel}
 	s.lastActive = time.Now()
 	s.mu.Unlock()
 	return path, nil
+}
+
+// lifetimeMount releases the context retained by drivers that monitor mount
+// lifetime after an explicit unmount succeeds.
+type lifetimeMount struct {
+	remotefs.Mount
+	cancel context.CancelFunc
+}
+
+func (m *lifetimeMount) Unmount(ctx context.Context) error {
+	err := m.Mount.Unmount(ctx)
+	if err == nil {
+		m.cancel()
+	}
+	return err
 }
 
 func (s *Server) unmountRemoteFS(ctx context.Context, sessionID, mountID string) error {
