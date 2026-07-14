@@ -33,6 +33,10 @@ type retryMountDriver struct {
 	mount *retryMount
 }
 
+type lifetimeMountDriver struct {
+	mounted chan *testMount
+}
+
 type retryMount struct {
 	path    string
 	done    chan error
@@ -66,6 +70,19 @@ func (d *captureMountDriver) Mount(_ context.Context, path string, backend remot
 func (d *retryMountDriver) Mount(_ context.Context, path string, _ remotefs.Backend, _ remotefs.MountOptions) (remotefs.Mount, error) {
 	d.mount.path = path
 	return d.mount, nil
+}
+
+func (d *lifetimeMountDriver) Mount(ctx context.Context, path string, _ remotefs.Backend, _ remotefs.MountOptions) (remotefs.Mount, error) {
+	mount := &testMount{path: path, done: make(chan error)}
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = mount.Unmount(context.Background())
+		case <-mount.Done():
+		}
+	}()
+	d.mounted <- mount
+	return mount, nil
 }
 
 type testMount struct {
@@ -206,6 +223,29 @@ func TestRemoteFSSessionMountsClientExportOnServer(t *testing.T) {
 	}
 	if err := clientPeer.ReleaseMount(ctx, "workspace"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRemoteFSSuccessfulMountOutlivesCreateRequest(t *testing.T) {
+	driver := &lifetimeMountDriver{mounted: make(chan *testMount, 1)}
+	ctx, _, socket, _ := startRemoteFSServer(t, driver)
+	clientPeer, _ := connectRemoteFSPair(t, ctx, socket, nil)
+	if _, err := clientPeer.CreateMount(ctx, "workspace"); err != nil {
+		t.Fatal(err)
+	}
+	mount := <-driver.mounted
+	select {
+	case <-mount.Done():
+		t.Fatal("mount ended when mount.create request completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := clientPeer.ReleaseMount(ctx, "workspace"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-mount.Done():
+	case <-time.After(time.Second):
+		t.Fatal("mount remained active after release")
 	}
 }
 
