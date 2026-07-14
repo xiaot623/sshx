@@ -13,6 +13,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/bridge"
 	"github.com/xiaot623/sshx/internal/locald"
+	"github.com/xiaot623/sshx/internal/remotefs"
 	"github.com/xiaot623/sshx/internal/sshconfig"
 )
 
@@ -224,7 +225,26 @@ func (r *Runner) runLocalBridge(ctx context.Context, argv []string, timeout time
 			token = info.Token
 		}
 	}
-	result, err := bridge.RequestCommandWithTimeout(ctx, socketPath, argv, stdin, nil, "", timeout, token)
+	sessionID := os.Getenv("SSHX_SESSION_ID")
+	remoteFS := os.Getenv("SSHX_REMOTE_FS") == "1"
+	readOnly := os.Getenv("FS_READ_ONLY") == "1"
+	cwd := ""
+	if remoteFS {
+		cwd, err = os.Getwd()
+		if err != nil {
+			fmt.Fprintf(r.Stderr, "sshx local: current directory: %v\n", err)
+			return 1
+		}
+		mountRoot := filepath.Join(filepath.Dir(socketPath), "mounts")
+		if within, withinErr := remotefs.PathWithin(mountRoot, cwd); withinErr != nil {
+			fmt.Fprintf(r.Stderr, "sshx local: %v\n", withinErr)
+			return 1
+		} else if within {
+			fmt.Fprintf(r.Stderr, "sshx local: %v\n", bridge.ErrMountedCwd)
+			return 1
+		}
+	}
+	result, err := bridge.RequestCommandForSessionWithMountOptions(ctx, socketPath, argv, stdin, nil, cwd, sessionID, remoteFS, readOnly, timeout, token)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx local: %v\n", err)
 		return result.ExitCode

@@ -5,6 +5,7 @@
 **sshx** 是 OpenSSH 的即插即用封装器。设置 `alias ssh=sshx` 后，你现有的 SSH 工作流完全不受影响——所有参数、配置和连接都原样透传。但当连接到启用了 sshx 特性的主机（或 Docker 容器）时，你会获得一个持久化的共享远程服务器，提供以下能力：
 
 - 🔄 **反向命令桥** — 在*远程*执行 `sshx local <cmd>`，命令实际在你的本地机器上运行，stdout、stderr、退出码和 stdin 全部正确传递。
+- 📁 **双向 HOME 挂载** — 按需开启后挂载命令发起侧的 HOME，同时保留来源路径层级与当前工作目录位置。
 - 🔌 **自动端口转发** — 远程本地监听端口（回环 `127.0.0.1` 与通配 `0.0.0.0`；如在 `0.0.0.0:8080` 或 `localhost:8080` 上的开发服务器）被自动检测并转发到本地。
 - 🌐 **本地域名绑定** — 在本地浏览器中通过 `<主机>.<用户名>.sshx:<端口>` 访问转发端口，无需手动设置 `-L` 参数。
 - 🐳 **Docker 容器支持** — 通过名称或 ID 直接连接运行中的容器：`sshx my-container`。命令桥可通过 `docker exec` 在容器内工作。
@@ -58,6 +59,80 @@ sshx local --timeout=30 npm test
 - stdin 以批量模式发送——管道输入数据会到达本地命令。
 - 命令默认没有隐式截止时间。如需限制，请紧跟 target 指定 `--timeout=<时长>`；裸数字按秒解释，也支持 `500ms`、`30s`、`2m`。超时退出码为 124。
 - 策略：通过可配置的拒绝列表控制哪些命令被阻止。
+
+### 📁 双向工作区挂载（按需开启，Beta）
+
+设置 `features.remoteFs: true` 后，命令发起侧的 HOME 目录会通过可读写 FUSE 挂载暴露给另一侧。来源绝对路径的层级会保留在受管理的 session 目录下，例如 `/Users/xiaot` 会映射成 `<session>/Users/xiaot`：
+
+- `sshx remote <cmd>` 在本地 HOME 挂载视图中与来源当前目录对应的位置启动远程命令。
+- 交互式 `sshx remote` 仍从远程 HOME 启动；`SSHX_MOUNT_ROOT` 指向来源根目录的挂载点，`SSHX_WORKSPACE` 指向映射后的来源工作目录。
+- 在该会话内执行 `sshx local <cmd>` 时，远程 HOME 会挂载到本地，本地命令从对应的映射位置启动。
+- 如果来源工作目录位于 HOME 之外，sshx 会安全地退回为导出该目录，同时仍在 session 目录下保留其绝对路径层级。
+- 写入和 `fsync` 会立即回源；元数据与目录项采用短 TTL，重新打开文件时会重新校验。
+
+挂载后的 HOME 允许读取、写入和新建，但双向均禁止删除文件/目录及重命名。它仍可能包含 shell 配置、SSH 凭据等敏感文件，请只对可信 target 开启 `remoteFs`。反向导出时，sshx 会排除自身管理的挂载树，避免形成递归挂载。
+
+在 client 启动 sshx 时设置 `FS_READ_ONLY=1`，即可让该会话的挂载只读：
+
+```sh
+FS_READ_ONLY=1 sshx debian@orb pwd
+```
+
+client 的值会被导出到远端会话；之后执行 `sshx local <cmd>` 会继承该值，因此反向挂载同样保持只读。
+
+开启后 FUSE 是硬依赖：即使 `strict` 为 false，挂载失败也会直接终止命令，不会静默回退。Linux 需要 `/dev/fuse` 与 `fusermount`/`fusermount3`；macOS 需要当前版本的 macFUSE，现阶段标记为 Beta。远程 target 必须是可使用 FUSE 的 Linux。
+
+#### FUSE 环境配置
+
+哪台机器接收挂载视图，哪台机器就需要可用的 FUSE 运行环境。因此，执行 `sshx remote` 时 Linux target 始终需要 FUSE；远程 shell 执行 `sshx local`、将远程工作目录反向挂到 Mac 时，macOS client 也需要 macFUSE。
+
+**Linux target/client**
+
+安装 FUSE 3 用户态工具（通常内核已经包含 FUSE 驱动）：
+
+```sh
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y fuse3
+
+# Fedora / RHEL 系
+sudo dnf install -y fuse3
+
+# Arch Linux
+sudo pacman -S fuse3
+```
+
+检查设备和卸载工具：
+
+```sh
+test -r /dev/fuse && test -w /dev/fuse
+command -v fusermount3 || command -v fusermount
+```
+
+普通 Linux 主机缺少 `/dev/fuse` 时，可执行 `sudo modprobe fuse` 加载内核模块。容器和受限虚拟机还必须暴露 `/dev/fuse` 并允许 FUSE 挂载，只安装 `fuse3` 并不够。`remoteFs` 目前尚不支持 Docker target。
+
+**macOS client（sshx 当前使用的后端）**
+
+从 [macfuse.io](https://macfuse.io/) 安装最新版 macFUSE（macFUSE 项目推荐），也可以执行 `brew install --cask macfuse`。sshx 当前使用 macFUSE 的内核/VFS 后端。
+
+Apple Silicon 首次启用内核后端需要：
+
+1. 完全关机，长按电源键/Touch ID 进入 macOS 恢复模式。
+2. 打开“启动安全性实用工具”，选择系统卷并设置为“降低安全性”。
+3. 勾选“允许用户管理来自被认可开发者的内核扩展”，然后重启。
+4. 在“系统设置 → 隐私与安全性”中允许 macFUSE 系统软件，再按提示重启。
+
+Intel Mac 不需要修改“启动安全性实用工具”，但仍可能需要在“隐私与安全性”中允许 macFUSE 并重启。macFUSE 不要求关闭 SIP 或 Gatekeeper。
+
+批准后先触发一次挂载，再检查 macFUSE 是否已加载：
+
+```sh
+ls /Library/Filesystems/macfuse.fs
+ls /dev/macfuse*
+```
+
+**macOS 15.4+ FSKit 说明：**macFUSE 5 提供纯用户态 FSKit 后端，不需要内核扩展、恢复模式安全设置或重启，但它对 sshx 当前的挂载实现并非零改动透明，因此尚未启用。macFUSE 要求显式传入 `-o backend=fskit`；FSKit 只允许挂载到 `/Volumes` 下，并且不支持多项传统 mount option。sshx 当前在运行时临时目录下创建私有挂载点，并传入面向 VFS 的选项。支持 FSKit 需要增加专用的挂载路径和选项适配层，但 RemoteFS 线协议与文件操作后端无需改变。
+
+来源绝对路径会作为层级保留在 sshx 的私有 session 目录下，但命令参数中的绝对路径不会被改写。RemoteFS 不暴露特殊文件、xattr/ACL，也不支持 Docker target、FUSE-T 或 FSKit。目标负载是源码树与小文件，不追求大文件吞吐。
 
 ### 🔌 自动端口检测与转发
 
@@ -217,6 +292,10 @@ features:
   # <host>.<user>.sshx:<远程端口> 暴露。
   autoForward: true
 
+  # 双向读写工作区挂载。默认：false。
+  # 本地机器和远程 target 都必须具备 FUSE。
+  remoteFs: false
+
 commands:
   # 阻止通过命令桥执行的命令列表。
   deny: []
@@ -241,7 +320,7 @@ commands:
 ```
 
 1. **连接**：`sshx remote` 打开一个正常的 SSH 会话，并在远程 `~/.sshx_server/<uuid>` 下启动（或连接到）该 client-target 对应的 `sshx 服务器`。
-2. **桥接通道**：一条隐藏的 `socket-proxy` SSH 通道将本地守护进程连接到远程服务器。
+2. **桥接通道**：隐藏的 control `socket-proxy` 通道连接客户端与远程服务器；`remoteFs` 另建一条按 session ID 精确配对、有界 framing 的数据通道。
 3. **端口嗅探**：服务器读取 `/proc/net/tcp*`（Linux）来检测回环（`127.0.0.1` / `::1`）和通配（`0.0.0.0` / `::`）监听端口。
 4. **转发**：检测到的端口通过单个共享本地守护进程使用 `ssh -W` 转发。
 5. **域名**：本地 DNS 应答器将 `<target>.<suffix>` 映射到 localhost。浏览器 URL 中的端口选择对应的本地转发端口。
@@ -255,6 +334,8 @@ commands:
 - `sshx --no-wrap ...` — 跳过所有 sshx 行为，直接调用原始 `ssh`。
 - `SSHX_DISABLE=1 sshx ...` — 与 `--no-wrap` 相同，适用于脚本场景。
 - 在**客户端**上执行 `sshx local ...`（非远程会话中）— 立即报错并给出清晰提示。`local` 是全局保留名称。
+- `remoteFs` 不会静默回退到未挂载的命令；FUSE 挂载失败即失败。
+- 工作区导出使用 Go `os.Root` 锚定，拒绝路径穿越和符号链接逃逸。
 - Docker 容器未运行或不可达时纯透传——sshx 回退到原始 `ssh`，无副作用。
 - 不匹配的主机纯透传——不创建文件，不启动进程。
 
@@ -271,6 +352,7 @@ commands:
 - **客户端**：macOS 和 Linux 完全支持。
 - **服务器**：远程 sshx 服务器需要 Linux（使用 `/proc/net/tcp*` 进行端口检测）。
 - **Docker 客户端**：macOS 和 Linux——通过 `docker exec` 连接任意运行中的 Docker 容器。
+- **remoteFs**：Linux 已支持；macOS 客户端依赖 macFUSE，当前为 Beta；不支持 Docker target。
 
 ---
 
@@ -285,6 +367,7 @@ sshx/
 │   ├── config/        # YAML 配置
 │   ├── protocol/      # 客户端-服务器通信协议
 │   ├── bridge/        # 命令桥（远程 → 本地执行）
+│   ├── remotefs/      # FS 协议、安全后端与 FUSE adapter
 │   ├── ports/         # 端口嗅探（/proc/net/tcp*）
 │   ├── forward/       # TCP 转发
 │   ├── domain/        # DNS 解析器
@@ -300,7 +383,8 @@ sshx/
 ## 路线图
 
 - [x] **v1** — 命令桥（非交互式）、自动端口转发、域名绑定、共享服务器
-- [ ] **v2** — 命令桥流式 stdin、远程 FUSE 挂载、GitHub 二进制发布、Windows 客户端支持
+- [ ] **v2** — 命令桥流式 stdin、GitHub 二进制发布、Windows 客户端支持
+- [x] **remoteFs Beta** — Linux/macOS 客户端与 Linux target 的双向读写工作区挂载
 
 ---
 

@@ -12,8 +12,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaot623/sshx/internal/processlock"
 	"github.com/xiaot623/sshx/internal/protocol"
 )
+
+func TestServerDoesNotCleanMountsBeforeAcquiringSocketLock(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "bridge.sock")
+	mountRoot := filepath.Join(root, "mounts")
+	sentinel := filepath.Join(mountRoot, "session-1", "workspace", "sentinel")
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sentinel, []byte("active"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	lock, err := processlock.Acquire(socket + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+
+	err = (&Server{SocketPath: socket, MountRoot: mountRoot}).Serve(context.Background())
+	if err == nil {
+		t.Fatal("duplicate server unexpectedly acquired the socket lock")
+	}
+	if _, statErr := os.Stat(sentinel); statErr != nil {
+		t.Fatalf("duplicate server changed an existing mount session: %v", statErr)
+	}
+}
 
 func TestExecuteLocalPropagatesBatchStdinOutputStderrAndExitCode(t *testing.T) {
 	frame := protocol.Frame{
@@ -304,7 +332,7 @@ func TestServerExpiresClientWithoutHeartbeat(t *testing.T) {
 	defer conn.Close()
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "test-version"}); err != nil {
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "test-version", SessionID: "lease-test"}); err != nil {
 		t.Fatal(err)
 	}
 	if frame, err := dec.Decode(); err != nil || frame.Type != protocol.TypeCapabilities {
@@ -330,7 +358,7 @@ func TestServerExitsOnVersionChange(t *testing.T) {
 	conn := mustDialUnix(t, socket)
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "2.0.0"}); err != nil {
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "2.0.0", SessionID: "version-test"}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := dec.Decode()

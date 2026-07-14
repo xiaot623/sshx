@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,9 +19,59 @@ import (
 	"github.com/xiaot623/sshx/internal/bridge"
 	"github.com/xiaot623/sshx/internal/locald"
 	"github.com/xiaot623/sshx/internal/protocol"
+	"github.com/xiaot623/sshx/internal/remotefs"
 )
 
-func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs []string, remoteHome string) (func(), error) {
+type sshProxy struct {
+	conn   io.ReadWriteCloser
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	waitCh chan error
+}
+
+func (r *Runner) startSSHProxy(ctx context.Context, sshArgs []string, remoteCommand string) (*sshProxy, error) {
+	cmd := exec.CommandContext(ctx, r.SSHPath, sshCommandArgs(sshArgs, remoteCommand)...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, err
+	}
+	cmd.Stderr = r.Stderr
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		return nil, err
+	}
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+	conn := bridge.NewReadWriteCloser(stdout, stdin, stdin.Close)
+	return &sshProxy{conn: conn, cmd: cmd, stdin: stdin, waitCh: waitCh}, nil
+}
+
+func (p *sshProxy) stop() {
+	if p == nil {
+		return
+	}
+	_ = p.conn.Close()
+	select {
+	case <-p.waitCh:
+	case <-time.After(time.Second):
+		if p.cmd.Process != nil {
+			_ = p.cmd.Process.Kill()
+		}
+		select {
+		case <-p.waitCh:
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs []string, remoteHome string) (*BridgeSession, error) {
 	token, err := r.fetchRemoteToken(ctx, sshArgs, remoteHome)
 	if err != nil {
 		return nil, err
@@ -65,41 +117,21 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			}
 		}()
 	}
-	cmd := exec.CommandContext(
+	controlProxy, err := r.startSSHProxy(
 		bridgeCtx,
-		r.SSHPath,
-		sshCommandArgs(sshArgs, remoteShell(remoteServerEnvScript(remoteHome)+"; exec \"$SSHX_SERVER_HOME/sshx\" socket-proxy --socket \"$SSHX_SERVER_HOME/sock\""))...,
+		sshArgs,
+		remoteShell(remoteServerEnvScript(remoteHome)+"; exec \"$SSHX_SERVER_HOME/sshx\" socket-proxy --socket \"$SSHX_SERVER_HOME/sock\""),
 	)
-	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
 		closeLifecycle()
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		closeLifecycle()
-		return nil, err
-	}
-	cmd.Stderr = r.Stderr
-	if err := cmd.Start(); err != nil {
-		cancel()
-		closeLifecycle()
-		return nil, err
-	}
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-	conn := bridge.NewReadWriteCloser(stdout, stdin, func() error {
-		_ = stdin.Close()
-		cancel()
-		return nil
-	})
 	readyCh := make(chan error, 1)
 	errCh := make(chan error, 1)
 	var autoForwardStopped atomic.Bool
+	var fsMu sync.RWMutex
+	var fsPeer *remotefs.Peer
 	go func() {
 		opts := bridge.ClientOptions{
 			Ready:      readyCh,
@@ -107,6 +139,18 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			SessionID:  sessionID,
 			Allow: func(argv []string) bool {
 				return r.commandBridge && r.commandPolicy.Allows(argv)
+			},
+			Execute: func(commandCtx context.Context, frame protocol.Frame) protocol.Frame {
+				if !frame.RemoteFS {
+					return bridge.ExecuteLocal(commandCtx, frame)
+				}
+				fsMu.RLock()
+				peer := fsPeer
+				fsMu.RUnlock()
+				if peer == nil {
+					return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "remote fs data session is unavailable"}
+				}
+				return r.executeLocalWithRemoteFS(commandCtx, frame, peer)
 			},
 		}
 		if r.autoForward {
@@ -145,7 +189,8 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 				}
 			}
 		}
-		errCh <- bridge.RunClientConnWithOptions(bridgeCtx, conn, opts, token)
+		errCh <- bridge.RunClientConnWithOptions(bridgeCtx, controlProxy.conn, opts, token)
+		cancel()
 		closeLifecycle()
 	}()
 	select {
@@ -153,36 +198,194 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		if err != nil {
 			cancel()
 			closeLifecycle()
+			controlProxy.stop()
 			return nil, err
 		}
 	case err := <-errCh:
 		cancel()
 		closeLifecycle()
+		controlProxy.stop()
 		return nil, err
 	case <-time.After(2 * time.Second):
 		cancel()
 		closeLifecycle()
+		controlProxy.stop()
 		return nil, errors.New("timed out waiting for command bridge handshake")
 	}
+
+	var dataProxy *sshProxy
+	var workspaceBackend *remotefs.RootBackend
+	workspaceMountID := "workspace"
+	mountRoot := ""
+	workspace := ""
+	readOnly := os.Getenv("FS_READ_ONLY") == "1"
+	if r.remoteFS {
+		dataProxy, err = r.startSSHProxy(
+			bridgeCtx,
+			sshArgs,
+			remoteShell(remoteServerEnvScript(remoteHome)+"; exec \"$SSHX_SERVER_HOME/sshx\" socket-proxy --socket \"$SSHX_SERVER_HOME/sock.fs\""),
+		)
+		if err == nil {
+			var peer *remotefs.Peer
+			peer, err = remotefs.Connect(bridgeCtx, dataProxy.conn, sessionID, token, remotefs.PeerOptions{})
+			if err == nil {
+				fsMu.Lock()
+				fsPeer = peer
+				fsMu.Unlock()
+				go func() {
+					<-peer.Done()
+					cancel()
+				}()
+			}
+		}
+		if err == nil {
+			var cwd string
+			cwd, err = os.Getwd()
+			if err == nil {
+				if within, withinErr := remotefs.PathWithin(localReverseMountsRoot(), cwd); withinErr != nil {
+					err = withinErr
+				} else if within {
+					err = bridge.ErrMountedCwd
+				}
+			}
+			if err == nil {
+				var layout remotefs.ExportLayout
+				layout, err = remotefs.CurrentExportLayout(cwd)
+				if err == nil {
+					workspaceBackend, err = remotefs.OpenRootBackendWithOptions(layout.RootPath, remotefs.RootBackendOptions{DisableDelete: true})
+				}
+				if err == nil {
+					err = fsPeer.RegisterBackend(workspaceMountID, workspaceBackend)
+				}
+				if err == nil {
+					mountCtx, mountCancel := context.WithTimeout(bridgeCtx, 10*time.Second)
+					mountRoot, err = fsPeer.CreateMountAtWithOptions(mountCtx, workspaceMountID, layout.MountPath, remotefs.MountOptions{ReadOnly: readOnly})
+					mountCancel()
+				}
+				if err == nil {
+					workspace, err = remotefs.WorkspacePathBelow(mountRoot, filepath.ToSlash(layout.RelativeCwd))
+				}
+			}
+		}
+		if err != nil {
+			if workspaceBackend != nil {
+				_ = workspaceBackend.CloseBackend()
+			}
+			if fsPeer != nil {
+				_ = fsPeer.Close()
+			}
+			cancel()
+			closeLifecycle()
+			if dataProxy != nil {
+				dataProxy.stop()
+			}
+			controlProxy.stop()
+			return nil, fmt.Errorf("remote fs: %w", err)
+		}
+	}
+
 	var stopOnce sync.Once
 	stop := func() {
 		stopOnce.Do(func() {
 			autoForwardStopped.Store(true)
+			fsMu.RLock()
+			peer := fsPeer
+			fsMu.RUnlock()
+			if peer != nil {
+				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if workspace != "" {
+					_ = peer.ReleaseMount(releaseCtx, workspaceMountID)
+				}
+				releaseCancel()
+				_ = peer.UnregisterBackend(workspaceMountID)
+				_ = peer.Close()
+			}
 			cancel()
 			closeLifecycle()
-			_ = stdin.Close()
+			if dataProxy != nil {
+				dataProxy.stop()
+			}
+			controlProxy.stop()
 			select {
 			case <-errCh:
-			case <-time.After(time.Second):
-				_ = cmd.Process.Kill()
-			}
-			select {
-			case <-waitCh:
-			case <-time.After(time.Second):
+			default:
 			}
 		})
 	}
-	return stop, nil
+	return &BridgeSession{SessionID: sessionID, MountRoot: mountRoot, Workspace: workspace, ReadOnly: readOnly, Done: bridgeCtx.Done(), stop: stop}, nil
+}
+
+func (r *Runner) executeLocalWithRemoteFS(ctx context.Context, frame protocol.Frame, peer *remotefs.Peer) protocol.Frame {
+	if !safeMountComponent(frame.MountID) || !safeMountComponent(frame.SessionID) || !safeMountComponent(frame.ID) {
+		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "remote fs command is missing mount/session identity"}
+	}
+	requestMountRoot := filepath.Join(localReverseMountsRoot(), frame.SessionID, frame.ID)
+	mountPath, err := remotefs.MountPathBelow(requestMountRoot, frame.MountPath)
+	if err != nil {
+		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
+	}
+	driver := remotefs.GoFuseDriver{}
+	mount, err := driver.Mount(ctx, mountPath, peer.RemoteBackend(frame.MountID), remotefs.MountOptions{ReadOnly: frame.MountReadOnly})
+	if err != nil {
+		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: fmt.Sprintf("mount remote workspace: %v", err)}
+	}
+	workspace, err := remotefs.WorkspacePathBelow(mount.Path(), frame.Cwd)
+	if err != nil {
+		unmountCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = mount.Unmount(unmountCtx)
+		cancel()
+		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
+	}
+	frame.Cwd = workspace
+	if frame.Env == nil {
+		frame.Env = map[string]string{}
+	}
+	frame.Env["SSHX_MOUNT_ROOT"] = mount.Path()
+	frame.Env["SSHX_WORKSPACE"] = workspace
+	if frame.MountReadOnly {
+		frame.Env["FS_READ_ONLY"] = "1"
+	} else {
+		frame.Env["FS_READ_ONLY"] = "0"
+	}
+	response := bridge.ExecuteLocal(ctx, frame)
+	unmountCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	unmountErr := mount.Unmount(unmountCtx)
+	cancel()
+	if unmountErr == nil {
+		_ = os.RemoveAll(requestMountRoot)
+	}
+	if unmountErr != nil && response.Type == protocol.TypeCommandResult && response.ExitCode == 0 {
+		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: fmt.Sprintf("unmount remote workspace: %v", unmountErr)}
+	}
+	if unmountErr != nil {
+		warning := fmt.Sprintf("sshx: unmount remote workspace: %v", unmountErr)
+		fmt.Fprintln(r.Stderr, warning)
+		if response.Type == protocol.TypeCommandResult {
+			stderr, _ := base64.StdEncoding.DecodeString(response.Stderr)
+			if len(stderr) > 0 && stderr[len(stderr)-1] != '\n' {
+				stderr = append(stderr, '\n')
+			}
+			stderr = append(stderr, warning...)
+			stderr = append(stderr, '\n')
+			response.Stderr = base64.StdEncoding.EncodeToString(stderr)
+		} else if response.Error != "" {
+			response.Error += "; " + warning
+		}
+	}
+	return response
+}
+
+func localReverseMountsRoot() string {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, fmt.Sprintf("sshx-%d", os.Getuid()), "mounts")
+}
+
+func safeMountComponent(value string) bool {
+	return value != "" && value != "." && value != ".." &&
+		filepath.Base(value) == value && !strings.ContainsAny(value, `/\`)
 }
 
 func (r *Runner) fetchRemoteToken(ctx context.Context, sshArgs []string, remoteHome string) (string, error) {

@@ -3,6 +3,7 @@ strict: false
 features:
   commandBridge: true
   autoForward: true
+  remoteFs: false
 
 commands:
   deny: []
