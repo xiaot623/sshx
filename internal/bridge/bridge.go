@@ -144,7 +144,6 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.MountDriver == nil {
 		s.MountDriver = remotefs.GoFuseDriver{}
 	}
-	s.cleanupStaleMounts()
 	serveCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	defer cancel()
@@ -156,6 +155,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		return err
 	}
 	defer lock.Release()
+	s.cleanupStaleMounts()
 	_ = os.Remove(s.SocketPath)
 	ln, err := net.Listen("unix", s.SocketPath)
 	if err != nil {
