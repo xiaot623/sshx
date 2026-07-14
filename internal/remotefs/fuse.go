@@ -17,13 +17,13 @@ import (
 type GoFuseDriver struct{}
 
 type goFuseMount struct {
-	path        string
-	server      *fuse.Server
-	done        chan error
-	waitDone    chan struct{}
-	unmountOnce sync.Once
-	finishOnce  sync.Once
-	result      error
+	path       string
+	unmount    func() error
+	done       chan error
+	waitDone   chan struct{}
+	unmountMu  sync.Mutex
+	finishOnce sync.Once
+	result     error
 }
 
 type fuseState struct {
@@ -92,7 +92,7 @@ func (GoFuseDriver) Mount(ctx context.Context, path string, backend Backend, opt
 	}
 	mount := &goFuseMount{
 		path:     path,
-		server:   server,
+		unmount:  server.Unmount,
 		done:     make(chan error, 1),
 		waitDone: make(chan struct{}),
 	}
@@ -114,22 +114,25 @@ func (m *goFuseMount) Path() string       { return m.path }
 func (m *goFuseMount) Done() <-chan error { return m.done }
 
 func (m *goFuseMount) Unmount(ctx context.Context) error {
-	var unmountErr error
-	m.unmountOnce.Do(func() {
-		unmountErr = m.server.Unmount()
-		if unmountErr != nil {
-			m.finish(unmountErr)
-		}
-	})
-	if unmountErr != nil {
-		return unmountErr
+	select {
+	case <-m.waitDone:
+		return m.result
+	default:
 	}
+	m.unmountMu.Lock()
+	defer m.unmountMu.Unlock()
 	select {
 	case <-m.waitDone:
 		return m.result
 	case <-ctx.Done():
 		return ctx.Err()
+	default:
 	}
+	if err := m.unmount(); err != nil {
+		return err
+	}
+	m.finish(nil)
+	return m.result
 }
 
 func (m *goFuseMount) finish(err error) {

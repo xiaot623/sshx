@@ -74,6 +74,7 @@ type Server struct {
 	fsConnecting  map[string]bool
 	fsMounts      map[string]remotefs.Mount
 	fsMounting    map[string]bool
+	fsUnmounting  map[string]chan struct{}
 	observedPorts map[int]bool
 	portMisses    map[int]int
 	lastActive    time.Time
@@ -133,6 +134,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	if s.fsMounting == nil {
 		s.fsMounting = map[string]bool{}
+	}
+	if s.fsUnmounting == nil {
+		s.fsUnmounting = map[string]chan struct{}{}
 	}
 	if s.FSSocketPath == "" {
 		s.FSSocketPath = s.SocketPath + ".fs"
@@ -403,23 +407,44 @@ func (s *Server) mountRemoteFS(ctx context.Context, sessionID string, peer *remo
 
 func (s *Server) unmountRemoteFS(ctx context.Context, sessionID, mountID string) error {
 	key := fsMountKey(sessionID, mountID)
-	s.mu.Lock()
-	if s.fsMounting[sessionID] {
+	for {
+		s.mu.Lock()
+		if s.fsMounting[sessionID] {
+			s.mu.Unlock()
+			return syscall.EBUSY
+		}
+		if done := s.fsUnmounting[key]; done != nil {
+			s.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		mount := s.fsMounts[key]
+		if mount == nil {
+			s.mu.Unlock()
+			return nil
+		}
+		done := make(chan struct{})
+		s.fsUnmounting[key] = done
 		s.mu.Unlock()
-		return syscall.EBUSY
+
+		err := mount.Unmount(ctx)
+		s.mu.Lock()
+		if err == nil {
+			delete(s.fsMounts, key)
+		}
+		delete(s.fsUnmounting, key)
+		s.lastActive = time.Now()
+		close(done)
+		s.mu.Unlock()
+		if err == nil {
+			_ = os.RemoveAll(filepath.Join(s.MountRoot, sessionID))
+		}
+		return err
 	}
-	mount := s.fsMounts[key]
-	delete(s.fsMounts, key)
-	s.lastActive = time.Now()
-	s.mu.Unlock()
-	if mount == nil {
-		return nil
-	}
-	err := mount.Unmount(ctx)
-	if err == nil {
-		_ = os.RemoveAll(filepath.Join(s.MountRoot, sessionID))
-	}
-	return err
 }
 
 func (s *Server) hasFSMountForSessionLocked(sessionID string) bool {
