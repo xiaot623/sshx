@@ -1,0 +1,224 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760" role="img" aria-labelledby="title desc">
+  <title id="title">sshx system architecture</title>
+  <desc id="desc">Architecture of the sshx client, local daemon, SSH or Docker transport, shared remote server, automatic forwarding, command bridge, and optional RemoteFS channel.</desc>
+  <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+    .title { fill: #111827; font-size: 24px; font-weight: 700; }
+    .subtitle { fill: #6b7280; font-size: 13px; }
+    .zone-label { fill: #374151; font-size: 12px; font-weight: 700; letter-spacing: 0.08em; }
+    .node-title { fill: #111827; font-size: 15px; font-weight: 700; }
+    .node-subtitle { fill: #6b7280; font-size: 12px; }
+    .mini-title { fill: #1f2937; font-size: 12px; font-weight: 600; }
+    .mini-subtitle { fill: #6b7280; font-size: 10px; }
+    .flow-label { fill: #4b5563; font-size: 11px; font-weight: 600; }
+    .legend { fill: #4b5563; font-size: 11px; }
+  </style>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ea580c"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#9333ea"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#059669"/>
+    </marker>
+    <marker id="arrow-green-start" markerWidth="10" markerHeight="7" refX="1" refY="3.5" orient="auto">
+      <polygon points="10 0, 0 3.5, 10 7" fill="#059669"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#111827" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="760" fill="#ffffff"/>
+  <text x="600" y="36" text-anchor="middle" class="title">sshx System Architecture</text>
+  <text x="600" y="58" text-anchor="middle" class="subtitle">Transparent SSH sessions with shared command, forwarding, and filesystem services</text>
+
+  <rect x="40" y="90" width="520" height="580" rx="12" fill="#eff6ff" fill-opacity="0.55" stroke="#93c5fd" stroke-width="1.5" stroke-dasharray="7,5"/>
+  <text x="60" y="116" class="zone-label">CLIENT MACHINE</text>
+  <rect x="640" y="90" width="520" height="580" rx="12" fill="#fff7ed" fill-opacity="0.55" stroke="#fdba74" stroke-width="1.5" stroke-dasharray="7,5"/>
+  <text x="660" y="116" class="zone-label">REMOTE TARGET · SSH HOST OR DOCKER CONTAINER</text>
+
+  <!-- Primary session and forwarded traffic -->
+  <path d="M 170 240 L 170 300" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="177" y="262" width="42" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="198" y="275" text-anchor="middle" class="flow-label">invoke</text>
+
+  <path d="M 430 240 L 430 300" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="437" y="257" width="72" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="473" y="270" text-anchor="middle" class="flow-label">DNS + TCP</text>
+
+  <path d="M 130 410 L 130 500" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="137" y="446" width="72" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="173" y="459" text-anchor="middle" class="flow-label">user session</text>
+
+  <path d="M 260 545 L 300 545 L 300 610 L 422 610 C 427 610 427 600 432 600 C 437 600 437 610 442 610 L 900 610 L 900 545 L 860 545" fill="none" stroke="#ffffff" stroke-width="5"/>
+  <path d="M 260 545 L 300 545 L 300 610 L 422 610 C 427 610 427 600 432 600 C 437 600 437 610 442 610 L 900 610 L 900 545 L 860 545" fill="none" stroke="#2563eb" stroke-width="2.2" marker-end="url(#arrow-blue)"/>
+  <rect x="578" y="596" width="88" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="622" y="609" text-anchor="middle" class="flow-label">SSH / exec I/O</text>
+
+  <path d="M 710 500 L 710 485 L 610 485 L 610 202 L 680 202" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="616" y="444" width="52" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="642" y="457" text-anchor="middle" class="flow-label">session</text>
+
+  <path d="M 520 340 L 590 340 L 590 145 L 1135 145 L 1135 202 L 1120 202" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <rect x="788" y="132" width="126" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="851" y="145" text-anchor="middle" class="flow-label">forwarded TCP (ssh -W)</text>
+
+  <!-- Remote-to-local command bridge -->
+  <path d="M 770 240 L 770 300" fill="none" stroke="#ea580c" stroke-width="2" marker-end="url(#arrow-orange)"/>
+  <rect x="777" y="260" width="68" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="811" y="273" text-anchor="middle" class="flow-label">sshx local</text>
+
+  <path d="M 680 430 L 630 430 L 630 475 L 220 475 L 220 410" fill="none" stroke="#ea580c" stroke-width="2" marker-end="url(#arrow-orange)"/>
+  <rect x="389" y="462" width="116" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="447" y="475" text-anchor="middle" class="flow-label">commands + results</text>
+
+  <!-- Port discovery events -->
+  <path d="M 1030 240 L 1030 300" fill="none" stroke="#9333ea" stroke-width="1.8" stroke-dasharray="5,3" marker-end="url(#arrow-purple)"/>
+  <rect x="1037" y="260" width="34" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="1054" y="273" text-anchor="middle" class="flow-label">scan</text>
+
+  <path d="M 680 390 L 618 390 C 613 390 613 380 608 380 C 603 380 603 390 598 390 L 520 390" fill="none" stroke="#ffffff" stroke-width="5"/>
+  <path d="M 680 390 L 618 390 C 613 390 613 380 608 380 C 603 380 603 390 598 390 L 520 390" fill="none" stroke="#9333ea" stroke-width="1.8" stroke-dasharray="5,3" marker-end="url(#arrow-purple)"/>
+  <rect x="548" y="376" width="72" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="584" y="389" text-anchor="middle" class="flow-label">port events</text>
+
+  <!-- Optional RemoteFS data plane -->
+  <path d="M 430 590 L 430 652 L 1030 652 L 1030 590" fill="none" stroke="#059669" stroke-width="1.8" stroke-dasharray="7,4" marker-start="url(#arrow-green-start)" marker-end="url(#arrow-green)"/>
+  <rect x="604" y="639" width="252" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="730" y="652" text-anchor="middle" class="flow-label">full-duplex FS protocol over separate channel</text>
+
+  <!-- Client nodes -->
+  <g filter="url(#shadow)">
+    <rect x="80" y="165" width="180" height="75" rx="8" fill="#ffffff" stroke="#bfdbfe" stroke-width="1.5"/>
+    <rect x="80" y="165" width="180" height="20" rx="8" fill="#dbeafe"/>
+    <rect x="80" y="179" width="180" height="6" fill="#dbeafe"/>
+    <circle cx="94" cy="175" r="3.5" fill="#ef4444" opacity="0.8"/>
+    <circle cx="105" cy="175" r="3.5" fill="#f59e0b" opacity="0.8"/>
+    <circle cx="116" cy="175" r="3.5" fill="#10b981" opacity="0.8"/>
+    <text x="170" y="207" text-anchor="middle" class="node-title">Terminal Sessions</text>
+    <text x="170" y="226" text-anchor="middle" class="node-subtitle">one or many clients</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="340" y="165" width="180" height="75" rx="8" fill="#ffffff" stroke="#bfdbfe" stroke-width="1.5"/>
+    <circle cx="372" cy="202" r="18" fill="#dbeafe"/>
+    <path d="M 361 200 L 369 207 L 383 192" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="456" y="198" text-anchor="middle" class="node-title">Browser &amp; Apps</text>
+    <text x="456" y="218" text-anchor="middle" class="node-subtitle">domains, ports, commands</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="300" width="180" height="110" rx="10" fill="#eff6ff" stroke="#60a5fa" stroke-width="2"/>
+    <rect x="84" y="304" width="172" height="102" rx="8" fill="none" stroke="#bfdbfe" stroke-width="1"/>
+    <circle cx="112" cy="332" r="16" fill="#2563eb"/>
+    <text x="112" y="337" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">CLI</text>
+    <text x="170" y="337" text-anchor="middle" class="node-title">sshx CLI</text>
+    <text x="170" y="365" text-anchor="middle" class="node-subtitle">SSH-compatible wrapper</text>
+    <text x="170" y="384" text-anchor="middle" class="node-subtitle">bridge client · policy · bootstrap</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="340" y="300" width="180" height="110" rx="10" fill="#faf5ff" stroke="#c084fc" stroke-width="1.5"/>
+    <circle cx="372" cy="332" r="16" fill="#9333ea"/>
+    <text x="372" y="337" text-anchor="middle" fill="#ffffff" font-size="14">&#9881;</text>
+    <text x="450" y="337" text-anchor="middle" class="node-title">Local Daemon</text>
+    <text x="430" y="364" text-anchor="middle" class="node-subtitle">DNS responder · loopback IPs</text>
+    <text x="430" y="383" text-anchor="middle" class="node-subtitle">shared TCP proxy · leases</text>
+  </g>
+
+  <g>
+    <rect x="80" y="500" width="180" height="90" rx="8" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5"/>
+    <path d="M 105 535 H 132 M 124 527 L 132 535 L 124 543" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="177" y="532" text-anchor="middle" class="node-title">Transport</text>
+    <text x="170" y="554" text-anchor="middle" class="node-subtitle">OpenSSH</text>
+    <text x="170" y="573" text-anchor="middle" class="node-subtitle">or Docker exec fallback</text>
+  </g>
+
+  <g>
+    <rect x="340" y="500" width="180" height="90" rx="8" fill="#f0fdf4" stroke="#6ee7b7" stroke-width="1.5" stroke-dasharray="6,3"/>
+    <path d="M 365 521 H 395 L 405 531 V 563 H 365 Z M 395 521 V 531 H 405" fill="#dcfce7" stroke="#059669" stroke-width="1.3"/>
+    <text x="456" y="532" text-anchor="middle" class="node-title">Local Files</text>
+    <text x="430" y="554" text-anchor="middle" class="node-subtitle">root backend + FUSE</text>
+    <text x="430" y="573" text-anchor="middle" class="node-subtitle">optional RemoteFS peer</text>
+  </g>
+
+  <!-- Remote nodes -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="165" width="180" height="75" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+    <rect x="696" y="181" width="38" height="38" rx="6" fill="#111827"/>
+    <text x="715" y="205" text-anchor="middle" fill="#a7f3d0" font-size="16" font-weight="700">$_</text>
+    <text x="791" y="198" text-anchor="middle" class="node-title">Remote Shell</text>
+    <text x="791" y="218" text-anchor="middle" class="node-subtitle">interactive or command</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="940" y="165" width="180" height="75" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+    <circle cx="972" cy="202" r="18" fill="#fed7aa"/>
+    <path d="M 963 210 V 194 H 981 V 210 M 967 198 H 977 M 967 202 H 977 M 967 206 H 977" fill="none" stroke="#ea580c" stroke-width="1.5"/>
+    <text x="1050" y="198" text-anchor="middle" class="node-title">Remote Services</text>
+    <text x="1050" y="218" text-anchor="middle" class="node-subtitle">localhost / wildcard ports</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="680" y="300" width="440" height="160" rx="10" fill="#fff7ed" stroke="#fb923c" stroke-width="2"/>
+    <rect x="684" y="304" width="432" height="152" rx="8" fill="none" stroke="#fed7aa" stroke-width="1"/>
+    <text x="700" y="327" class="node-title">Shared sshx Server</text>
+    <text x="1100" y="327" text-anchor="end" class="node-subtitle">one daemon per client target alias</text>
+
+    <rect x="700" y="345" width="120" height="76" rx="7" fill="#ffffff" stroke="#fdba74"/>
+    <circle cx="760" cy="365" r="10" fill="#ffedd5"/>
+    <path d="M 754 365 H 766 M 760 359 V 371" stroke="#ea580c" stroke-width="1.5"/>
+    <text x="760" y="391" text-anchor="middle" class="mini-title">Bridge Router</text>
+    <text x="760" y="407" text-anchor="middle" class="mini-subtitle">commands · results</text>
+
+    <rect x="840" y="345" width="120" height="76" rx="7" fill="#ffffff" stroke="#fdba74"/>
+    <circle cx="900" cy="365" r="10" fill="#f3e8ff"/>
+    <path d="M 894 369 L 899 362 L 903 366 L 908 358" fill="none" stroke="#9333ea" stroke-width="1.5"/>
+    <text x="900" y="391" text-anchor="middle" class="mini-title">Port Scanner</text>
+    <text x="900" y="407" text-anchor="middle" class="mini-subtitle">/proc listener diff</text>
+
+    <rect x="980" y="345" width="120" height="76" rx="7" fill="#ffffff" stroke="#fdba74"/>
+    <circle cx="1040" cy="365" r="10" fill="#dcfce7"/>
+    <path d="M 1040 359 V 365 L 1045 368" fill="none" stroke="#059669" stroke-width="1.5" stroke-linecap="round"/>
+    <text x="1040" y="391" text-anchor="middle" class="mini-title">Lifecycle</text>
+    <text x="1040" y="407" text-anchor="middle" class="mini-subtitle">auth · leases · drain</text>
+
+    <text x="900" y="444" text-anchor="middle" class="node-subtitle">Unix sockets: control + dedicated RemoteFS data plane</text>
+  </g>
+
+  <g>
+    <rect x="680" y="500" width="180" height="90" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+    <path d="M 705 535 H 732 M 724 527 L 732 535 L 724 543" fill="none" stroke="#ea580c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="777" y="532" text-anchor="middle" class="node-title">Target Entry</text>
+    <text x="770" y="554" text-anchor="middle" class="node-subtitle">sshd</text>
+    <text x="770" y="573" text-anchor="middle" class="node-subtitle">or docker exec</text>
+  </g>
+
+  <g>
+    <rect x="940" y="500" width="180" height="90" rx="8" fill="#f0fdf4" stroke="#6ee7b7" stroke-width="1.5" stroke-dasharray="6,3"/>
+    <ellipse cx="974" cy="526" rx="17" ry="6" fill="#dcfce7" stroke="#059669" stroke-width="1.2"/>
+    <path d="M 957 526 V 551 M 991 526 V 551" stroke="#059669" stroke-width="1.2"/>
+    <ellipse cx="974" cy="551" rx="17" ry="6" fill="#bbf7d0" stroke="#059669" stroke-width="1.2"/>
+    <text x="1055" y="532" text-anchor="middle" class="node-title">Remote Mount</text>
+    <text x="1055" y="554" text-anchor="middle" class="node-subtitle">go-fuse adapter</text>
+    <text x="1055" y="573" text-anchor="middle" class="node-subtitle">optional workspace view</text>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(160,704)">
+    <line x1="0" y1="8" x2="32" y2="8" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <text x="42" y="12" class="legend">session / TCP data</text>
+    <line x1="210" y1="8" x2="242" y2="8" stroke="#ea580c" stroke-width="2" marker-end="url(#arrow-orange)"/>
+    <text x="252" y="12" class="legend">command bridge</text>
+    <line x1="405" y1="8" x2="437" y2="8" stroke="#9333ea" stroke-width="1.8" stroke-dasharray="5,3" marker-end="url(#arrow-purple)"/>
+    <text x="447" y="12" class="legend">port discovery</text>
+    <line x1="590" y1="8" x2="622" y2="8" stroke="#059669" stroke-width="1.8" stroke-dasharray="7,4" marker-end="url(#arrow-green)"/>
+    <text x="632" y="12" class="legend">optional RemoteFS</text>
+  </g>
+</svg>
