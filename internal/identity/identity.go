@@ -19,8 +19,8 @@ import (
 
 const (
 	ContextABI     = "context-v1"
-	RuntimeID      = "bridge-v5.mux-v1.remotefs-v3"
-	LocalRuntimeID = "locald-v2.forward-v2"
+	RuntimeID      = "bridge-v1.mux-v1.remotefs-v1"
+	LocalRuntimeID = "locald-v1.forward-v1"
 )
 
 type Install struct {

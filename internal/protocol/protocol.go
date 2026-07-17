@@ -7,9 +7,9 @@ import (
 )
 
 const (
-	Version    = 5
-	MinVersion = 5
-	MaxVersion = 5
+	Version    = 1
+	MinVersion = 1
+	MaxVersion = 1
 )
 
 const (
