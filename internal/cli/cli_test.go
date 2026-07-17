@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/xiaot623/sshx/internal/config"
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/locald"
 	"github.com/xiaot623/sshx/internal/loopback"
 	"github.com/xiaot623/sshx/internal/sshcompat"
@@ -27,7 +28,7 @@ type execCall struct {
 }
 
 func sameVersionRemoteProbe() []byte {
-	return []byte("Linux\nx86_64\n" + version.Version + "\n" + version.Version + "\n1\n")
+	return []byte("Linux\nx86_64\n" + version.Version + "\n" + version.Version + "\n" + identity.RuntimeID + "\n1\n")
 }
 
 func isolateHome(t *testing.T) {
@@ -111,27 +112,8 @@ func TestRecordVersionStateRotatesCurrentToLast(t *testing.T) {
 	}
 }
 
-func TestRemoteIDForTargetIsStablePerAlias(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "remote-hosts.json")
-	debian1, err := remoteIDForTarget(path, "debian")
-	if err != nil {
-		t.Fatal(err)
-	}
-	debian2, err := remoteIDForTarget(path, "debian")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ubuntu, err := remoteIDForTarget(path, "ubuntu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if debian1 == "" || debian1 != debian2 {
-		t.Fatalf("debian ids = %q %q", debian1, debian2)
-	}
-	if ubuntu == "" || ubuntu == debian1 {
-		t.Fatalf("ubuntu id = %q, debian id = %q", ubuntu, debian1)
-	}
-	if got := remoteServerHome(debian1); got != "$HOME/.sshx_server/"+debian1 {
+func TestRemoteLayoutUsesTargetAndRuntime(t *testing.T) {
+	if got := remoteServerHome("target-id"); got != "$HOME/.sshx_server/targets/target-id/runtimes/"+identity.RuntimeID {
 		t.Fatalf("remote home = %q", got)
 	}
 }
@@ -272,7 +254,7 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\naarch64\n1.2.3-rc.0\n1.2.3-rc.0\n1\n"), nil
+		return []byte("Linux\naarch64\n1.2.3-rc.0\n1.2.3-rc.0\n\n1\n"), nil
 	}
 	r.DownloadBinary = func(_ context.Context, targetVersion, assetName string) (string, error) {
 		downloadedVersion = targetVersion
@@ -309,12 +291,12 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 		t.Fatalf("stop args = %#v", execCalls[0].args)
 	}
 	if !strings.Contains(strings.Join(execCalls[1].args, " "), "SSHX_SERVER_HOME") ||
-		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/client-remote") {
+		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/targets/client-remote/runtimes/") {
 		t.Fatalf("start args = %#v", execCalls[1].args)
 	}
 }
 
-func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
+func TestEnsureRemoteServerKeepsCompatibleRuntimeAcrossAppVersions(t *testing.T) {
 	old := version.Version
 	version.Version = "1.2.3"
 	t.Cleanup(func() { version.Version = old })
@@ -322,7 +304,7 @@ func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\nx86_64\n1.2.3\n\n1\n"), nil
+		return []byte("Linux\nx86_64\n1.2.3\n\n" + identity.RuntimeID + "\n1\n"), nil
 	}
 	r.DownloadBinary = func(context.Context, string, string) (string, error) {
 		t.Fatal("binary should not be downloaded when installed binary already matches")
@@ -337,7 +319,7 @@ func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(execCalls) != 3 {
+	if len(execCalls) != 0 {
 		t.Fatalf("exec calls = %#v", execCalls)
 	}
 }
@@ -346,6 +328,29 @@ func TestStopServerScriptHasValidShellSyntax(t *testing.T) {
 	cmd := exec.Command("sh", "-n", "-c", stopServerScript(remoteServerHome("client-remote")))
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("shell syntax: %v: %s", err, output)
+	}
+}
+
+func TestContextLauncherInstallHasValidShellSyntax(t *testing.T) {
+	var captured []string
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	r.Exec = func(_ context.Context, _ string, args []string) error {
+		captured = append([]string(nil), args...)
+		return nil
+	}
+	connection := identity.Connection{TargetID: "target", ContextID: "context"}
+	if err := r.ensureRemoteContextLauncher(context.Background(), []string{"remote"}, connection, remoteServerHome("target"), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) == 0 {
+		t.Fatal("launcher command was not executed")
+	}
+	remoteCommand := captured[len(captured)-1]
+	if output, err := exec.Command("sh", "-n", "-c", remoteCommand).CombinedOutput(); err != nil {
+		t.Fatalf("launcher shell syntax: %v: %s\n%s", err, output, remoteCommand)
+	}
+	if !strings.Contains(remoteCommand, "contexts/context") || !strings.Contains(remoteCommand, identity.RuntimeID+".json") || !strings.Contains(remoteCommand, `remoteFs`) {
+		t.Fatalf("launcher command = %q", remoteCommand)
 	}
 }
 

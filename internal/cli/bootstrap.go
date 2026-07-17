@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/xiaot623/sshx/internal/config"
+	"github.com/xiaot623/sshx/internal/identity"
 )
 
 type serverBootstrapTransport interface {
@@ -28,6 +29,7 @@ type remoteProbe struct {
 	Arch          string
 	BinaryVersion string
 	ServerVersion string
+	RuntimeID     string
 	Running       bool
 }
 
@@ -40,6 +42,49 @@ func (r *Runner) ensureRemoteServer(ctx context.Context, sshArgs []string, featu
 		Enabled:         features.Enabled(),
 		DisablePortScan: !features.AutoForward,
 	})
+}
+
+func (r *Runner) ensureRemoteContextLauncher(ctx context.Context, sshArgs []string, connection identity.Connection, remoteHome string, remoteFS bool) error {
+	contextHome := remoteContextHome(connection.TargetID, connection.ContextID)
+	remoteFSValue := "0"
+	if remoteFS {
+		remoteFSValue = "1"
+	}
+	launcher := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"context_home=\"" + strings.ReplaceAll(contextHome, `"`, `\"`) + "\"",
+		"runtime=${SSHX_RUNTIME_ID:-" + identity.RuntimeID + "}",
+		"SSHX_RUNTIME_ID=$runtime",
+		"route=\"$context_home/routes/$runtime.json\"",
+		"if [ ! -f \"$route\" ]; then route=$(ls -1t \"$context_home\"/routes/*.json 2>/dev/null | head -n 1 || true); fi",
+		"[ -n \"$route\" ] && [ -f \"$route\" ] || { echo 'sshx: no compatible runtime route for this context' >&2; exit 1; }",
+		"runtime=$(sed -n 's/.*\"runtimeId\":\"\\([^\"]*\\)\".*/\\1/p' \"$route\")",
+		"[ -n \"$runtime\" ] || { echo 'sshx: invalid context runtime identity' >&2; exit 1; }",
+		"SSHX_RUNTIME_ID=$runtime",
+		"SSHX_SERVER_HOME=$(sed -n 's/.*\"serverHome\":\"\\([^\"]*\\)\".*/\\1/p' \"$route\")",
+		"[ -n \"$SSHX_SERVER_HOME\" ] || { echo 'sshx: invalid context runtime route' >&2; exit 1; }",
+		"SSHX_REMOTE_FS=$(sed -n 's/.*\"remoteFs\":\\([01]\\).*/\\1/p' \"$route\")",
+		"SSHX_REMOTE_FS=${SSHX_REMOTE_FS:-0}",
+		"SSHX_CONTEXT_ID=" + shellQuote(connection.ContextID),
+		"export SSHX_SERVER_HOME SSHX_CONTEXT_ID SSHX_RUNTIME_ID SSHX_REMOTE_FS",
+		"exec \"$SSHX_SERVER_HOME/sshx\" \"$@\"",
+	}, "\n") + "\n"
+	script := strings.Join([]string{
+		"set -eu",
+		"context_home=\"" + strings.ReplaceAll(contextHome, `"`, `\"`) + "\"",
+		"runtime_home=\"" + strings.ReplaceAll(remoteHome, `"`, `\"`) + "\"",
+		"mkdir -p \"$context_home/bin\" \"$context_home/routes\"",
+		"route_tmp=\"$context_home/routes/." + identity.RuntimeID + ".$$.tmp\"",
+		"printf '{\"runtimeId\":\"%s\",\"serverHome\":\"%s\",\"remoteFs\":%s}\\n' " + shellQuote(identity.RuntimeID) + " \"$runtime_home\" " + shellQuote(remoteFSValue) + " > \"$route_tmp\"",
+		"chmod 600 \"$route_tmp\"",
+		"mv -f \"$route_tmp\" \"$context_home/routes/" + identity.RuntimeID + ".json\"",
+		"launcher_tmp=\"$context_home/bin/.sshx.$$.tmp\"",
+		"printf '%s' " + shellQuote(launcher) + " > \"$launcher_tmp\"",
+		"chmod 700 \"$launcher_tmp\"",
+		"mv -f \"$launcher_tmp\" \"$context_home/bin/sshx\"",
+	}, "\n")
+	return (sshServerTransport{r: r, sshArgs: sshArgs}).ExecScript(ctx, script)
 }
 
 func (r *Runner) ensureDockerServer(ctx context.Context, container string, features config.Features, remoteHome string) error {
@@ -58,7 +103,7 @@ func (r *Runner) ensureBootstrappedServer(ctx context.Context, remoteHome string
 	if err != nil {
 		return err
 	}
-	if probe.Running && probe.ServerVersion == targetVersion {
+	if probe.Running && probe.RuntimeID == identity.RuntimeID {
 		return nil
 	}
 	if probe.Running {
@@ -69,7 +114,7 @@ func (r *Runner) ensureBootstrappedServer(ctx context.Context, remoteHome string
 		}
 		cancel()
 	}
-	if probe.BinaryVersion != targetVersion {
+	if probe.RuntimeID != identity.RuntimeID {
 		localBinary, err := r.DownloadBinary(ctx, targetVersion, probe.AssetName())
 		if err != nil {
 			return err
@@ -105,14 +150,14 @@ func installBootstrappedBinary(ctx context.Context, transport serverBootstrapTra
 
 func parseRemoteProbe(out []byte) (remoteProbe, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(out))
-	lines := make([]string, 0, 5)
+	lines := make([]string, 0, 6)
 	for scanner.Scan() {
 		lines = append(lines, strings.TrimSpace(scanner.Text()))
 	}
 	if err := scanner.Err(); err != nil {
 		return remoteProbe{}, err
 	}
-	for len(lines) < 5 {
+	for len(lines) < 6 {
 		lines = append(lines, "")
 	}
 	osName, err := normalizeRemoteOS(lines[0])
@@ -128,7 +173,8 @@ func parseRemoteProbe(out []byte) (remoteProbe, error) {
 		Arch:          arch,
 		BinaryVersion: lines[2],
 		ServerVersion: lines[3],
-		Running:       lines[4] == "1",
+		RuntimeID:     lines[4],
+		Running:       lines[5] == "1",
 	}, nil
 }
 
@@ -139,11 +185,13 @@ func probeServerScript(remoteHome string) string {
 		"arch=$(uname -m 2>/dev/null || true)",
 		"ver=",
 		"if test -x \"$SSHX_SERVER_HOME/sshx\"; then ver=$(\"$SSHX_SERVER_HOME/sshx\" --version 2>/dev/null | awk '{print $2}' || true); fi",
+		"runtime=",
+		"if test -x \"$SSHX_SERVER_HOME/sshx\"; then runtime=$(\"$SSHX_SERVER_HOME/sshx\" runtime-id 2>/dev/null || true); fi",
 		"server_ver=",
 		"if test -f \"$SSHX_SERVER_HOME/server-info\"; then server_ver=$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$SSHX_SERVER_HOME/server-info\" | head -n 1 || true); fi",
 		"running=0",
 		"if test -S \"$SSHX_SERVER_HOME/sock\" && test -f \"$SSHX_SERVER_HOME/server-info\"; then running=1; fi",
-		"printf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$ver\" \"$server_ver\" \"$running\"",
+		"printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$ver\" \"$server_ver\" \"$runtime\" \"$running\"",
 	}, "; ")
 }
 
@@ -152,10 +200,16 @@ func installBinaryScript(remoteHome string) string {
 		"set -eu",
 		remoteServerEnvScript(remoteHome),
 		"mkdir -p \"$SSHX_SERVER_HOME\"",
+		"lock=\"$SSHX_SERVER_HOME/.install.lock\"",
+		"i=0; while ! mkdir \"$lock\" 2>/dev/null; do owner=$(cat \"$lock/pid\" 2>/dev/null || true); if test -n \"$owner\" && ! kill -0 \"$owner\" 2>/dev/null; then rm -rf \"$lock\"; continue; fi; i=$((i+1)); test $i -lt 100 || exit 1; sleep 0.1; done",
+		"printf '%s\\n' \"$$\" > \"$lock/pid\"",
+		"trap 'rm -rf \"$lock\"' EXIT HUP INT TERM",
 		"tmp=\"$SSHX_SERVER_HOME/sshx.$$.tmp\"",
 		"cat > \"$tmp\"",
 		"chmod 755 \"$tmp\"",
 		"mv \"$tmp\" \"$SSHX_SERVER_HOME/sshx\"",
+		"rm -rf \"$lock\"",
+		"trap - EXIT HUP INT TERM",
 	}, "; ")
 }
 

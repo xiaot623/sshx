@@ -2,10 +2,10 @@
 
 > Transparent SSH enhancement — add remote-to-local commands, auto port forwarding, and local domains to your SSH workflow. Zero side effects when you don't need them.
 
-**sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host (or Docker container) with sshx-aware features enabled, you unlock a persistent, shared remote server that gives you:
+**sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host (or Docker container) with sshx-aware features enabled, you unlock a connection-scoped shared remote server that gives you:
 
 - 🔄 **Reverse command bridge** — run `sshx local <cmd>` *on the remote* to execute commands on your local machine, with stdout, stderr, exit code, and stdin all propagated.
-- 📁 **Bidirectional home mount** — opt in to mount the command initiator's home while preserving the source path hierarchy and working directory.
+- 📁 **Remote-to-local filesystem** — opt in to let local tools work directly with files from the active remote session.
 - 🔌 **Automatic port forwarding** — remote local listeners (loopback `127.0.0.1` and wildcard `0.0.0.0`; e.g., a dev server on `0.0.0.0:8080` or `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
 - 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. Command bridge support works inside containers via `docker exec`.
@@ -28,7 +28,7 @@ sshx is designed to be **safe to alias**. Hosts without sshx configuration are u
 
 ![sshx system architecture](docs/architecture.svg)
 
-Each user-visible session remains a normal OpenSSH connection (or a `docker exec` session for container targets). Hidden control and optional RemoteFS channels connect the client to a shared target-side server, while one local daemon owns DNS records and TCP forwards across all client terminals. Automatic port forwarding uses SSH `direct-tcpip`; Docker targets support shells and the command bridge but do not use automatic port scanning.
+Each user-visible session remains a normal OpenSSH connection (or a `docker exec` session for container targets). One hidden multiplexed sidecar channel carries control and optional RemoteFS traffic to a shared target-side server, while one on-demand local daemon owns DNS records and TCP forwards across active client terminals. Automatic port forwarding uses SSH `direct-tcpip`; Docker targets support shells and the command bridge but do not use automatic port scanning.
 
 ---
 
@@ -68,17 +68,17 @@ sshx local --timeout=30 npm test
 - Commands have no implicit deadline. Put `--timeout=<duration>` immediately after the target to opt in; bare numbers mean seconds, and values such as `500ms`, `30s`, and `2m` are accepted. Timed-out commands exit with status 124.
 - Policy: a configurable deny list controls which commands are blocked.
 
-### 📁 Bidirectional Workspace Mount (opt-in, beta)
+### 📁 Remote-to-Local Filesystem (opt-in, beta)
 
-Set `features.remoteFs: true` to expose the command initiator's home directory through a read-write FUSE mount. Its absolute hierarchy is preserved below the managed session directory (for example, `/Users/xiaot` becomes `<session>/Users/xiaot`):
+Set `features.remoteFs: true` to let a command launched with `sshx local <cmd>` access the remote working tree through a local FUSE mount:
 
-- `sshx remote <cmd>` starts the remote command at the corresponding path inside the mounted local home.
-- An interactive `sshx remote` shell still starts in the remote home. `SSHX_MOUNT_ROOT` points to the mounted source root and `SSHX_WORKSPACE` points to the mapped source working directory.
-- From that shell, `sshx local <cmd>` mounts the remote home locally and starts the local command at the corresponding mapped path.
-- If the source working directory is outside its home, sshx exports that directory as a safe fallback and still preserves its absolute hierarchy below the session directory.
-- Writes and `fsync` are sent to the source immediately. Metadata and directory entries use short TTLs and are revalidated when files are reopened.
+- The remote home is exported lazily on the first local command. A working directory outside the remote home creates a separate lazy export for that root.
+- The local command starts at the corresponding mounted working directory. Absolute command arguments are not rewritten.
+- Mounts are reused for the sidecar session, so detached tools such as `open` and `code` can continue reading files after the bridge request returns.
+- Local files are never exported or mounted on the remote host.
+- With RemoteFS disabled, the command runs from the local home and receives `SSHX_REMOTE_CWD` plus `SSHX_REMOTE_FS=0`.
 
-The mounted home permits reads, writes, and creation, but blocks file/directory deletion and rename in both directions. It can still include sensitive files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust. sshx excludes its managed mount tree from reverse exports to avoid recursive mounts.
+The mounted remote tree permits reads, writes, and creation, but blocks file/directory deletion and rename. It can include sensitive remote files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust.
 
 Set `FS_READ_ONLY=1` on the client when starting sshx to make the session mounts read-only:
 
@@ -86,15 +86,15 @@ Set `FS_READ_ONLY=1` on the client when starting sshx to make the session mounts
 FS_READ_ONLY=1 sshx debian@orb pwd
 ```
 
-The client value is exported into the remote session. A later `sshx local <cmd>` inherits it, so the reverse mount is read-only as well.
+The value is exported into the remote session, and later `sshx local <cmd>` mounts remain read-only.
 
-FUSE is a hard dependency when this feature is enabled: a mount failure aborts the command even when `strict` is false. Linux needs `/dev/fuse` plus `fusermount`/`fusermount3`; macOS needs a current macFUSE installation and is currently beta. The remote target must be Linux with FUSE available.
+FUSE is required only on the local machine receiving the mounted remote tree. A mount failure fails that `sshx local` invocation instead of running it from the wrong directory. Linux needs `/dev/fuse` plus `fusermount`/`fusermount3`; macOS needs a current macFUSE installation and is currently beta.
 
 #### FUSE setup
 
-The machine receiving the mounted view needs a working FUSE runtime. The Linux target therefore always needs FUSE for `sshx remote`; a macOS client also needs macFUSE when a remote shell runs `sshx local` and mounts the remote working directory back on the Mac.
+The local machine receiving the mounted view needs a working FUSE runtime. The remote Linux host exports files through the sshx protocol and does not need FUSE.
 
-**Linux target/client**
+**Linux client**
 
 Install the FUSE 3 userspace tools (the kernel normally already includes the FUSE driver):
 
@@ -161,12 +161,13 @@ The URL port is the remote port. sshx does not bind `127.0.0.1:<port>`; it binds
 
 ### 🏗️ Shared Server Architecture
 
-- One **server daemon** per client target alias, installed under `~/.sshx_server/<uuid>` on the remote and shared by that client's concurrent SSH sessions.
-- Client connects via a hidden `socket-proxy` SSH channel.
+- Compatible runtime daemons live under `~/.sshx_server/targets/<TargetID>/runtimes/<RuntimeID>` and serve multiple application contexts and sessions.
+- Client connects through one hidden multiplexed sidecar SSH channel.
 - Server manages port sniffing, forwarding state, and command bridge routing centrally.
 - Clients renew local and remote leases every 5 seconds. A daemon expires a client after 15 seconds without a heartbeat.
-- The local daemon exits when its last client lease closes. The remote server drains briefly and exits after its last bridge lease closes.
-- Application or protocol version changes drain the existing daemon before the current binary starts a replacement.
+- The on-demand local daemon and remote server keep a 10-second handoff window after their last lease, then exit.
+- AppVersion is diagnostic only. Compatible clients coexist; incompatible RuntimeIDs use separate directories and daemons.
+- `ClientInstallID` is stable across upgrades; `TargetID` identifies normalized OpenSSH destinations, `ContextID` identifies stable application contexts, and every live sidecar gets a fresh `SessionID`.
 
 ---
 
@@ -188,6 +189,19 @@ npm install -g @hahahhh/sshx
 ```
 
 The npm wrapper auto-downloads the correct native binary for your platform from GitHub Releases.
+
+### VS Code / Cursor Remote SSH
+
+Install the CLI normally, then run the single integration command for each application you use:
+
+```sh
+sshx integrate install vscode
+sshx integrate install cursor
+```
+
+The command locates OpenSSH, installs paired `ssh`/`scp` shims backed by the same sshx binary, patches JSONC `remote.SSH.path`, and verifies the complete invocation chain. It is idempotent and rolls back settings and shims on failure; run it again to repair the integration after moving the sshx executable. No restart, integration-specific configuration, or extra binary is required.
+
+Remote-SSH remains the user-visible OpenSSH connection. sshx creates a temporary ControlMaster so bootstrap, sidecar, forwarding, and scp reuse the same authentication. Only a stable `SSHX_CONTEXT_ID` and context-launcher path are injected into application terminals. Probe, unknown, and ambiguous calls are exact passthrough; an incompatible or failed sidecar receives the original bootstrap bytes and preserves normal OpenSSH behavior regardless of `strict`.
 
 ### Download Binary
 
@@ -300,8 +314,8 @@ features:
   # <host>.<user>.sshx:<remote-port>.
   autoForward: true
 
-  # Read-write workspace mounts in both command directions. Default: false.
-  # Requires FUSE on the local machine and remote target.
+  # Lazily mount remote files for local commands. Default: false.
+  # Requires FUSE only on the local machine.
   remoteFs: false
 
 commands:
@@ -327,8 +341,8 @@ commands:
 └─────────────────────────────────┘     └─────────────────────────────────┘
 ```
 
-1. **Connection**: `sshx remote` opens a normal SSH session and starts (or connects to) the client-target `sshx server` under `~/.sshx_server/<uuid>`.
-2. **Bridge channels**: A hidden control `socket-proxy` channel links the client to the remote server. `remoteFs` adds a separately framed, bounded data channel paired by session ID.
+1. **Connection**: `sshx remote` opens a normal SSH session and starts a compatible runtime under `~/.sshx_server/targets/<TargetID>/runtimes/<RuntimeID>`.
+2. **Sidecar channel**: One hidden SSH channel multiplexes command, port, heartbeat, and optional RemoteFS traffic. ContextID routes VS Code/Cursor terminals to a healthy live session.
 3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback (`127.0.0.1` / `::1`) and wildcard (`0.0.0.0` / `::`) listeners.
 4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using `ssh -W`.
 5. **Domains**: The local DNS responder maps `<target>.<suffix>` → localhost. The browser's URL port selects the local forwarded port.
@@ -343,7 +357,7 @@ When `sshx` is invoked for a **non-matching host** (no sshx config, or host not 
 - `SSHX_DISABLE=1 sshx ...` — same as `--no-wrap`, useful in scripts.
 - `sshx local ...` on a **client** (not inside a remote session) — errors immediately with a clear message. `local` is globally reserved.
 - `remoteFs` never silently falls back to an unmounted command. A failed FUSE mount fails the invocation.
-- Workspace exports are anchored with Go's `os.Root`; path traversal and symlink escapes are rejected.
+- Remote exports are anchored with Go's `os.Root`; path traversal and symlink escapes are rejected.
 - Docker containers that aren't running or can't be reached are pure passthrough — sshx falls back to raw `ssh` with no side effects.
 - Unmatched hosts are pure passthrough — no files created, no processes started.
 
@@ -392,7 +406,7 @@ sshx/
 
 - [x] **v1** — Command bridge (non-interactive), auto port forwarding, domain binding, shared server
 - [ ] **v2** — Streaming stdin for command bridge, GitHub binary releases, Windows client support
-- [x] **remoteFs beta** — Bidirectional read-write workspace mounting on Linux/macOS clients and Linux targets
+- [x] **remoteFs beta** — Lazy remote-to-local workspace mounting on Linux/macOS clients
 
 ---
 

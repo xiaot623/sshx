@@ -14,6 +14,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/domain"
 	"github.com/xiaot623/sshx/internal/forward"
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/loopback"
 	"github.com/xiaot623/sshx/internal/protocol"
 )
@@ -528,7 +529,7 @@ func TestLocalDaemonExpiresSessionWithoutHeartbeat(t *testing.T) {
 	defer conn.Close()
 	request := Request{
 		Type: TypeOpenSession, SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
-		SessionID: "session-1", AppVersion: "test-version", ProtocolVersion: protocol.Version,
+		SessionID: "session-1", AppVersion: "test-version", RuntimeID: identity.LocalRuntimeID, ProtocolVersion: protocol.Version,
 	}
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		t.Fatal(err)
@@ -547,27 +548,66 @@ func TestLocalDaemonExpiresSessionWithoutHeartbeat(t *testing.T) {
 	}
 }
 
-func TestLocalDaemonExitsOnVersionChange(t *testing.T) {
+func TestLocalDaemonAllowsDifferentAppVersionsInOneRuntime(t *testing.T) {
 	socket := shortSocketPath(t)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- (&Server{SocketPath: socket, Version: "1.0.0"}).Serve(context.Background())
 	}()
 	waitForSocket(t, socket)
-	_, err := OpenSession(context.Background(), socket, Request{
+	session, err := OpenSession(context.Background(), socket, Request{
 		SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
 		SessionID: "session-1", AppVersion: "2.0.0",
 	}, 10*time.Millisecond)
-	if err == nil {
-		t.Fatal("version-changing session unexpectedly opened")
+	if err != nil {
+		t.Fatalf("open different app version: %v", err)
 	}
+	_ = session.Close()
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("daemon did not exit after version change")
+		t.Fatal("daemon did not exit after the final lease")
+	}
+}
+
+func TestLocalDaemonHandoffGraceAcceptsReplacementLease(t *testing.T) {
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "test-version", HandoffGrace: 80 * time.Millisecond}).Serve(context.Background())
+	}()
+	waitForSocket(t, socket)
+	open := func(leaseID string) *Session {
+		session, err := OpenSession(context.Background(), socket, Request{
+			SSHPath: "ssh", Target: "debian", TargetID: "stable-target", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
+			LeaseID: leaseID, AppVersion: "test-version",
+		}, 10*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return session
+	}
+	first := open("lease-1")
+	_ = first.Close()
+	time.Sleep(20 * time.Millisecond)
+	second := open("lease-2")
+	// Let the first lease's grace timer fire. The replacement must keep the
+	// target resources and daemon alive.
+	time.Sleep(100 * time.Millisecond)
+	if _, err := ClientRequest(context.Background(), socket, Request{Type: TypePing}); err != nil {
+		t.Fatalf("daemon exited during handoff: %v", err)
+	}
+	_ = second.Close()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not exit after replacement lease grace")
 	}
 }
 

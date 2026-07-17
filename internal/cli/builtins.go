@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,7 +14,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/bridge"
 	"github.com/xiaot623/sshx/internal/locald"
-	"github.com/xiaot623/sshx/internal/remotefs"
+	sshmux "github.com/xiaot623/sshx/internal/mux"
 	"github.com/xiaot623/sshx/internal/sshconfig"
 )
 
@@ -152,6 +153,39 @@ func (r *Runner) runSocketProxy(ctx context.Context, args []string) int {
 	return 0
 }
 
+func (r *Runner) runMuxProxy(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("mux-proxy", flag.ContinueOnError)
+	fs.SetOutput(r.Stderr)
+	controlPath := fs.String("control", "", "remote command bridge Unix socket")
+	fsPath := fs.String("fs", "", "remote filesystem Unix socket")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *controlPath == "" || *fsPath == "" {
+		fmt.Fprintln(r.Stderr, "sshx mux-proxy: --control and --fs are required")
+		return 2
+	}
+	var dialer net.Dialer
+	control, err := dialer.DialContext(ctx, "unix", *controlPath)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "sshx mux-proxy: control socket: %v\n", err)
+		return 1
+	}
+	defer control.Close()
+	fsConn, err := dialer.DialContext(ctx, "unix", *fsPath)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "sshx mux-proxy: filesystem socket: %v\n", err)
+		return 1
+	}
+	defer fsConn.Close()
+	transport := bridge.NewReadWriteCloser(r.Stdin, r.Stdout, func() error { return nil })
+	if err := sshmux.Proxy(ctx, transport, control, fsConn); err != nil {
+		fmt.Fprintf(r.Stderr, "sshx mux-proxy: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func (r *Runner) runLocalDaemon(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("local-daemon", flag.ContinueOnError)
 	fs.SetOutput(r.Stderr)
@@ -159,7 +193,7 @@ func (r *Runner) runLocalDaemon(ctx context.Context, args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	s := &locald.Server{SocketPath: *socketPath, Stderr: r.Stderr, Version: clientVersion()}
+	s := &locald.Server{SocketPath: *socketPath, Stderr: r.Stderr, Version: clientVersion(), HandoffGrace: 10 * time.Second}
 	if err := s.Serve(ctx); err != nil {
 		fmt.Fprintf(r.Stderr, "sshx local-daemon: %v\n", err)
 		return 1
@@ -226,25 +260,23 @@ func (r *Runner) runLocalBridge(ctx context.Context, argv []string, timeout time
 		}
 	}
 	sessionID := os.Getenv("SSHX_SESSION_ID")
+	contextID := os.Getenv("SSHX_CONTEXT_ID")
 	remoteFS := os.Getenv("SSHX_REMOTE_FS") == "1"
 	readOnly := os.Getenv("FS_READ_ONLY") == "1"
 	cwd := ""
+	env := map[string]string{"SSHX_REMOTE_FS": "0"}
 	if remoteFS {
 		cwd, err = os.Getwd()
 		if err != nil {
 			fmt.Fprintf(r.Stderr, "sshx local: current directory: %v\n", err)
 			return 1
 		}
-		mountRoot := filepath.Join(filepath.Dir(socketPath), "mounts")
-		if within, withinErr := remotefs.PathWithin(mountRoot, cwd); withinErr != nil {
-			fmt.Fprintf(r.Stderr, "sshx local: %v\n", withinErr)
-			return 1
-		} else if within {
-			fmt.Fprintf(r.Stderr, "sshx local: %v\n", bridge.ErrMountedCwd)
-			return 1
-		}
+		env["SSHX_REMOTE_FS"] = "1"
+		env["SSHX_REMOTE_CWD"] = cwd
+	} else if remoteCwd, cwdErr := os.Getwd(); cwdErr == nil {
+		env["SSHX_REMOTE_CWD"] = remoteCwd
 	}
-	result, err := bridge.RequestCommandForSessionWithMountOptions(ctx, socketPath, argv, stdin, nil, cwd, sessionID, remoteFS, readOnly, timeout, token)
+	result, err := bridge.RequestCommandForContextWithMountOptions(ctx, socketPath, argv, stdin, env, cwd, contextID, sessionID, remoteFS, readOnly, timeout, token)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx local: %v\n", err)
 		return result.ExitCode

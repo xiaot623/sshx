@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/protocol"
 )
 
@@ -23,9 +24,11 @@ type Session struct {
 }
 
 func OpenSession(ctx context.Context, socketPath string, req Request, heartbeatInterval time.Duration) (*Session, error) {
-	if req.SessionID == "" || req.AppVersion == "" {
-		return nil, errors.New("sessionId and appVersion are required")
+	leaseID := requestLeaseID(req)
+	if leaseID == "" {
+		return nil, errors.New("leaseId is required")
 	}
+	req.LeaseID = leaseID
 	if heartbeatInterval <= 0 {
 		heartbeatInterval = DefaultHeartbeatInterval
 	}
@@ -36,6 +39,9 @@ func OpenSession(ctx context.Context, socketPath string, req Request, heartbeatI
 	}
 	req.Type = TypeOpenSession
 	req.ProtocolVersion = protocol.Version
+	req.ProtocolMin = protocol.MinVersion
+	req.ProtocolMax = protocol.MaxVersion
+	req.RuntimeID = identity.LocalRuntimeID
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(bufio.NewReader(conn))
 	if err := enc.Encode(req); err != nil {
@@ -51,9 +57,9 @@ func OpenSession(ctx context.Context, socketPath string, req Request, heartbeatI
 		_ = conn.Close()
 		return nil, errors.New(resp.Error)
 	}
-	if resp.Version != req.AppVersion || resp.ProtocolVersion != protocol.Version {
+	if !responseCompatible(resp) {
 		_ = conn.Close()
-		return nil, errors.New("local daemon version changed during session open")
+		return nil, errors.New("local daemon runtime changed during session open")
 	}
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &Session{conn: conn, cancel: cancel, done: make(chan struct{}), Domain: resp.Domain, ListenIP: resp.ListenIP}
@@ -73,20 +79,25 @@ func (s *Session) heartbeatLoop(ctx context.Context, enc *json.Encoder, dec *jso
 			return
 		case <-ticker.C:
 			sequence++
-			heartbeat := Request{Type: TypeHeartbeat, SessionID: req.SessionID, AppVersion: req.AppVersion, ProtocolVersion: protocol.Version, Sequence: sequence}
+			heartbeat := Request{Type: TypeHeartbeat, LeaseID: req.LeaseID, AppVersion: req.AppVersion, RuntimeID: identity.LocalRuntimeID, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, Sequence: sequence}
 			if err := enc.Encode(heartbeat); err != nil {
 				_ = s.conn.Close()
 				return
 			}
 			_ = s.conn.SetReadDeadline(time.Now().Add(DefaultLeaseTimeout))
 			var resp Response
-			if err := dec.Decode(&resp); err != nil || !resp.OK || resp.Type != TypeHeartbeatAck || resp.Sequence != sequence || resp.Version != req.AppVersion || resp.ProtocolVersion != protocol.Version {
+			if err := dec.Decode(&resp); err != nil || !resp.OK || resp.Type != TypeHeartbeatAck || resp.Sequence != sequence || !responseCompatible(resp) {
 				_ = s.conn.Close()
 				return
 			}
 			_ = s.conn.SetReadDeadline(time.Time{})
 		}
 	}
+}
+
+func responseCompatible(resp Response) bool {
+	frame := protocol.Frame{ProtocolVersion: resp.ProtocolVersion, ProtocolMin: resp.ProtocolMin, ProtocolMax: resp.ProtocolMax}
+	return protocol.FrameCompatible(frame) && resp.RuntimeID == identity.LocalRuntimeID
 }
 
 func (s *Session) Close() error {

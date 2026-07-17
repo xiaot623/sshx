@@ -11,73 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/version"
 )
-
-type remoteHostsState struct {
-	Targets map[string]remoteHostState `json:"targets"`
-}
-
-type remoteHostState struct {
-	ID        string `json:"id"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
-}
-
-func remoteIDForTarget(path, target string) (string, error) {
-	if strings.TrimSpace(target) == "" {
-		return "", errors.New("remote target is required")
-	}
-	var state remoteHostsState
-	if b, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(b, &state); err != nil {
-			return "", err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	if state.Targets == nil {
-		state.Targets = make(map[string]remoteHostState)
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	if entry := state.Targets[target]; entry.ID != "" {
-		entry.UpdatedAt = now
-		state.Targets[target] = entry
-		if err := writeRemoteHostsState(path, state); err != nil {
-			return "", err
-		}
-		return entry.ID, nil
-	}
-	id, err := generateUUID()
-	if err != nil {
-		return "", err
-	}
-	state.Targets[target] = remoteHostState{ID: id, CreatedAt: now, UpdatedAt: now}
-	if err := writeRemoteHostsState(path, state); err != nil {
-		return "", err
-	}
-	return id, nil
-}
-
-func writeRemoteHostsState(path string, state remoteHostsState) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	tmpPath := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
-	if err := os.WriteFile(tmpPath, b, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
-}
 
 func generateUUID() (string, error) {
 	var b [16]byte
@@ -91,30 +27,37 @@ func generateUUID() (string, error) {
 }
 
 func remoteServerHome(id string) string {
-	return "$HOME/.sshx_server/" + id
+	return "$HOME/.sshx_server/targets/" + id + "/runtimes/" + identity.RuntimeID
+}
+
+func remoteContextHome(targetID, contextID string) string {
+	return "$HOME/.sshx_server/targets/" + targetID + "/contexts/" + contextID
 }
 
 func remoteServerEnvScript(remoteHome string) string {
-	return "SSHX_SERVER_HOME=\"" + strings.ReplaceAll(remoteHome, `"`, `\"`) + "\"; export SSHX_SERVER_HOME; case \":$PATH:\" in *\":$SSHX_SERVER_HOME:\"*) ;; *) PATH=\"$SSHX_SERVER_HOME:$PATH\" ;; esac; export PATH"
+	return "SSHX_SERVER_HOME=\"" + strings.ReplaceAll(remoteHome, `"`, `\"`) + "\"; SSHX_RUNTIME_ID=" + shellQuote(identity.RuntimeID) + "; export SSHX_SERVER_HOME SSHX_RUNTIME_ID; case \":$PATH:\" in *\":$SSHX_SERVER_HOME:\"*) ;; *) PATH=\"$SSHX_SERVER_HOME:$PATH\" ;; esac; export PATH"
 }
 
 func remoteBridgeEnvScript(remoteHome string, session *BridgeSession) string {
 	script := remoteServerEnvScript(remoteHome)
-	if session == nil || session.SessionID == "" {
+	if session == nil {
 		return script
 	}
-	script += "; SSHX_SESSION_ID=" + shellQuote(session.SessionID) + "; export SSHX_SESSION_ID"
-	if session.Workspace != "" {
-		script += "; SSHX_WORKSPACE=" + shellQuote(session.Workspace)
-		if session.MountRoot != "" {
-			script += "; SSHX_MOUNT_ROOT=" + shellQuote(session.MountRoot)
-		}
+	if session.ContextID != "" {
+		script += "; SSHX_CONTEXT_ID=" + shellQuote(session.ContextID) + "; export SSHX_CONTEXT_ID"
+	}
+	if session.SessionID != "" {
+		script += "; SSHX_SESSION_ID=" + shellQuote(session.SessionID) + "; export SSHX_SESSION_ID"
+	}
+	if session.RemoteFS {
 		if session.ReadOnly {
 			script += "; FS_READ_ONLY=1"
 		} else {
 			script += "; FS_READ_ONLY=0"
 		}
-		script += "; SSHX_REMOTE_FS=1; export SSHX_WORKSPACE SSHX_MOUNT_ROOT SSHX_REMOTE_FS FS_READ_ONLY"
+		script += "; SSHX_REMOTE_FS=1; export SSHX_REMOTE_FS FS_READ_ONLY"
+	} else {
+		script += "; SSHX_REMOTE_FS=0; export SSHX_REMOTE_FS"
 	}
 	return script
 }

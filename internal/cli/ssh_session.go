@@ -43,10 +43,8 @@ func sessionSSHArgsForBridge(parsed sshcompat.Parsed, remoteHome string, session
 		return append([]string(nil), parsed.Args...)
 	}
 	envLine := remoteServerEnvScript(remoteHome)
-	workspace := ""
 	if session != nil {
 		envLine = remoteBridgeEnvScript(remoteHome, session)
-		workspace = session.Workspace
 	}
 	if len(parsed.RemoteCommand) == 0 {
 		if hasSSHSessionlessFlag(args) {
@@ -57,7 +55,7 @@ func sessionSSHArgsForBridge(parsed sshcompat.Parsed, remoteHome string, session
 		}
 		return append(args, remoteLoginShellWithEnv(envLine))
 	}
-	return append(args, remoteExecShellWithEnv(envLine, workspace, parsed.RemoteCommand))
+	return append(args, remoteExecShellWithEnv(envLine, parsed.RemoteCommand))
 }
 
 func remoteLoginShell(remoteHome string) string {
@@ -80,20 +78,18 @@ func remoteLoginShellWithEnv(envLine string) string {
 }
 
 func remoteExecShell(remoteHome string, argv []string) string {
-	return remoteExecShellWithEnv(remoteServerEnvScript(remoteHome), "", argv)
+	return remoteExecShellWithEnv(remoteServerEnvScript(remoteHome), argv)
 }
 
-func remoteExecShellWithEnv(envLine, workspace string, argv []string) string {
+func remoteExecShellWithEnv(envLine string, argv []string) string {
 	if len(argv) == 1 {
-		return remoteExecCommandShellWithEnv(envLine, workspace, argv[0])
+		return remoteExecCommandShellWithEnv(envLine, argv[0])
 	}
-	cdLine := remoteWorkspaceCD(workspace)
 	parts := []string{
 		"sh",
 		"-lc",
 		strings.Join([]string{
 			envLine,
-			cdLine,
 			"mkdir -p \"$SSHX_SERVER_HOME\"",
 			"shell=${SHELL:-sh}",
 			"name=${shell##*/}",
@@ -114,15 +110,13 @@ func remoteExecShellWithEnv(envLine, workspace string, argv []string) string {
 }
 
 func remoteExecCommandShell(remoteHome string, command string) string {
-	return remoteExecCommandShellWithEnv(remoteServerEnvScript(remoteHome), "", command)
+	return remoteExecCommandShellWithEnv(remoteServerEnvScript(remoteHome), command)
 }
 
-func remoteExecCommandShellWithEnv(envLine, workspace, command string) string {
-	cdLine := remoteWorkspaceCD(workspace)
-	commandLine := envLine + "; " + cdLine + "; " + command
+func remoteExecCommandShellWithEnv(envLine, command string) string {
+	commandLine := envLine + "; " + command
 	script := strings.Join([]string{
 		envLine,
-		cdLine,
 		"mkdir -p \"$SSHX_SERVER_HOME\"",
 		"shell=${SHELL:-sh}",
 		"name=${shell##*/}",
@@ -133,13 +127,6 @@ func remoteExecCommandShellWithEnv(envLine, workspace, command string) string {
 		"esac",
 	}, "\n")
 	return remoteShell(script)
-}
-
-func remoteWorkspaceCD(workspace string) string {
-	if workspace == "" {
-		return ":"
-	}
-	return "cd -- \"$SSHX_WORKSPACE\""
 }
 
 func remoteShell(script string) string {
