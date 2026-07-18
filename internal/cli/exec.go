@@ -57,6 +57,12 @@ func defaultExecOutput(ctx context.Context, name string, args []string) ([]byte,
 	return cmd.Output()
 }
 
+func defaultExecCombinedOutput(ctx context.Context, name string, args []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = os.Stdin
+	return cmd.CombinedOutput()
+}
+
 func defaultDownloadBinary(ctx context.Context, targetVersion, assetName string) (string, error) {
 	if override := os.Getenv("SSHX_REMOTE_BINARY"); override != "" {
 		if _, err := os.Stat(override); err != nil {

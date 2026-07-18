@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/xiaot623/sshx/internal/config"
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/locald"
 	"github.com/xiaot623/sshx/internal/loopback"
 	"github.com/xiaot623/sshx/internal/sshcompat"
@@ -27,7 +28,7 @@ type execCall struct {
 }
 
 func sameVersionRemoteProbe() []byte {
-	return []byte("Linux\nx86_64\n" + version.Version + "\n" + version.Version + "\n1\n")
+	return []byte("Linux\nx86_64\n" + version.Version + "\n" + version.Version + "\n" + identity.RuntimeID + "\n1\n")
 }
 
 func isolateHome(t *testing.T) {
@@ -93,6 +94,62 @@ func TestVersionFlagPrintsClientVersion(t *testing.T) {
 	}
 }
 
+func TestHelpFlagPrintsSSHXHelpThenOpenSSHHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &stdout, &stderr)
+	r.SSHPath = "/custom/ssh"
+	r.ExecCombined = func(_ context.Context, name string, args []string) ([]byte, error) {
+		if name != "/custom/ssh" {
+			t.Fatalf("executable = %q", name)
+		}
+		if len(args) != 0 {
+			t.Fatalf("ssh help args = %#v, want no destination", args)
+		}
+		if !strings.Contains(stdout.String(), "SSHX COMMANDS") || !strings.HasSuffix(stdout.String(), "OPENSSH HELP\n") {
+			t.Fatalf("sshx help was not written before OpenSSH ran:\n%s", stdout.String())
+		}
+		return []byte("usage: ssh [options] destination\n"), &exec.ExitError{}
+	}
+
+	code := r.Run(context.Background(), []string{"--help"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	help := stdout.String()
+	for _, want := range []string{
+		"sshx [--no-wrap] [ssh-options] destination",
+		"--timeout=<duration>",
+		"integrate install [-y] <vscode|cursor>",
+		"local <command>",
+		"SSHX_CONFIG=<path>",
+		"COMMANDBRIDGE=0|1",
+		"SSHX_REMOTE_BINARY=<path>",
+		"RUNTIME ENVIRONMENT (SET BY SSHX)",
+		"SSHX_WORKSPACE",
+		"OPENSSH HELP\nusage: ssh [options] destination",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help does not contain %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestHelpFlagReportsSSHLaunchFailure(t *testing.T) {
+	var stderr bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	r.ExecCombined = func(context.Context, string, []string) ([]byte, error) {
+		return nil, errors.New("ssh is missing")
+	}
+
+	if code := r.Run(context.Background(), []string{"--help"}); code != 1 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if !strings.Contains(stderr.String(), "exec ssh help: ssh is missing") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestRecordVersionStateRotatesCurrentToLast(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "version-state.json")
 	if err := recordVersionState(path, "0.0.1-rc.1"); err != nil {
@@ -111,28 +168,18 @@ func TestRecordVersionStateRotatesCurrentToLast(t *testing.T) {
 	}
 }
 
-func TestRemoteIDForTargetIsStablePerAlias(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "remote-hosts.json")
-	debian1, err := remoteIDForTarget(path, "debian")
-	if err != nil {
-		t.Fatal(err)
-	}
-	debian2, err := remoteIDForTarget(path, "debian")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ubuntu, err := remoteIDForTarget(path, "ubuntu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if debian1 == "" || debian1 != debian2 {
-		t.Fatalf("debian ids = %q %q", debian1, debian2)
-	}
-	if ubuntu == "" || ubuntu == debian1 {
-		t.Fatalf("ubuntu id = %q, debian id = %q", ubuntu, debian1)
-	}
-	if got := remoteServerHome(debian1); got != "$HOME/.sshx_server/"+debian1 {
+func TestRemoteLayoutUsesTargetAndRuntime(t *testing.T) {
+	if got := remoteServerHome("target-id"); got != "$HOME/.sshx_server/runtimes/"+identity.RuntimeHomeID("target-id") {
 		t.Fatalf("remote home = %q", got)
+	}
+}
+
+func TestRemoteRuntimeSocketPathFitsLinuxLimit(t *testing.T) {
+	// Linux sockaddr_un.sun_path is 108 bytes including the trailing NUL.
+	// Reserve enough room for a reasonably long expanded remote home path.
+	path := "/home/a-reasonably-long-user-name" + strings.TrimPrefix(remoteServerHome("target-id"), "$HOME") + "/sock.fs"
+	if len(path) >= 108 {
+		t.Fatalf("remote fs socket path is %d bytes: %q", len(path), path)
 	}
 }
 
@@ -272,7 +319,7 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\naarch64\n1.2.3-rc.0\n1.2.3-rc.0\n1\n"), nil
+		return []byte("Linux\naarch64\n1.2.3-rc.0\n1.2.3-rc.0\n\n1\n"), nil
 	}
 	r.DownloadBinary = func(_ context.Context, targetVersion, assetName string) (string, error) {
 		downloadedVersion = targetVersion
@@ -309,12 +356,12 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 		t.Fatalf("stop args = %#v", execCalls[0].args)
 	}
 	if !strings.Contains(strings.Join(execCalls[1].args, " "), "SSHX_SERVER_HOME") ||
-		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/client-remote") {
+		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/runtimes/"+identity.RuntimeHomeID("client-remote")) {
 		t.Fatalf("start args = %#v", execCalls[1].args)
 	}
 }
 
-func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
+func TestEnsureRemoteServerKeepsCompatibleRuntimeAcrossAppVersions(t *testing.T) {
 	old := version.Version
 	version.Version = "1.2.3"
 	t.Cleanup(func() { version.Version = old })
@@ -322,7 +369,7 @@ func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\nx86_64\n1.2.3\n\n1\n"), nil
+		return []byte("Linux\nx86_64\n1.2.3\n\n" + identity.RuntimeID + "\n1\n"), nil
 	}
 	r.DownloadBinary = func(context.Context, string, string) (string, error) {
 		t.Fatal("binary should not be downloaded when installed binary already matches")
@@ -337,7 +384,7 @@ func TestEnsureRemoteServerRestartsWhenRunningVersionIsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(execCalls) != 3 {
+	if len(execCalls) != 0 {
 		t.Fatalf("exec calls = %#v", execCalls)
 	}
 }
@@ -346,6 +393,29 @@ func TestStopServerScriptHasValidShellSyntax(t *testing.T) {
 	cmd := exec.Command("sh", "-n", "-c", stopServerScript(remoteServerHome("client-remote")))
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("shell syntax: %v: %s", err, output)
+	}
+}
+
+func TestContextLauncherInstallHasValidShellSyntax(t *testing.T) {
+	var captured []string
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	r.Exec = func(_ context.Context, _ string, args []string) error {
+		captured = append([]string(nil), args...)
+		return nil
+	}
+	connection := identity.Connection{TargetID: "target", ContextID: "context"}
+	if err := r.ensureRemoteContextLauncher(context.Background(), []string{"remote"}, connection, remoteServerHome("target"), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) == 0 {
+		t.Fatal("launcher command was not executed")
+	}
+	remoteCommand := captured[len(captured)-1]
+	if output, err := exec.Command("sh", "-n", "-c", remoteCommand).CombinedOutput(); err != nil {
+		t.Fatalf("launcher shell syntax: %v: %s\n%s", err, output, remoteCommand)
+	}
+	if !strings.Contains(remoteCommand, "contexts/context") || !strings.Contains(remoteCommand, identity.RuntimeID+".json") || !strings.Contains(remoteCommand, `remoteFs`) {
+		t.Fatalf("launcher command = %q", remoteCommand)
 	}
 }
 

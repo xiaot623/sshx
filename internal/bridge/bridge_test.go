@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/processlock"
 	"github.com/xiaot623/sshx/internal/protocol"
 )
@@ -34,7 +35,7 @@ func TestServerDoesNotCleanMountsBeforeAcquiringSocketLock(t *testing.T) {
 	}
 	defer lock.Release()
 
-	err = (&Server{SocketPath: socket, MountRoot: mountRoot}).Serve(context.Background())
+	err = (&Server{SocketPath: socket}).Serve(context.Background())
 	if err == nil {
 		t.Fatal("duplicate server unexpectedly acquired the socket lock")
 	}
@@ -61,6 +62,26 @@ func TestExecuteLocalPropagatesBatchStdinOutputStderrAndExitCode(t *testing.T) {
 	stderr, _ := base64.StdEncoding.DecodeString(resp.Stderr)
 	if string(stdout) != "input" || string(stderr) != "err" {
 		t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestExecuteLocalWithoutRemoteFSUsesLocalHomeAndReportsRemoteCwd(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	resp := ExecuteLocal(context.Background(), protocol.Frame{
+		Type: protocol.TypeCommandExec,
+		ID:   "req-home",
+		Argv: []string{"sh", "-c", "printf '%s\\n%s\\n%s' \"$PWD\" \"$SSHX_REMOTE_CWD\" \"$SSHX_REMOTE_FS\""},
+		Env:  map[string]string{"SSHX_REMOTE_CWD": "/remote/project", "SSHX_REMOTE_FS": "0"},
+	})
+	stdout, _ := base64.StdEncoding.DecodeString(resp.Stdout)
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := resolvedHome + "\n/remote/project\n0"
+	if string(stdout) != want {
+		t.Fatalf("stdout = %q, want %q; error=%q", stdout, want, resp.Error)
 	}
 }
 
@@ -332,7 +353,7 @@ func TestServerExpiresClientWithoutHeartbeat(t *testing.T) {
 	defer conn.Close()
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "test-version", SessionID: "lease-test"}); err != nil {
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, RuntimeID: identity.RuntimeID, AppVersion: "test-version", TargetID: "target", ContextID: "context", SessionID: "lease-test"}); err != nil {
 		t.Fatal(err)
 	}
 	if frame, err := dec.Decode(); err != nil || frame.Type != protocol.TypeCapabilities {
@@ -348,31 +369,70 @@ func TestServerExpiresClientWithoutHeartbeat(t *testing.T) {
 	}
 }
 
-func TestServerExitsOnVersionChange(t *testing.T) {
+func TestServerAllowsDifferentAppVersionsInOneRuntime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	socket := shortSocketPath(t)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- (&Server{SocketPath: socket, Version: "1.0.0"}).Serve(context.Background())
+		errCh <- (&Server{SocketPath: socket, Version: "1.0.0"}).Serve(ctx)
 	}()
 	waitForSocket(t, socket)
 	conn := mustDialUnix(t, socket)
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, AppVersion: "2.0.0", SessionID: "version-test"}); err != nil {
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, RuntimeID: identity.RuntimeID, AppVersion: "2.0.0", TargetID: "target", ContextID: "context", SessionID: "version-test"}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := dec.Decode()
-	if err != nil || frame.Type != protocol.TypeServerDrain {
-		t.Fatalf("drain frame = %#v, %v", frame, err)
+	if err != nil || frame.Type != protocol.TypeCapabilities {
+		t.Fatalf("capabilities frame = %#v, %v", frame, err)
 	}
 	_ = conn.Close()
+	cancel()
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("server did not exit after version change")
+		t.Fatal("server did not exit after cancellation")
+	}
+}
+
+func TestIncompatibleRuntimeDoesNotDrainCompatibleServer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, Version: "1.0.0"}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+	ready := make(chan error, 1)
+	go func() {
+		_ = RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{Ready: ready, AppVersion: "1.0.1"})
+	}()
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	bad := mustDialUnix(t, socket)
+	enc := protocol.NewEncoder(bad)
+	dec := protocol.NewDecoder(bad)
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleClient, ProtocolVersion: protocol.Version, RuntimeID: "other-runtime", AppVersion: "9.0.0", TargetID: "target", ContextID: "context", SessionID: "bad-session"}); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := dec.Decode(); err != nil || frame.Type != protocol.TypeServerDrain {
+		t.Fatalf("incompatible response = %#v, %v", frame, err)
+	}
+	_ = bad.Close()
+	result, err := RequestCommand(ctx, socket, []string{"sh", "-c", "printf ok"}, nil, nil, "")
+	if err != nil || string(result.Stdout) != "ok" {
+		t.Fatalf("compatible runtime stopped: stdout=%q error=%v", result.Stdout, err)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
 	}
 }
 

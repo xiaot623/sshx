@@ -5,15 +5,20 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/xiaot623/sshx/internal/identity"
+	"github.com/xiaot623/sshx/internal/protocol"
 	"github.com/xiaot623/sshx/internal/version"
 )
 
 type ServerInfo struct {
-	Protocol string `json:"protocol"`
-	Address  string `json:"address"`
-	Token    string `json:"token,omitempty"`
-	Version  string `json:"version,omitempty"`
-	PID      int    `json:"pid,omitempty"`
+	Protocol    string `json:"protocol"`
+	Address     string `json:"address"`
+	Token       string `json:"token,omitempty"`
+	Version     string `json:"version,omitempty"`
+	RuntimeID   string `json:"runtimeId,omitempty"`
+	ProtocolMin int    `json:"protocolMin,omitempty"`
+	ProtocolMax int    `json:"protocolMax,omitempty"`
+	PID         int    `json:"pid,omitempty"`
 }
 
 func WriteServerInfo(path, socketPath, token, appVersion string) error {
@@ -23,7 +28,7 @@ func WriteServerInfo(path, socketPath, token, appVersion string) error {
 	if appVersion == "" {
 		appVersion = version.Version
 	}
-	b, err := json.MarshalIndent(ServerInfo{Protocol: "unix", Address: socketPath, Token: token, Version: appVersion, PID: os.Getpid()}, "", "  ")
+	b, err := json.MarshalIndent(ServerInfo{Protocol: "unix", Address: socketPath, Token: token, Version: appVersion, RuntimeID: identity.RuntimeID, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, PID: os.Getpid()}, "", "  ")
 	if err != nil {
 		return err
 	}

@@ -11,11 +11,12 @@ import (
 )
 
 type Manager struct {
-	ctx     context.Context
-	cancel  context.CancelFunc
-	sshPath string
-	sshArgs []string
-	stderr  io.Writer
+	ctx       context.Context
+	cancel    context.CancelFunc
+	sshPath   string
+	sshArgs   []string
+	transport func() (string, []string, bool)
+	stderr    io.Writer
 
 	mu       sync.Mutex
 	byRemote map[int]*Forward
@@ -38,15 +39,20 @@ type Entry struct {
 }
 
 func NewManager(ctx context.Context, sshPath string, sshArgs []string, stderr io.Writer) *Manager {
+	return NewDynamicManager(ctx, func() (string, []string, bool) {
+		return sshPath, append([]string(nil), sshArgs...), sshPath != ""
+	}, stderr)
+}
+
+func NewDynamicManager(ctx context.Context, transport func() (string, []string, bool), stderr io.Writer) *Manager {
 	managerCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		ctx:      managerCtx,
-		cancel:   cancel,
-		sshPath:  sshPath,
-		sshArgs:  append([]string(nil), sshArgs...),
-		stderr:   stderr,
-		byRemote: map[int]*Forward{},
-		active:   map[net.Conn]struct{}{},
+		ctx:       managerCtx,
+		cancel:    cancel,
+		transport: transport,
+		stderr:    stderr,
+		byRemote:  map[int]*Forward{},
+		active:    map[net.Conn]struct{}{},
 	}
 }
 
@@ -160,10 +166,14 @@ func (m *Manager) acceptLoop(f *Forward) {
 
 func (m *Manager) handleConn(conn net.Conn, remotePort int) {
 	defer conn.Close()
-	args := make([]string, 0, len(m.sshArgs)+2)
+	sshPath, sshArgs, ok := m.transport()
+	if !ok {
+		return
+	}
+	args := make([]string, 0, len(sshArgs)+2)
 	args = append(args, "-W", fmt.Sprintf("127.0.0.1:%d", remotePort))
-	args = append(args, m.sshArgs...)
-	cmd := exec.CommandContext(m.ctx, m.sshPath, args...)
+	args = append(args, sshArgs...)
+	cmd := exec.CommandContext(m.ctx, sshPath, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return

@@ -16,6 +16,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/domain"
 	"github.com/xiaot623/sshx/internal/forward"
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/loopback"
 	"github.com/xiaot623/sshx/internal/processlock"
 	"github.com/xiaot623/sshx/internal/protocol"
@@ -47,9 +48,15 @@ type Request struct {
 	DomainSuffix    string   `json:"domainSuffix,omitempty"`
 	DNSAddr         string   `json:"dnsAddr,omitempty"`
 	SessionID       string   `json:"sessionId,omitempty"`
+	LeaseID         string   `json:"leaseId,omitempty"`
+	TargetID        string   `json:"targetId,omitempty"`
+	ControlPath     string   `json:"controlPath,omitempty"`
+	RuntimeID       string   `json:"runtimeId,omitempty"`
 	AppVersion      string   `json:"appVersion,omitempty"`
 	Sequence        uint64   `json:"sequence,omitempty"`
 	ProtocolVersion int      `json:"protocolVersion,omitempty"`
+	ProtocolMin     int      `json:"protocolMin,omitempty"`
+	ProtocolMax     int      `json:"protocolMax,omitempty"`
 }
 
 type Response struct {
@@ -59,6 +66,9 @@ type Response struct {
 	Version         string      `json:"version,omitempty"`
 	Sequence        uint64      `json:"sequence,omitempty"`
 	ProtocolVersion int         `json:"protocolVersion,omitempty"`
+	ProtocolMin     int         `json:"protocolMin,omitempty"`
+	ProtocolMax     int         `json:"protocolMax,omitempty"`
+	RuntimeID       string      `json:"runtimeId,omitempty"`
 	LocalPort       int         `json:"localPort,omitempty"`
 	Domain          string      `json:"domain,omitempty"`
 	ListenIP        string      `json:"listenIp,omitempty"`
@@ -88,10 +98,13 @@ type targetRecord struct {
 }
 
 type sessionRecord struct {
-	ID        string
-	TargetKey string
-	Version   string
-	conn      net.Conn
+	ID          string
+	TargetKey   string
+	Version     string
+	SSHPath     string
+	SSHArgs     []string
+	ControlPath string
+	conn        net.Conn
 }
 
 type Server struct {
@@ -100,6 +113,7 @@ type Server struct {
 	Version        string
 	LeaseTimeout   time.Duration
 	StartupTimeout time.Duration
+	HandoffGrace   time.Duration
 
 	mu             sync.Mutex
 	forwarders     map[string]*forward.Manager
@@ -255,7 +269,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		s.handleSession(ctx, conn, dec, enc, req)
 		return
 	}
-	if (req.Type == TypeEnsureTargetPort || req.Type == TypeRemoveTargetPort) && !s.hasSession(req.SessionID) {
+	if (req.Type == TypeEnsureTargetPort || req.Type == TypeRemoveTargetPort) && !s.hasSession(requestLeaseID(req)) {
 		_ = enc.Encode(Response{OK: false, Error: "active session lease is required", Version: s.Version, ProtocolVersion: protocol.Version})
 		return
 	}
@@ -279,7 +293,7 @@ func (s *Server) hasSession(sessionID string) bool {
 func (s *Server) handle(ctx context.Context, req Request) Response {
 	switch req.Type {
 	case TypePing:
-		return Response{OK: true, Version: s.Version, ProtocolVersion: protocol.Version}
+		return protocolResponse(s.Version, true)
 	case TypeEnsureTargetPort:
 		return s.ensureTargetPort(ctx, req)
 	case TypeRemoveTargetPort:
@@ -294,13 +308,15 @@ func (s *Server) handle(ctx context.Context, req Request) Response {
 }
 
 func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Decoder, enc *json.Encoder, req Request) {
-	if req.SessionID == "" || req.AppVersion == "" {
-		_ = enc.Encode(Response{OK: false, Error: "sessionId and appVersion are required", Version: s.Version, ProtocolVersion: protocol.Version})
+	leaseID := requestLeaseID(req)
+	if leaseID == "" {
+		_ = enc.Encode(Response{OK: false, Error: "leaseId is required", Version: s.Version, ProtocolVersion: protocol.Version})
 		return
 	}
-	if req.ProtocolVersion != protocol.Version || req.AppVersion != s.Version {
-		_ = enc.Encode(Response{OK: false, Error: "local daemon version mismatch", Version: s.Version, ProtocolVersion: protocol.Version})
-		s.initiateShutdown()
+	if !requestCompatible(req) {
+		resp := protocolResponse(s.Version, false)
+		resp.Error = "local daemon runtime protocol is incompatible"
+		_ = enc.Encode(resp)
 		return
 	}
 	s.mu.Lock()
@@ -315,25 +331,27 @@ func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Dec
 		_ = enc.Encode(Response{OK: false, Error: err.Error(), Version: s.Version, ProtocolVersion: protocol.Version})
 		return
 	}
-	key := requestKey(req.SSHPath, defaultSSHArgs(req))
-	session := &sessionRecord{ID: req.SessionID, TargetKey: key, Version: req.AppVersion, conn: conn}
+	key := targetKey(req)
+	session := &sessionRecord{ID: leaseID, TargetKey: key, Version: req.AppVersion, SSHPath: req.SSHPath, SSHArgs: append([]string(nil), defaultSSHArgs(req)...), ControlPath: req.ControlPath, conn: conn}
 	s.mu.Lock()
 	if s.draining {
 		s.mu.Unlock()
 		_ = enc.Encode(Response{OK: false, Error: "local daemon is draining", Version: s.Version, ProtocolVersion: protocol.Version})
 		return
 	}
-	if _, exists := s.sessions[req.SessionID]; exists {
+	if _, exists := s.sessions[leaseID]; exists {
 		s.mu.Unlock()
 		_ = enc.Encode(Response{OK: false, Error: "session already exists", Version: s.Version, ProtocolVersion: protocol.Version})
 		return
 	}
-	s.sessions[req.SessionID] = session
+	s.sessions[leaseID] = session
 	rec.Sessions++
 	s.mu.Unlock()
-	defer s.releaseSession(req.SessionID)
+	defer s.releaseSession(leaseID)
 
-	if err := enc.Encode(Response{OK: true, Type: TypeOpenSession, Version: s.Version, ProtocolVersion: protocol.Version, Domain: rec.Domain, ListenIP: rec.ListenIP}); err != nil {
+	opened := protocolResponse(s.Version, true)
+	opened.Type, opened.Domain, opened.ListenIP = TypeOpenSession, rec.Domain, rec.ListenIP
+	if err := enc.Encode(opened); err != nil {
 		return
 	}
 	for {
@@ -342,22 +360,86 @@ func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Dec
 		if err := dec.Decode(&heartbeat); err != nil {
 			return
 		}
-		if heartbeat.Type != TypeHeartbeat || heartbeat.SessionID != req.SessionID {
+		if heartbeat.Type != TypeHeartbeat || requestLeaseID(heartbeat) != leaseID {
 			_ = enc.Encode(Response{OK: false, Error: "invalid session heartbeat", Version: s.Version, ProtocolVersion: protocol.Version})
 			return
 		}
-		if heartbeat.ProtocolVersion != protocol.Version || heartbeat.AppVersion != s.Version {
-			_ = enc.Encode(Response{OK: false, Error: "local daemon version mismatch", Version: s.Version, ProtocolVersion: protocol.Version, Sequence: heartbeat.Sequence})
-			s.initiateShutdown()
+		if !requestCompatible(heartbeat) {
+			resp := protocolResponse(s.Version, false)
+			resp.Error, resp.Sequence = "local daemon runtime protocol is incompatible", heartbeat.Sequence
+			_ = enc.Encode(resp)
 			return
 		}
-		if err := enc.Encode(Response{OK: true, Type: TypeHeartbeatAck, Version: s.Version, ProtocolVersion: protocol.Version, Sequence: heartbeat.Sequence}); err != nil {
+		resp := protocolResponse(s.Version, true)
+		resp.Type, resp.Sequence = TypeHeartbeatAck, heartbeat.Sequence
+		if err := enc.Encode(resp); err != nil {
 			return
 		}
 	}
 }
 
 func (s *Server) releaseSession(sessionID string) {
+	if s.HandoffGrace > 0 {
+		s.releaseSessionWithGrace(sessionID)
+		return
+	}
+	s.releaseSessionNow(sessionID)
+}
+
+func (s *Server) releaseSessionWithGrace(sessionID string) {
+	s.mu.Lock()
+	session := s.sessions[sessionID]
+	if session != nil {
+		// Handoff grace preserves the target's domain and forwarding listeners,
+		// but a disconnected session's SSH transport is no longer active.
+		delete(s.sessions, sessionID)
+		if rec := s.targets[session.TargetKey]; rec != nil && rec.Sessions > 0 {
+			rec.Sessions--
+		}
+	}
+	targetKey := ""
+	if session != nil {
+		targetKey = session.TargetKey
+	}
+	s.mu.Unlock()
+	go func() {
+		timer := time.NewTimer(s.HandoffGrace)
+		defer timer.Stop()
+		<-timer.C
+		s.cleanupIdleTarget(targetKey)
+	}()
+}
+
+func (s *Server) cleanupIdleTarget(key string) {
+	var fwd *forward.Manager
+	var domainName string
+	var domainManager *domain.Manager
+	var shutdown bool
+	s.mu.Lock()
+	if rec := s.targets[key]; rec != nil && rec.Sessions == 0 {
+		fwd = s.forwarders[key]
+		delete(s.forwarders, key)
+		delete(s.forwardRecords, key)
+		domainName, domainManager = rec.Domain, rec.domainManager
+		delete(s.targets, key)
+	}
+	shutdown = len(s.sessions) == 0 && len(s.targets) == 0
+	if shutdown {
+		s.draining = true
+	}
+	s.mu.Unlock()
+	if fwd != nil {
+		fwd.Stop()
+	}
+	if domainManager != nil && domainName != "" {
+		domainManager.Unregister(domainName)
+	}
+	if shutdown {
+		s.initiateShutdown()
+	}
+}
+
+func (s *Server) releaseSessionNow(sessionID string) {
 	var fwd *forward.Manager
 	var domainName string
 	var domainManager *domain.Manager
@@ -459,13 +541,12 @@ func (s *Server) ensureTargetPort(ctx context.Context, req Request) Response {
 	if err != nil {
 		return Response{OK: false, Error: err.Error()}
 	}
-	sshArgs := defaultSSHArgs(req)
-	fwd := s.forwarder(ctx, req.SSHPath, sshArgs)
+	fwd := s.forwarder(ctx, targetKey(req))
 	f, err := fwd.Ensure(req.RemotePort, rec.ListenIP)
 	if err != nil {
 		return Response{OK: false, Error: err.Error()}
 	}
-	s.rememberForward(req.SSHPath, sshArgs, req.RemotePort, rec.Target, rec.Domain, rec.ListenIP)
+	s.rememberForward(targetKey(req), req.RemotePort, rec.Target, rec.Domain, rec.ListenIP)
 	return Response{OK: true, LocalPort: f.LocalPort, Domain: rec.Domain, ListenIP: rec.ListenIP}
 }
 
@@ -473,7 +554,7 @@ func (s *Server) removeTargetPort(req Request) Response {
 	if req.Target == "" || req.SSHPath == "" || req.RemotePort <= 0 {
 		return Response{OK: false, Error: "sshPath, target and remotePort are required"}
 	}
-	key := requestKey(req.SSHPath, defaultSSHArgs(req))
+	key := targetKey(req)
 	var fwd *forward.Manager
 	s.mu.Lock()
 	fwd = s.forwarders[key]
@@ -490,8 +571,7 @@ func (s *Server) removeTargetPort(req Request) Response {
 	return Response{OK: true}
 }
 
-func (s *Server) rememberForward(sshPath string, sshArgs []string, remotePort int, target string, domain string, listenIP string) {
-	key := requestKey(sshPath, sshArgs)
+func (s *Server) rememberForward(key string, remotePort int, target string, domain string, listenIP string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.forwardRecords == nil {
@@ -507,8 +587,7 @@ func (s *Server) ensureTarget(ctx context.Context, req Request) (*targetRecord, 
 	if req.Target == "" || req.SSHPath == "" || req.DomainSuffix == "" || req.DNSAddr == "" {
 		return nil, errors.New("sshPath, target, domainSuffix and dnsAddr are required")
 	}
-	sshArgs := defaultSSHArgs(req)
-	key := requestKey(req.SSHPath, sshArgs)
+	key := targetKey(req)
 	s.mu.Lock()
 	if rec := s.targets[key]; rec != nil {
 		s.mu.Unlock()
@@ -564,8 +643,7 @@ func (s *Server) allocateLoopbackIPLocked() (string, error) {
 	return "", fmt.Errorf("target loopback address pool exhausted (%d addresses in use)", loopback.Size)
 }
 
-func (s *Server) forwarder(ctx context.Context, sshPath string, sshArgs []string) *forward.Manager {
-	key := requestKey(sshPath, sshArgs)
+func (s *Server) forwarder(ctx context.Context, key string) *forward.Manager {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.forwarders == nil {
@@ -574,7 +652,21 @@ func (s *Server) forwarder(ctx context.Context, sshPath string, sshArgs []string
 	if f := s.forwarders[key]; f != nil {
 		return f
 	}
-	f := forward.NewManager(ctx, sshPath, sshArgs, s.Stderr)
+	f := forward.NewDynamicManager(ctx, func() (string, []string, bool) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, session := range s.sessions {
+			if session.TargetKey == key {
+				if session.ControlPath != "" {
+					if info, err := os.Stat(session.ControlPath); err != nil || info.Mode()&os.ModeSocket == 0 {
+						continue
+					}
+				}
+				return session.SSHPath, append([]string(nil), session.SSHArgs...), true
+			}
+		}
+		return "", nil, false
+	}, s.Stderr)
 	s.forwarders[key] = f
 	return f
 }
@@ -588,6 +680,29 @@ func defaultSSHArgs(req Request) []string {
 
 func requestKey(sshPath string, sshArgs []string) string {
 	return sshPath + "\x00" + strings.Join(sshArgs, "\x00")
+}
+
+func targetKey(req Request) string {
+	if req.TargetID != "" {
+		return req.TargetID
+	}
+	return requestKey(req.SSHPath, defaultSSHArgs(req))
+}
+
+func requestLeaseID(req Request) string {
+	if req.LeaseID != "" {
+		return req.LeaseID
+	}
+	return req.SessionID
+}
+
+func requestCompatible(req Request) bool {
+	frame := protocol.Frame{ProtocolVersion: req.ProtocolVersion, ProtocolMin: req.ProtocolMin, ProtocolMax: req.ProtocolMax}
+	return protocol.FrameCompatible(frame) && req.RuntimeID == identity.LocalRuntimeID
+}
+
+func protocolResponse(version string, ok bool) Response {
+	return Response{OK: ok, Version: version, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.LocalRuntimeID}
 }
 
 func (s *Server) listPorts() Response {

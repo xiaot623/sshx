@@ -86,17 +86,6 @@ func defaultVersionStatePath() string {
 	return filepath.Join(home, ".sshx", "version-state.json")
 }
 
-func defaultRemoteHostsPath() string {
-	if override := os.Getenv("SSHX_REMOTE_HOSTS"); override != "" {
-		return override
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return filepath.Join(os.TempDir(), "sshx-remote-hosts.json")
-	}
-	return filepath.Join(home, ".sshx", "remote-hosts.json")
-}
-
 func defaultServerInfoPath() string {
 	if serverHome := os.Getenv("SSHX_SERVER_HOME"); serverHome != "" {
 		return filepath.Join(serverHome, "server-info")

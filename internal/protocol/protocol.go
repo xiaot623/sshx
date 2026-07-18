@@ -6,7 +6,11 @@ import (
 	"io"
 )
 
-const Version = 4
+const (
+	Version    = 1
+	MinVersion = 1
+	MaxVersion = 1
+)
 
 const (
 	TypeHello         = "hello"
@@ -32,8 +36,14 @@ type Frame struct {
 	Type            string            `json:"type"`
 	ID              string            `json:"id,omitempty"`
 	ProtocolVersion int               `json:"protocolVersion,omitempty"`
+	ProtocolMin     int               `json:"protocolMin,omitempty"`
+	ProtocolMax     int               `json:"protocolMax,omitempty"`
+	RuntimeID       string            `json:"runtimeId,omitempty"`
 	AppVersion      string            `json:"appVersion,omitempty"`
+	TargetID        string            `json:"targetId,omitempty"`
+	ContextID       string            `json:"contextId,omitempty"`
 	SessionID       string            `json:"sessionId,omitempty"`
+	RequestID       string            `json:"requestId,omitempty"`
 	Sequence        uint64            `json:"sequence,omitempty"`
 	Role            string            `json:"role,omitempty"`
 	Token           string            `json:"token,omitempty"`
@@ -53,6 +63,30 @@ type Frame struct {
 	Error           string            `json:"error,omitempty"`
 	Port            int               `json:"port,omitempty"`
 	Host            string            `json:"host,omitempty"`
+}
+
+func Compatible(minVersion, maxVersion int) bool {
+	if minVersion == 0 {
+		minVersion = Version
+	}
+	if maxVersion == 0 {
+		maxVersion = Version
+	}
+	return minVersion <= MaxVersion && maxVersion >= MinVersion
+}
+
+func FrameCompatible(frame Frame) bool {
+	if frame.ProtocolMin == 0 && frame.ProtocolMax == 0 && frame.ProtocolVersion == 0 {
+		return false
+	}
+	minVersion, maxVersion := frame.ProtocolMin, frame.ProtocolMax
+	if minVersion == 0 {
+		minVersion = frame.ProtocolVersion
+	}
+	if maxVersion == 0 {
+		maxVersion = frame.ProtocolVersion
+	}
+	return Compatible(minVersion, maxVersion)
 }
 
 type Encoder struct {

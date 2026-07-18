@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760" role="img" aria-labelledby="title desc">
   <title id="title">sshx system architecture</title>
-  <desc id="desc">Architecture of the sshx client, local daemon, SSH or Docker transport, shared remote server, automatic forwarding, command bridge, and optional RemoteFS channel.</desc>
+  <desc id="desc">Architecture of the sshx client and VS Code or Cursor shim, connection-scoped local daemon, OpenSSH ControlMaster transport, multiplexed sidecar, command bridge, and remote-to-local RemoteFS.</desc>
   <style>
     text { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
     .title { fill: #111827; font-size: 24px; font-weight: 700; }
@@ -36,7 +36,7 @@
 
   <rect width="1200" height="760" fill="#ffffff"/>
   <text x="600" y="36" text-anchor="middle" class="title">sshx System Architecture</text>
-  <text x="600" y="58" text-anchor="middle" class="subtitle">Transparent SSH sessions with shared command, forwarding, and filesystem services</text>
+  <text x="600" y="58" text-anchor="middle" class="subtitle">Transparent OpenSSH sessions with connection-scoped command, forwarding, and remote filesystem services</text>
 
   <rect x="40" y="90" width="520" height="580" rx="12" fill="#eff6ff" fill-opacity="0.55" stroke="#93c5fd" stroke-width="1.5" stroke-dasharray="7,5"/>
   <text x="60" y="116" class="zone-label">CLIENT MACHINE</text>
@@ -88,10 +88,10 @@
   <rect x="548" y="376" width="72" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
   <text x="584" y="389" text-anchor="middle" class="flow-label">port events</text>
 
-  <!-- Optional RemoteFS data plane -->
-  <path d="M 430 590 L 430 652 L 1030 652 L 1030 590" fill="none" stroke="#059669" stroke-width="1.8" stroke-dasharray="7,4" marker-start="url(#arrow-green-start)" marker-end="url(#arrow-green)"/>
-  <rect x="604" y="639" width="252" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
-  <text x="730" y="652" text-anchor="middle" class="flow-label">full-duplex FS protocol over separate channel</text>
+  <!-- Optional remote-to-local RemoteFS data plane -->
+  <path d="M 430 590 L 430 652 L 1030 652 L 1030 590" fill="none" stroke="#059669" stroke-width="1.8" stroke-dasharray="7,4" marker-start="url(#arrow-green-start)"/>
+  <rect x="570" y="639" width="320" height="18" rx="4" fill="#ffffff" opacity="0.96"/>
+  <text x="730" y="652" text-anchor="middle" class="flow-label">remote export → local FUSE · multiplexed sidecar stream</text>
 
   <!-- Client nodes -->
   <g filter="url(#shadow)">
@@ -101,8 +101,8 @@
     <circle cx="94" cy="175" r="3.5" fill="#ef4444" opacity="0.8"/>
     <circle cx="105" cy="175" r="3.5" fill="#f59e0b" opacity="0.8"/>
     <circle cx="116" cy="175" r="3.5" fill="#10b981" opacity="0.8"/>
-    <text x="170" y="207" text-anchor="middle" class="node-title">Terminal Sessions</text>
-    <text x="170" y="226" text-anchor="middle" class="node-subtitle">one or many clients</text>
+    <text x="170" y="207" text-anchor="middle" class="node-title">VS Code · Cursor · CLI</text>
+    <text x="170" y="226" text-anchor="middle" class="node-subtitle">OpenSSH-compatible shim</text>
   </g>
 
   <g filter="url(#shadow)">
@@ -129,23 +129,23 @@
     <text x="372" y="337" text-anchor="middle" fill="#ffffff" font-size="14">&#9881;</text>
     <text x="450" y="337" text-anchor="middle" class="node-title">Local Daemon</text>
     <text x="430" y="364" text-anchor="middle" class="node-subtitle">DNS responder · loopback IPs</text>
-    <text x="430" y="383" text-anchor="middle" class="node-subtitle">shared TCP proxy · leases</text>
+    <text x="430" y="383" text-anchor="middle" class="node-subtitle">on-demand TCP proxy · target leases</text>
   </g>
 
   <g>
     <rect x="80" y="500" width="180" height="90" rx="8" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5"/>
     <path d="M 105 535 H 132 M 124 527 L 132 535 L 124 543" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     <text x="177" y="532" text-anchor="middle" class="node-title">Transport</text>
-    <text x="170" y="554" text-anchor="middle" class="node-subtitle">OpenSSH</text>
-    <text x="170" y="573" text-anchor="middle" class="node-subtitle">or Docker exec fallback</text>
+    <text x="170" y="554" text-anchor="middle" class="node-subtitle">OpenSSH ControlMaster</text>
+    <text x="170" y="573" text-anchor="middle" class="node-subtitle">main + one sidecar channel</text>
   </g>
 
   <g>
     <rect x="340" y="500" width="180" height="90" rx="8" fill="#f0fdf4" stroke="#6ee7b7" stroke-width="1.5" stroke-dasharray="6,3"/>
     <path d="M 365 521 H 395 L 405 531 V 563 H 365 Z M 395 521 V 531 H 405" fill="#dcfce7" stroke="#059669" stroke-width="1.3"/>
-    <text x="456" y="532" text-anchor="middle" class="node-title">Local Files</text>
-    <text x="430" y="554" text-anchor="middle" class="node-subtitle">root backend + FUSE</text>
-    <text x="430" y="573" text-anchor="middle" class="node-subtitle">optional RemoteFS peer</text>
+    <text x="456" y="532" text-anchor="middle" class="node-title">Remote Mount</text>
+    <text x="430" y="554" text-anchor="middle" class="node-subtitle">local FUSE view</text>
+    <text x="430" y="573" text-anchor="middle" class="node-subtitle">lazy · session scoped</text>
   </g>
 
   <!-- Remote nodes -->
@@ -169,7 +169,7 @@
     <rect x="680" y="300" width="440" height="160" rx="10" fill="#fff7ed" stroke="#fb923c" stroke-width="2"/>
     <rect x="684" y="304" width="432" height="152" rx="8" fill="none" stroke="#fed7aa" stroke-width="1"/>
     <text x="700" y="327" class="node-title">Shared sshx Server</text>
-    <text x="1100" y="327" text-anchor="end" class="node-subtitle">one daemon per client target alias</text>
+    <text x="1100" y="327" text-anchor="end" class="node-subtitle">isolated by TargetID and RuntimeID</text>
 
     <rect x="700" y="345" width="120" height="76" rx="7" fill="#ffffff" stroke="#fdba74"/>
     <circle cx="760" cy="365" r="10" fill="#ffedd5"/>
@@ -189,7 +189,7 @@
     <text x="1040" y="391" text-anchor="middle" class="mini-title">Lifecycle</text>
     <text x="1040" y="407" text-anchor="middle" class="mini-subtitle">auth · leases · drain</text>
 
-    <text x="900" y="444" text-anchor="middle" class="node-subtitle">Unix sockets: control + dedicated RemoteFS data plane</text>
+    <text x="900" y="444" text-anchor="middle" class="node-subtitle">one sidecar channel: control + RemoteFS logical streams</text>
   </g>
 
   <g>
@@ -205,9 +205,9 @@
     <ellipse cx="974" cy="526" rx="17" ry="6" fill="#dcfce7" stroke="#059669" stroke-width="1.2"/>
     <path d="M 957 526 V 551 M 991 526 V 551" stroke="#059669" stroke-width="1.2"/>
     <ellipse cx="974" cy="551" rx="17" ry="6" fill="#bbf7d0" stroke="#059669" stroke-width="1.2"/>
-    <text x="1055" y="532" text-anchor="middle" class="node-title">Remote Mount</text>
-    <text x="1055" y="554" text-anchor="middle" class="node-subtitle">go-fuse adapter</text>
-    <text x="1055" y="573" text-anchor="middle" class="node-subtitle">optional workspace view</text>
+    <text x="1055" y="532" text-anchor="middle" class="node-title">Remote Files</text>
+    <text x="1055" y="554" text-anchor="middle" class="node-subtitle">HOME / cwd root export</text>
+    <text x="1055" y="573" text-anchor="middle" class="node-subtitle">never mounts local files</text>
   </g>
 
   <!-- Legend -->
@@ -219,6 +219,6 @@
     <line x1="405" y1="8" x2="437" y2="8" stroke="#9333ea" stroke-width="1.8" stroke-dasharray="5,3" marker-end="url(#arrow-purple)"/>
     <text x="447" y="12" class="legend">port discovery</text>
     <line x1="590" y1="8" x2="622" y2="8" stroke="#059669" stroke-width="1.8" stroke-dasharray="7,4" marker-end="url(#arrow-green)"/>
-    <text x="632" y="12" class="legend">optional RemoteFS</text>
+    <text x="632" y="12" class="legend">remote-to-local RemoteFS</text>
   </g>
 </svg>

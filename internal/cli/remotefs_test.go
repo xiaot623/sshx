@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/remotefs"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 )
@@ -33,18 +35,81 @@ func TestLocalReverseMountsRootDetectsNestedCwd(t *testing.T) {
 	}
 }
 
-func TestRemoteFSSessionCommandUsesMountedWorkspace(t *testing.T) {
+func TestRemoteFSMountStartupReclaimsOnlyStaleSessions(t *testing.T) {
+	runtimeRoot := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	root := localReverseMountsRoot()
+	staleExport := filepath.Join(root, "stale-session", "export-1")
+	if err := os.MkdirAll(filepath.Join(staleExport, "workspace"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleExport, ".mount-path"), []byte("workspace\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activeRoot := filepath.Join(root, "active-session")
+	if err := os.MkdirAll(activeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	activeLease, err := os.OpenFile(filepath.Join(activeRoot, ".lease"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer activeLease.Close()
+	if err := syscall.Flock(int(activeLease.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(activeLease.Fd()), syscall.LOCK_UN)
+
+	manager := newRemoteMountManager("current-session", false)
+	defer manager.Close()
+	if manager.initErr != nil {
+		t.Fatal(manager.initErr)
+	}
+	if _, err := os.Stat(filepath.Join(root, "stale-session")); !os.IsNotExist(err) {
+		t.Fatalf("stale session was not reclaimed: %v", err)
+	}
+	if _, err := os.Stat(activeRoot); err != nil {
+		t.Fatalf("active session was changed: %v", err)
+	}
+}
+
+func TestIntegrationRemoteFSSessionDoesNotExportLocalWorkspaceToRemote(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"remote", "sh", "-c", "cat note.txt"})
-	session := &BridgeSession{SessionID: "session-1", MountRoot: "/tmp/mounts/session-1/Users/xiaot", Workspace: "/tmp/mounts/session-1/Users/xiaot/workspace/sshx", ReadOnly: true}
+	session := &BridgeSession{SessionID: "session-1", ContextID: "context-1", RemoteFS: true, ReadOnly: true}
 	args := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/id", session)
 	command := args[len(args)-1]
 	for _, want := range []string{
 		"SSHX_SESSION_ID",
-		"SSHX_WORKSPACE",
-		"SSHX_MOUNT_ROOT",
+		"SSHX_CONTEXT_ID",
 		"SSHX_REMOTE_FS=1",
 		"FS_READ_ONLY=1",
-		`cd -- "$SSHX_WORKSPACE"`,
+		"cat note.txt",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("remote command %q does not contain %q", command, want)
+		}
+	}
+	if strings.Contains(command, "SSHX_WORKSPACE") || strings.Contains(command, "SSHX_MOUNT_ROOT") {
+		t.Fatalf("remote command still exports a local workspace: %q", command)
+	}
+}
+
+func TestDirectRemoteFSSessionExportsLocalWorkspaceToRemote(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"remote", "sh", "-c", "cat note.txt"})
+	session := &BridgeSession{
+		SessionID: "session-1",
+		ContextID: "context-1",
+		RemoteFS:  true,
+		MountRoot: "/tmp/mounts/session-1/Users/xiaot",
+		Workspace: "/tmp/mounts/session-1/Users/xiaot/workspace/sshx",
+		ReadOnly:  true,
+	}
+	args := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/id", session)
+	command := args[len(args)-1]
+	for _, want := range []string{
+		"SSHX_MOUNT_ROOT",
+		"SSHX_WORKSPACE",
+		"cd -- \"$SSHX_WORKSPACE\"",
 		"cat note.txt",
 	} {
 		if !strings.Contains(command, want) {
@@ -55,14 +120,14 @@ func TestRemoteFSSessionCommandUsesMountedWorkspace(t *testing.T) {
 
 func TestRemoteFSInteractiveShellKeepsRemoteHome(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"remote"})
-	session := &BridgeSession{SessionID: "session-1", MountRoot: "/tmp/mounts/session-1/Users/xiaot", Workspace: "/tmp/mounts/session-1/Users/xiaot/workspace/sshx"}
+	session := &BridgeSession{SessionID: "session-1", ContextID: "context-1", RemoteFS: true}
 	args := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/id", session)
 	command := args[len(args)-1]
-	if !strings.Contains(command, "SSHX_WORKSPACE") {
+	if !strings.Contains(command, "SSHX_REMOTE_FS=1") {
 		t.Fatalf("interactive command = %q", command)
 	}
-	if strings.Contains(command, `cd -- "$SSHX_WORKSPACE"`) {
-		t.Fatalf("interactive shell changed directory: %q", command)
+	if strings.Contains(command, "SSHX_WORKSPACE") {
+		t.Fatalf("interactive shell received a local workspace: %q", command)
 	}
 }
 
@@ -110,14 +175,12 @@ func TestRemoteFSStateFailureNeverFallsBackToPlainSSH(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("features:\n  remoteFs: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	var executed bool
 	runner := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	runner.ConfigPath = configPath
-	runner.RemoteHostsPath = filepath.Join(blockedParent, "hosts.json")
+	runner.ResolveIdentity = func(context.Context, string, []string, string) (identity.Connection, error) {
+		return identity.Connection{}, errors.New("identity state unavailable")
+	}
 	runner.Exec = func(context.Context, string, []string) error {
 		executed = true
 		return nil

@@ -5,15 +5,20 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/xiaot623/sshx/internal/config"
+	"github.com/xiaot623/sshx/internal/identity"
+	"github.com/xiaot623/sshx/internal/integration"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 	"github.com/xiaot623/sshx/internal/sshconfig"
 )
 
 type BridgeSession struct {
 	SessionID string
+	ContextID string
+	RemoteFS  bool
 	MountRoot string
 	Workspace string
 	ReadOnly  bool
@@ -53,22 +58,26 @@ type Runner struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
+	InvocationPath  string
 	SSHPath         string
 	DockerPath      string
 	SSHConfigPath   string
 	ConfigPath      string
-	RemoteHostsPath string
 	Exec            func(context.Context, string, []string) error
 	ExecInput       func(context.Context, string, []string, io.Reader) error
 	ExecOutput      func(context.Context, string, []string) ([]byte, error)
+	ExecCombined    func(context.Context, string, []string) ([]byte, error)
 	DownloadBinary  func(context.Context, string, string) (string, error)
 	StartBridge     func(context.Context, string, []string, string) (*BridgeSession, error)
 	EnsureResolver  func(context.Context) error
+	ResolveIdentity func(context.Context, string, []string, string) (identity.Connection, error)
 
-	commandPolicy config.CommandPolicy
-	commandBridge bool
-	autoForward   bool
-	remoteFS      bool
+	commandPolicy      config.CommandPolicy
+	commandBridge      bool
+	autoForward        bool
+	remoteFS           bool
+	integrationSidecar bool
+	connection         identity.Connection
 }
 
 func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
@@ -77,37 +86,60 @@ func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
 		configPath = override
 	}
 	r := &Runner{
-		Stdin:           stdin,
-		Stdout:          stdout,
-		Stderr:          stderr,
-		SSHPath:         "ssh",
-		DockerPath:      "docker",
-		SSHConfigPath:   sshconfig.DefaultPath(),
-		ConfigPath:      configPath,
-		RemoteHostsPath: defaultRemoteHostsPath(),
-		Exec:            defaultExec,
-		ExecInput:       defaultExecInput,
-		ExecOutput:      defaultExecOutput,
+		Stdin:         stdin,
+		Stdout:        stdout,
+		Stderr:        stderr,
+		SSHPath:       "ssh",
+		DockerPath:    "docker",
+		SSHConfigPath: sshconfig.DefaultPath(),
+		ConfigPath:    configPath,
+		Exec:          defaultExec,
+		ExecInput:     defaultExecInput,
+		ExecOutput:    defaultExecOutput,
+		ExecCombined:  defaultExecCombinedOutput,
 	}
 	r.DownloadBinary = defaultDownloadBinary
 	r.StartBridge = r.defaultStartBridge
 	r.EnsureResolver = r.defaultEnsureResolver
+	r.ResolveIdentity = func(ctx context.Context, sshPath string, args []string, profile string) (identity.Connection, error) {
+		return identity.NewConnection(ctx, identity.DefaultInstallPath(), sshPath, args, profile)
+	}
 	return r
 }
 
 func (r *Runner) Run(ctx context.Context, args []string) int {
+	invocation := r.InvocationPath
+	if invocation == "" {
+		invocation = "sshx"
+	}
+	switch filepath.Base(invocation) {
+	case "ssh", "scp":
+		if _, err := integration.DescriptorForInvocation(invocation); err == nil {
+			return r.runIntegrationAdapter(ctx, invocation, args)
+		}
+	}
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Fprintf(r.Stdout, "sshx %s\n", clientVersion())
 		return 0
 	}
+	if len(args) == 1 && args[0] == "--help" {
+		return r.runHelp(ctx)
+	}
 	if len(args) > 0 {
 		switch args[0] {
+		case "integrate":
+			return r.runIntegrate(ctx, args[1:])
+		case "runtime-id":
+			fmt.Fprintln(r.Stdout, identity.RuntimeID)
+			return 0
 		case "server":
 			return r.runServer(ctx, args[1:])
 		case "bridge-client":
 			return r.runBridgeClient(ctx, args[1:])
 		case "socket-proxy":
 			return r.runSocketProxy(ctx, args[1:])
+		case "mux-proxy":
+			return r.runMuxProxy(ctx, args[1:])
 		case "local-daemon":
 			return r.runLocalDaemon(ctx, args[1:])
 		case "install-resolver":
@@ -164,16 +196,17 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 		fmt.Fprintf(r.Stderr, "sshx: version state skipped: %v\n", err)
 	}
 	sshArgs := baseSSHArgs(parsed)
-	remoteID, err := remoteIDForTarget(r.RemoteHostsPath, parsed.Target)
+	connection, err := r.ResolveIdentity(ctx, r.SSHPath, sshArgs, "cli")
 	if err != nil {
 		if cfg.Strict || features.RemoteFS {
-			fmt.Fprintf(r.Stderr, "sshx: remote state unavailable for %s: %v\n", parsed.Target, err)
+			fmt.Fprintf(r.Stderr, "sshx: target identity unavailable for %s: %v\n", parsed.Target, err)
 			return 1
 		}
-		fmt.Fprintf(r.Stderr, "sshx: remote state skipped for %s: %v\n", parsed.Target, err)
+		fmt.Fprintf(r.Stderr, "sshx: target identity skipped for %s: %v\n", parsed.Target, err)
 		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 	}
-	remoteHome := remoteServerHome(remoteID)
+	r.connection = connection
+	remoteHome := remoteServerHome(connection.TargetID)
 	r.commandPolicy = cfg.Commands
 	r.commandBridge = features.CommandBridge
 	r.autoForward = features.AutoForward

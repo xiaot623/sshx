@@ -3,7 +3,9 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/ports"
 	"github.com/xiaot623/sshx/internal/processlock"
 	"github.com/xiaot623/sshx/internal/protocol"
@@ -43,7 +46,11 @@ type ClientOptions struct {
 	OnPortObserved    func(port int)
 	OnPortGone        func(port int)
 	AppVersion        string
+	RuntimeID         string
+	TargetID          string
+	ContextID         string
 	SessionID         string
+	Capabilities      []string
 	HeartbeatInterval time.Duration
 	HeartbeatTimeout  time.Duration
 }
@@ -52,7 +59,7 @@ const (
 	portGoneMissingScans      = 2
 	DefaultHeartbeatInterval  = 5 * time.Second
 	DefaultHeartbeatTimeout   = 15 * time.Second
-	DefaultServerDrainTimeout = 500 * time.Millisecond
+	DefaultServerDrainTimeout = 10 * time.Second
 	DefaultServerStartTimeout = 10 * time.Second
 )
 
@@ -72,6 +79,8 @@ type Server struct {
 	mu            sync.Mutex
 	clients       []*clientConn
 	fsPeers       map[string]*remotefs.Peer
+	fsBackends    map[string]map[string]*remotefs.RootBackend
+	fsExporting   map[string]map[string]chan struct{}
 	fsConnecting  map[string]bool
 	fsMounts      map[string]remotefs.Mount
 	fsMounting    map[string]bool
@@ -90,16 +99,19 @@ type Server struct {
 }
 
 type clientConn struct {
-	enc       *protocol.Encoder
-	dec       *protocol.Decoder
-	c         net.Conn
-	sessionID string
-	writeMu   sync.Mutex
-	pendingMu sync.Mutex
-	pending   map[string]chan protocol.Frame
-	lastSeen  time.Time
-	closeOnce sync.Once
-	done      chan struct{}
+	enc          *protocol.Encoder
+	dec          *protocol.Decoder
+	c            net.Conn
+	sessionID    string
+	targetID     string
+	contextID    string
+	capabilities map[string]bool
+	writeMu      sync.Mutex
+	pendingMu    sync.Mutex
+	pending      map[string]chan protocol.Frame
+	lastSeen     time.Time
+	closeOnce    sync.Once
+	done         chan struct{}
 }
 
 func (s *Server) Serve(ctx context.Context) error {
@@ -126,6 +138,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	if s.fsPeers == nil {
 		s.fsPeers = map[string]*remotefs.Peer{}
+	}
+	if s.fsBackends == nil {
+		s.fsBackends = map[string]map[string]*remotefs.RootBackend{}
+	}
+	if s.fsExporting == nil {
+		s.fsExporting = map[string]map[string]chan struct{}{}
 	}
 	if s.fsConnecting == nil {
 		s.fsConnecting = map[string]bool{}
@@ -277,7 +295,7 @@ func (s *Server) handleFSConn(ctx context.Context, conn net.Conn) {
 		if !safeSessionID(candidate) {
 			return errors.New("invalid remote fs sessionId")
 		}
-		if s.pickClient(candidate) == nil {
+		if s.pickClient("", candidate, "remotefs.fs.v1") == nil {
 			return ErrNoClient
 		}
 		s.mu.Lock()
@@ -380,8 +398,7 @@ func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionI
 		return "", err
 	}
 	// The request context only owns mount setup. A successful mount must outlive
-	// the mount.create handler and is released explicitly when the peer asks for
-	// it, disconnects, or the server shuts down.
+	// the mount.create handler and is released explicitly by the peer lifecycle.
 	mountCtx, mountCancel := context.WithCancel(lifetimeCtx)
 	stopRequestCancel := context.AfterFunc(requestCtx, mountCancel)
 	mount, err := s.MountDriver.Mount(mountCtx, path, peer.RemoteBackend(mountID), options)
@@ -417,8 +434,6 @@ func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionI
 	return path, nil
 }
 
-// lifetimeMount releases the context retained by drivers that monitor mount
-// lifetime after an explicit unmount succeeds.
 type lifetimeMount struct {
 	remotefs.Mount
 	cancel context.CancelFunc
@@ -714,46 +729,51 @@ func (s *Server) handleConn(c net.Conn) {
 		_ = c.Close()
 		return
 	}
-	if hello.ProtocolVersion != protocol.Version {
-		_ = enc.Encode(protocol.Frame{Type: protocol.TypeServerDrain, AppVersion: s.Version, ProtocolVersion: protocol.Version, Error: "sshx protocol version changed"})
+	if !protocol.FrameCompatible(hello) || hello.RuntimeID != identity.RuntimeID {
+		_ = enc.Encode(protocol.Frame{Type: protocol.TypeServerDrain, AppVersion: s.Version, RuntimeID: identity.RuntimeID, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, Error: "sshx runtime protocol is incompatible"})
 		_ = c.Close()
-		s.initiateShutdown()
 		return
 	}
 	switch hello.Role {
 	case protocol.RoleClient:
-		if hello.AppVersion == "" || hello.AppVersion != s.Version {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeServerDrain, AppVersion: s.Version, ProtocolVersion: protocol.Version, Error: "sshx application version changed"})
-			_ = c.Close()
-			s.initiateShutdown()
-			return
-		}
 		if hello.SessionID == "" {
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeError, Error: "client sessionId is required"})
 			_ = c.Close()
 			return
 		}
-		cc := &clientConn{enc: enc, dec: dec, c: c, sessionID: hello.SessionID, pending: map[string]chan protocol.Frame{}, lastSeen: time.Now(), done: make(chan struct{})}
+		if hello.TargetID == "" || hello.ContextID == "" {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeError, Error: "client targetId and contextId are required"})
+			_ = c.Close()
+			return
+		}
+		if len(hello.Capabilities) == 0 {
+			hello.Capabilities = []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}
+		}
+		capabilities := make(map[string]bool, len(hello.Capabilities))
+		for _, capability := range hello.Capabilities {
+			capabilities[capability] = true
+		}
+		cc := &clientConn{enc: enc, dec: dec, c: c, sessionID: hello.SessionID, targetID: hello.TargetID, contextID: hello.ContextID, capabilities: capabilities, pending: map[string]chan protocol.Frame{}, lastSeen: time.Now(), done: make(chan struct{})}
 		if !s.addClient(cc) {
 			_ = cc.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolVersion: protocol.Version, AppVersion: s.Version, Error: "sshx server is draining"})
 			cc.close()
 			return
 		}
-		if err := cc.send(protocol.Frame{Type: protocol.TypeCapabilities, ProtocolVersion: protocol.Version, AppVersion: s.Version, Capabilities: []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}}); err != nil {
+		if err := cc.send(protocol.Frame{Type: protocol.TypeCapabilities, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, AppVersion: s.Version, Capabilities: []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}}); err != nil {
 			s.removeClient(cc)
 			return
 		}
 		s.sendCurrentPorts(cc)
 		cc.readLoop(s)
 	case protocol.RoleRequester:
-		s.handleRequester(c, dec, enc, hello.SessionID)
+		s.handleRequester(c, dec, enc, hello.ContextID, hello.SessionID)
 	default:
 		_ = enc.Encode(protocol.Frame{Type: protocol.TypeError, Error: "unknown bridge role"})
 		_ = c.Close()
 	}
 }
 
-func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protocol.Encoder, requesterSessionID string) {
+func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protocol.Encoder, requesterContextID, requesterSessionID string) {
 	defer c.Close()
 	s.markActive()
 	req, err := dec.Decode()
@@ -768,58 +788,65 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requester sessionId does not match command sessionId"})
 		return
 	}
+	if requesterContextID != "" && req.ContextID != requesterContextID {
+		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requester contextId does not match command contextId"})
+		return
+	}
 	if req.RemoteFS {
-		if req.SessionID == "" || req.Cwd == "" {
+		if req.Cwd == "" {
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs requires sessionId and cwd"})
 			return
 		}
-		if within, err := remotefs.PathWithin(s.MountRoot, req.Cwd); err != nil {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: fmt.Sprintf("resolve cwd: %v", err)})
-			return
-		} else if within {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: ErrMountedCwd.Error()})
+		if req.RequestID == "" || req.RequestID != req.ID {
+			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requestId is required and must match command id"})
 			return
 		}
-		s.mu.Lock()
-		fsPeer := s.fsPeers[req.SessionID]
-		s.mu.Unlock()
-		if fsPeer == nil {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs data session is unavailable"})
-			return
-		}
-		layout, err := remotefs.CurrentExportLayout(req.Cwd)
-		if err != nil {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: fmt.Sprintf("resolve remote home mount: %v", err)})
-			return
-		}
-		backend, err := remotefs.OpenRootBackendWithOptions(layout.RootPath, remotefs.RootBackendOptions{DisableDelete: true}, s.MountRoot)
-		if err != nil {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: fmt.Sprintf("open remote workspace: %v", err)})
-			return
-		}
-		mountID := "request-" + req.ID
-		if err := fsPeer.RegisterBackend(mountID, backend); err != nil {
-			_ = backend.CloseBackend()
+	}
+	requestedSessionID := req.SessionID
+	var lastErr error
+	for {
+		client := s.pickClient(req.ContextID, requestedSessionID, "command.exec.batch-stdin")
+		if client == nil {
+			err := ErrNoClient
+			if lastErr != nil {
+				err = lastErr
+			}
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: err.Error()})
 			return
 		}
-		defer fsPeer.UnregisterBackend(mountID)
-		req.MountID = mountID
-		req.MountPath = layout.MountPath
-		req.Cwd = filepath.ToSlash(layout.RelativeCwd)
-	}
-	var lastErr error
-	for {
-		client := s.pickClient(req.SessionID)
-		if client == nil {
-			msg := ErrNoClient.Error()
-			if lastErr != nil {
-				msg = lastErr.Error()
-			}
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: msg})
-			return
+
+		attempt := req
+		if attempt.SessionID == "" {
+			attempt.SessionID = client.sessionID
 		}
-		resp, err := client.request(req)
+		if attempt.RemoteFS {
+			s.mu.Lock()
+			fsPeer := s.fsPeers[attempt.SessionID]
+			s.mu.Unlock()
+			if fsPeer == nil {
+				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: "remote fs data session is unavailable"})
+				return
+			}
+			layout, err := remotefs.CurrentExportLayout(attempt.Cwd)
+			if err != nil {
+				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: fmt.Sprintf("resolve remote home mount: %v", err)})
+				return
+			}
+			mountID := exportMountID(layout.RootPath, layout.MountPath)
+			if err := s.ensureExportBackend(attempt.SessionID, mountID, layout.RootPath, fsPeer); err != nil {
+				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: err.Error()})
+				return
+			}
+			if attempt.Env == nil {
+				attempt.Env = map[string]string{}
+			}
+			attempt.Env["SSHX_REMOTE_CWD"] = attempt.Cwd
+			attempt.Env["SSHX_REMOTE_FS"] = "1"
+			attempt.MountID = mountID
+			attempt.MountPath = layout.MountPath
+			attempt.Cwd = filepath.ToSlash(layout.RelativeCwd)
+		}
+		resp, err := client.request(attempt)
 		if err != nil {
 			lastErr = err
 			s.removeClient(client)
@@ -828,6 +855,79 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 		_ = enc.Encode(resp)
 		return
 	}
+}
+
+func exportMountID(rootPath, mountPath string) string {
+	sum := sha256.Sum256([]byte(rootPath + "\x00" + mountPath))
+	return "export-" + hex.EncodeToString(sum[:8])
+}
+
+func (s *Server) ensureExportBackend(sessionID, mountID, rootPath string, peer *remotefs.Peer) error {
+	for {
+		s.mu.Lock()
+		if backends := s.fsBackends[sessionID]; backends != nil && backends[mountID] != nil {
+			s.mu.Unlock()
+			return nil
+		}
+		if exporting := s.fsExporting[sessionID]; exporting != nil {
+			if wait := exporting[mountID]; wait != nil {
+				s.mu.Unlock()
+				<-wait
+				continue
+			}
+		} else {
+			s.fsExporting[sessionID] = map[string]chan struct{}{}
+		}
+		wait := make(chan struct{})
+		s.fsExporting[sessionID][mountID] = wait
+		s.mu.Unlock()
+		break
+	}
+	finish := func() {
+		s.mu.Lock()
+		if exporting := s.fsExporting[sessionID]; exporting != nil {
+			if wait := exporting[mountID]; wait != nil {
+				delete(exporting, mountID)
+				close(wait)
+			}
+			if len(exporting) == 0 {
+				delete(s.fsExporting, sessionID)
+			}
+		}
+		s.mu.Unlock()
+	}
+	backend, err := remotefs.OpenRootBackendWithOptions(rootPath, remotefs.RootBackendOptions{DisableDelete: true})
+	if err != nil {
+		finish()
+		return fmt.Errorf("open remote workspace: %w", err)
+	}
+	if err := peer.RegisterBackend(mountID, backend); err != nil {
+		_ = backend.CloseBackend()
+		finish()
+		return err
+	}
+	s.mu.Lock()
+	if s.fsPeers[sessionID] != peer {
+		s.mu.Unlock()
+		_ = peer.UnregisterBackend(mountID)
+		_ = backend.CloseBackend()
+		finish()
+		return errors.New("remote fs session closed while exporting the working tree")
+	}
+	if s.fsBackends[sessionID] == nil {
+		s.fsBackends[sessionID] = map[string]*remotefs.RootBackend{}
+	}
+	if existing := s.fsBackends[sessionID][mountID]; existing != nil {
+		s.mu.Unlock()
+		_ = peer.UnregisterBackend(mountID)
+		_ = backend.CloseBackend()
+		finish()
+		return nil
+	}
+	s.fsBackends[sessionID][mountID] = backend
+	s.mu.Unlock()
+	finish()
+	return nil
 }
 
 func (s *Server) addClient(c *clientConn) bool {
@@ -851,6 +951,7 @@ func (s *Server) removeClient(c *clientConn) {
 	s.mu.Lock()
 	found := false
 	var fsPeer *remotefs.Peer
+	var backends map[string]*remotefs.RootBackend
 	for i, existing := range s.clients {
 		if existing == c {
 			s.clients = append(s.clients[:i], s.clients[i+1:]...)
@@ -862,12 +963,22 @@ func (s *Server) removeClient(c *clientConn) {
 		s.lastActive = time.Now()
 		fsPeer = s.fsPeers[c.sessionID]
 		delete(s.fsPeers, c.sessionID)
+		backends = s.fsBackends[c.sessionID]
+		delete(s.fsBackends, c.sessionID)
 	}
 	s.mu.Unlock()
 	if found {
 		c.close()
 		if fsPeer != nil {
+			for mountID, backend := range backends {
+				_ = fsPeer.UnregisterBackend(mountID)
+				_ = backend.CloseBackend()
+			}
 			_ = fsPeer.Close()
+		} else {
+			for _, backend := range backends {
+				_ = backend.CloseBackend()
+			}
 		}
 	}
 }
@@ -878,21 +989,23 @@ func (s *Server) markActive() {
 	s.lastActive = time.Now()
 }
 
-func (s *Server) pickClient(sessionID string) *clientConn {
+func (s *Server) pickClient(contextID, sessionID, capability string) *clientConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sessionID != "" {
 		for _, client := range s.clients {
-			if client.sessionID == sessionID {
+			if client.sessionID == sessionID && (contextID == "" || client.contextID == contextID) && (capability == "" || client.capabilities[capability]) {
 				return client
 			}
 		}
 		return nil
 	}
-	if len(s.clients) == 0 {
-		return nil
+	for _, client := range s.clients {
+		if (contextID == "" || client.contextID == contextID) && (capability == "" || client.capabilities[capability]) {
+			return client
+		}
 	}
-	return s.clients[0]
+	return nil
 }
 
 func (c *clientConn) request(req protocol.Frame) (protocol.Frame, error) {
@@ -931,15 +1044,14 @@ func (c *clientConn) readLoop(s *Server) {
 		}
 		switch frame.Type {
 		case protocol.TypeHeartbeat:
-			if frame.ProtocolVersion != protocol.Version || frame.AppVersion != s.Version {
-				_ = c.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolVersion: protocol.Version, AppVersion: s.Version, Error: "sshx version changed"})
-				s.initiateShutdown()
+			if !protocol.FrameCompatible(frame) || frame.RuntimeID != identity.RuntimeID {
+				_ = c.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, AppVersion: s.Version, Error: "sshx runtime protocol is incompatible"})
 				return
 			}
 			c.pendingMu.Lock()
 			c.lastSeen = time.Now()
 			c.pendingMu.Unlock()
-			if err := c.send(protocol.Frame{Type: protocol.TypeHeartbeatAck, ProtocolVersion: protocol.Version, AppVersion: s.Version, SessionID: frame.SessionID, Sequence: frame.Sequence}); err != nil {
+			if err := c.send(protocol.Frame{Type: protocol.TypeHeartbeatAck, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, AppVersion: s.Version, SessionID: frame.SessionID, Sequence: frame.Sequence}); err != nil {
 				return
 			}
 		case protocol.TypeCommandResult, protocol.TypeCommandError:
@@ -1016,6 +1128,10 @@ func RequestCommandForSessionWithTimeout(ctx context.Context, socketPath string,
 }
 
 func RequestCommandForSessionWithMountOptions(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, sessionID string, remoteFS, readOnly bool, timeout time.Duration, token ...string) (CommandResult, error) {
+	return RequestCommandForContextWithMountOptions(ctx, socketPath, argv, stdin, env, cwd, "", sessionID, remoteFS, readOnly, timeout, token...)
+}
+
+func RequestCommandForContextWithMountOptions(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, contextID, sessionID string, remoteFS, readOnly bool, timeout time.Duration, token ...string) (CommandResult, error) {
 	if len(argv) == 0 {
 		return CommandResult{ExitCode: 2}, errors.New("local command is required")
 	}
@@ -1027,16 +1143,21 @@ func RequestCommandForSessionWithMountOptions(ctx context.Context, socketPath st
 	defer c.Close()
 	enc := protocol.NewEncoder(c)
 	dec := protocol.NewDecoder(c)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, Role: protocol.RoleRequester, SessionID: sessionID, Token: firstToken(token)}); err != nil {
+	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, Role: protocol.RoleRequester, ContextID: contextID, SessionID: sessionID, Token: firstToken(token)}); err != nil {
 		return CommandResult{ExitCode: 1}, err
 	}
-	id := fmt.Sprintf("req-%d", time.Now().UnixNano())
+	id, idErr := identity.UUID()
+	if idErr != nil {
+		return CommandResult{ExitCode: 1}, idErr
+	}
 	if err := enc.Encode(protocol.Frame{
 		Type:          protocol.TypeCommandExec,
 		ID:            id,
+		RequestID:     id,
 		Argv:          argv,
 		Env:           env,
 		Cwd:           cwd,
+		ContextID:     contextID,
 		SessionID:     sessionID,
 		RemoteFS:      remoteFS,
 		MountReadOnly: readOnly,
@@ -1114,7 +1235,24 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 		opts.AppVersion = version.Version
 	}
 	if opts.SessionID == "" {
-		opts.SessionID = fmt.Sprintf("bridge-%d", time.Now().UnixNano())
+		sessionID, err := identity.UUID()
+		if err != nil {
+			signalReady(opts.Ready, err)
+			return err
+		}
+		opts.SessionID = sessionID
+	}
+	if opts.RuntimeID == "" {
+		opts.RuntimeID = identity.RuntimeID
+	}
+	if opts.TargetID == "" {
+		opts.TargetID = "default"
+	}
+	if opts.ContextID == "" {
+		opts.ContextID = "default"
+	}
+	if len(opts.Capabilities) == 0 {
+		opts.Capabilities = []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}
 	}
 	if opts.HeartbeatInterval <= 0 {
 		opts.HeartbeatInterval = DefaultHeartbeatInterval
@@ -1134,7 +1272,7 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 		defer writeMu.Unlock()
 		return enc.Encode(frame)
 	}
-	if err := send(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, AppVersion: opts.AppVersion, SessionID: opts.SessionID, Role: protocol.RoleClient, Token: firstToken(token)}); err != nil {
+	if err := send(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: opts.RuntimeID, AppVersion: opts.AppVersion, TargetID: opts.TargetID, ContextID: opts.ContextID, SessionID: opts.SessionID, Capabilities: opts.Capabilities, Role: protocol.RoleClient, Token: firstToken(token)}); err != nil {
 		signalReady(opts.Ready, err)
 		return err
 	}
@@ -1156,7 +1294,7 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 					return
 				}
 				sequence++
-				if err := send(protocol.Frame{Type: protocol.TypeHeartbeat, ProtocolVersion: protocol.Version, AppVersion: opts.AppVersion, SessionID: opts.SessionID, Sequence: sequence}); err != nil {
+				if err := send(protocol.Frame{Type: protocol.TypeHeartbeat, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: opts.RuntimeID, AppVersion: opts.AppVersion, ContextID: opts.ContextID, SessionID: opts.SessionID, Sequence: sequence}); err != nil {
 					_ = c.Close()
 					return
 				}
@@ -1179,8 +1317,8 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 			return err
 		}
 		if !readySignaled && frame.Type == protocol.TypeCapabilities {
-			if frame.ProtocolVersion != protocol.Version || frame.AppVersion != opts.AppVersion {
-				err := errors.New("sshx bridge version changed")
+			if !protocol.FrameCompatible(frame) || frame.RuntimeID != opts.RuntimeID {
+				err := errors.New("sshx bridge runtime is incompatible")
 				signalReady(opts.Ready, err)
 				return err
 			}
@@ -1189,8 +1327,8 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 			continue
 		}
 		if frame.Type == protocol.TypeHeartbeatAck {
-			if frame.ProtocolVersion != protocol.Version || frame.AppVersion != opts.AppVersion {
-				return errors.New("sshx bridge heartbeat version changed")
+			if !protocol.FrameCompatible(frame) || frame.RuntimeID != opts.RuntimeID {
+				return errors.New("sshx bridge heartbeat runtime is incompatible")
 			}
 			lastAck.Store(time.Now().UnixNano())
 			continue
@@ -1311,6 +1449,10 @@ func ExecuteLocal(ctx context.Context, frame protocol.Frame) protocol.Frame {
 	cmd.Stdin = bytes.NewReader(stdin)
 	if frame.Cwd != "" {
 		cmd.Dir = frame.Cwd
+	} else if frame.Env["SSHX_REMOTE_FS"] == "0" {
+		if home, homeErr := os.UserHomeDir(); homeErr == nil {
+			cmd.Dir = home
+		}
 	}
 	if len(frame.Env) > 0 {
 		cmd.Env = os.Environ()

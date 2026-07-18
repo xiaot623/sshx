@@ -17,6 +17,7 @@ import (
 
 	"github.com/xiaot623/sshx/internal/bridge"
 	"github.com/xiaot623/sshx/internal/config"
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 	"github.com/xiaot623/sshx/internal/sshconfig"
 )
@@ -149,14 +150,8 @@ func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target 
 			}
 			fmt.Fprintf(r.Stderr, "sshx: version state skipped: %v\n", err)
 		}
-		remoteID, err := remoteIDForTarget(r.RemoteHostsPath, "docker:"+target.ID)
-		if err != nil {
-			if cfg.Strict {
-				fmt.Fprintf(r.Stderr, "sshx: docker state unavailable for %s: %v\n", target.Name, err)
-				return 1
-			}
-			fmt.Fprintf(r.Stderr, "sshx: docker state skipped for %s: %v\n", target.Name, err)
-		} else {
+		remoteID := identity.TargetID(identity.Target{User: "docker", Hostname: target.ID, Port: 1})
+		{
 			remoteHome = remoteServerHome(remoteID)
 			r.commandPolicy = cfg.Commands
 			r.commandBridge = features.CommandBridge
