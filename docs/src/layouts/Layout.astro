@@ -1,0 +1,54 @@
+---
+import '@fontsource-variable/manrope';
+import '@fontsource/dm-mono/300.css';
+import '@fontsource/dm-mono/400.css';
+import '@fontsource/dm-mono/500.css';
+import '../styles/global.css';
+import type { Locale } from '../data/i18n';
+
+interface Props {
+  locale: Locale;
+  title: string;
+  description: string;
+}
+
+const { locale, title, description } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const site = Astro.site ?? new URL('https://xiaot623.github.io');
+const englishUrl = new URL(base, site);
+const chineseUrl = new URL(`${base}zh-cn/`, site);
+const canonical = locale === 'en' ? englishUrl : chineseUrl;
+const socialImage = new URL(`${base}og.png`, site);
+const htmlLang = locale === 'zh-cn' ? 'zh-CN' : 'en';
+const socialAlt = locale === 'zh-cn' ? 'sshx — 远程，不再遥远。' : 'sshx — SSH, without the distance.';
+---
+
+<!doctype html>
+<html lang={htmlLang}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="theme-color" content="#07110d" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:site_name" content="sshx" />
+    <meta property="og:image" content={socialImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={socialAlt} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content={socialImage} />
+    <link rel="canonical" href={canonical} />
+    <link rel="alternate" hreflang="en" href={englishUrl} />
+    <link rel="alternate" hreflang="zh-CN" href={chineseUrl} />
+    <link rel="alternate" hreflang="x-default" href={englishUrl} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

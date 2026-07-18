@@ -2,3 +2,7 @@ dist/
 /sshx
 /bin/sshx
 /bin/sshx-*
+/docs/dist/
+/docs/node_modules/
+/.astro/
+/docs/.astro/

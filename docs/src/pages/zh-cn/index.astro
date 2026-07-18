@@ -1,0 +1,12 @@
+---
+import LandingPage from '../../components/LandingPage.astro';
+import Layout from '../../layouts/Layout.astro';
+import { copy } from '../../data/i18n';
+
+const locale = 'zh-cn';
+const content = copy[locale];
+---
+
+<Layout locale={locale} title={content.meta.title} description={content.meta.description}>
+  <LandingPage locale={locale} content={content} />
+</Layout>

@@ -1,0 +1,254 @@
+---
+import demoUrl from '../../assets/sshx-demo.svg?url';
+import type { Copy, Locale } from '../data/i18n';
+
+interface Props {
+  locale: Locale;
+  content: Copy;
+}
+
+const { locale, content } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const localeSwitch = locale === 'en' ? `${base}zh-cn/` : base;
+const repository = 'https://github.com/xiaot623/sshx';
+const a11y = locale === 'en'
+  ? { skip: 'Skip to content', home: 'sshx home', nav: 'Primary navigation', install: 'Install sshx', highlights: 'Product highlights', passthrough: 'SSH passthrough example', built: 'Built for the command line.' }
+  : { skip: '跳转到正文', home: 'sshx 首页', nav: '主导航', install: '安装 sshx', highlights: '产品亮点', passthrough: 'SSH 透传示例', built: '为命令行而生。' };
+---
+
+<a class="skip-link" href="#main">{a11y.skip}</a>
+
+<div class="site-shell">
+  <header class="site-header">
+    <a class="brand" href={base} aria-label={a11y.home}>
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand-name">sshx</span>
+    </a>
+
+    <nav class="desktop-nav" aria-label={a11y.nav}>
+      <a href="#features">{content.nav.features}</a>
+      <a href="#workflow">{content.nav.workflow}</a>
+      <a href="#integrations">{content.nav.integrations}</a>
+    </nav>
+
+    <div class="header-actions">
+      <a class="language-link" href={localeSwitch} lang={locale === 'en' ? 'zh-CN' : 'en'}>{content.nav.language}</a>
+      <a class="github-link" href={repository} target="_blank" rel="noreferrer">
+        <span>{content.nav.github}</span>
+        <span aria-hidden="true">↗</span>
+      </a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero section-grid">
+      <div class="hero-glow hero-glow-one" aria-hidden="true"></div>
+      <div class="hero-glow hero-glow-two" aria-hidden="true"></div>
+      <div class="hero-content">
+        <div class="eyebrow-pill"><span class="live-dot"></span>{content.hero.badge}</div>
+        <h1><span>{content.hero.line1}</span><span class="gradient-text">{content.hero.line2}</span></h1>
+        <p class="hero-description">{content.hero.description}</p>
+
+        <div class="hero-actions">
+          <div class="install-command" role="group" aria-label={a11y.install}>
+            <span class="terminal-prompt" aria-hidden="true">$</span>
+            <code>{content.hero.install}</code>
+            <button
+              class="copy-button"
+              type="button"
+              data-copy-command={content.hero.install}
+              data-label={content.hero.copy}
+              data-success={content.hero.copied}
+              aria-label={content.hero.copy}
+            >
+              <span class="copy-icon" aria-hidden="true"></span>
+              <span class="copy-label">{content.hero.copy}</span>
+            </button>
+          </div>
+          <a class="primary-button" href={repository} target="_blank" rel="noreferrer">
+            {content.hero.github}<span aria-hidden="true">↗</span>
+          </a>
+        </div>
+        <p class="install-note">{content.hero.note}</p>
+
+        <div class="signal-row" aria-label={a11y.highlights}>
+          {content.hero.signals.map((signal) => <span><i aria-hidden="true"></i>{signal}</span>)}
+        </div>
+      </div>
+
+      <div class="demo-wrap reveal">
+        <div class="demo-topline">
+          <div class="demo-status"><span></span>LIVE WORKFLOW</div>
+          <div class="demo-caption">REMOTE ↔ LOCAL</div>
+        </div>
+        <img src={demoUrl} alt={content.hero.demoAlt} width="1200" height="720" loading="eager" decoding="async" />
+      </div>
+    </section>
+
+    <section class="section section-grid" id="features">
+      <div class="section-heading reveal">
+        <p class="section-eyebrow">{content.features.eyebrow}</p>
+        <h2>{content.features.title}</h2>
+        <p>{content.features.description}</p>
+      </div>
+
+      <div class="feature-grid">
+        {content.features.items.map((feature) => (
+          <article class:list={['feature-card', feature.span === 'wide' && 'feature-card-wide', 'reveal']}>
+            <div class="card-number">{feature.number}</div>
+            <div class="feature-copy">
+              <h3>{feature.title}</h3>
+              <p>{feature.description}</p>
+            </div>
+            <div class="mini-terminal"><span>›</span><code>{feature.command}</code></div>
+          </article>
+        ))}
+      </div>
+    </section>
+
+    <section class="section workflow-section section-grid" id="workflow">
+      <div class="workflow-intro reveal">
+        <p class="section-eyebrow">{content.workflow.eyebrow}</p>
+        <h2>{content.workflow.title}</h2>
+        <p>{content.workflow.description}</p>
+      </div>
+
+      <div class="comparison reveal">
+        <div class="comparison-column comparison-before">
+          <div class="comparison-label"><span>×</span>{content.workflow.before}</div>
+          <ul>{content.workflow.beforeItems.map((item) => <li>{item}</li>)}</ul>
+        </div>
+        <div class="comparison-divider" aria-hidden="true"><span>→</span></div>
+        <div class="comparison-column comparison-after">
+          <div class="comparison-label"><span>✓</span>{content.workflow.after}</div>
+          <ul>{content.workflow.afterItems.map((item) => <li>{item}</li>)}</ul>
+        </div>
+      </div>
+
+      <div class="steps">
+        {content.workflow.steps.map((step, index) => (
+          <article class="step-card reveal">
+            <div class="step-index">0{index + 1}</div>
+            <p class="step-label">{step.label}</p>
+            <h3>{step.title}</h3>
+            <p>{step.description}</p>
+            <div class="step-command"><span>$</span><code>{step.command}</code></div>
+          </article>
+        ))}
+      </div>
+    </section>
+
+    <section class="section section-grid" id="integrations">
+      <div class="section-heading integrations-heading reveal">
+        <p class="section-eyebrow">{content.integrations.eyebrow}</p>
+        <h2>{content.integrations.title}</h2>
+        <p>{content.integrations.description}</p>
+      </div>
+      <div class="integration-grid">
+        {content.integrations.cards.map((card, index) => (
+          <article class="integration-card reveal">
+            <div class="integration-icon" aria-hidden="true">{['O', 'D', 'V'][index]}</div>
+            <p class="integration-label">{card.label}</p>
+            <h3>{card.title}</h3>
+            <p>{card.description}</p>
+            <div class="integration-line" aria-hidden="true"><span></span></div>
+          </article>
+        ))}
+      </div>
+    </section>
+
+    <section class="section trust-section section-grid">
+      <div class="trust-panel reveal">
+        <div class="trust-copy">
+          <p class="section-eyebrow">{content.trust.eyebrow}</p>
+          <h2>{content.trust.title}</h2>
+          <p>{content.trust.description}</p>
+          <div class="trust-terminal" aria-label={a11y.passthrough}>
+            <span class="trust-prompt">$</span>
+            <code>SSHX_DISABLE=1 ssh myserver</code>
+            <span class="trust-status">PASSTHROUGH</span>
+          </div>
+        </div>
+        <div class="trust-list">
+          {content.trust.items.map((item, index) => (
+            <article>
+              <span class="trust-number">0{index + 1}</span>
+              <div><h3>{item.title}</h3><p>{item.description}</p></div>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section class="section final-cta section-grid">
+      <div class="cta-panel reveal">
+        <div class="cta-orbit orbit-one" aria-hidden="true"></div>
+        <div class="cta-orbit orbit-two" aria-hidden="true"></div>
+        <p class="section-eyebrow">{content.cta.eyebrow}</p>
+        <h2>{content.cta.title}</h2>
+        <p>{content.cta.description}</p>
+        <div class="cta-actions">
+          <button
+            class="primary-button copy-cta"
+            type="button"
+            data-copy-command={content.hero.install}
+            data-label={content.cta.install}
+            data-success={content.hero.copied}
+          >
+            <span class="copy-label">{content.cta.install}</span><span aria-hidden="true">→</span>
+          </button>
+          <a class="secondary-button" href={repository} target="_blank" rel="noreferrer">{content.cta.github}<span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer section-grid">
+    <div class="footer-brand">
+      <a class="brand" href={base}><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span class="brand-name">sshx</span></a>
+      <p>{content.footer.pitch}</p>
+    </div>
+    <div class="footer-links">
+      <div>
+        <p>{content.footer.product}</p>
+        <a href="#features">{content.nav.features}</a>
+        <a href="#workflow">{content.nav.workflow}</a>
+        <a href="#integrations">{content.nav.integrations}</a>
+      </div>
+      <div>
+        <p>{content.footer.resources}</p>
+        <a href={`${repository}#readme`} target="_blank" rel="noreferrer">{content.footer.readme}</a>
+        <a href={`${repository}/releases`} target="_blank" rel="noreferrer">{content.footer.releases}</a>
+        <a href={`${repository}#architecture`} target="_blank" rel="noreferrer">{content.footer.architecture}</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© {new Date().getFullYear()} sshx. {content.footer.copyright}</span>
+      <span>{a11y.built}</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+  const copyButtons = document.querySelectorAll<HTMLButtonElement>('[data-copy-command]');
+
+  copyButtons.forEach((button) => {
+    button.addEventListener('click', async () => {
+      const command = button.dataset.copyCommand;
+      const label = button.querySelector<HTMLElement>('.copy-label');
+      if (!command || !label) return;
+
+      try {
+        await navigator.clipboard.writeText(command);
+        label.textContent = button.dataset.success ?? 'Copied';
+        button.classList.add('is-copied');
+        window.setTimeout(() => {
+          label.textContent = button.dataset.label ?? 'Copy';
+          button.classList.remove('is-copied');
+        }, 1800);
+      } catch {
+        label.textContent = command;
+      }
+    });
+  });
+</script>
