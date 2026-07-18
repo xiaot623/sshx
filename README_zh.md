@@ -201,7 +201,7 @@ sshx integrate install vscode
 sshx integrate install cursor
 ```
 
-命令会自动定位 OpenSSH、创建由同一个 sshx 二进制提供的 `ssh`/`scp` shim、以 JSONC 方式修改 `remote.SSH.path`，并验证完整调用链。命令幂等，失败时回滚设置和 shim；移动 sshx 可执行文件后再次运行即可修复。通过 npm 安装的集成会写入托管标记，后续 `npm install` 或 `npm update` 会自动刷新到新版本，无需再次手动执行。无需重启应用，也不增加 integration 配置或额外发布产物。
+该集成功能仍处于高度实验阶段。命令会先显示警告并要求交互式输入 `y/n` 确认；非交互场景可传入 `-y` 直接确认。确认后，命令会自动定位 OpenSSH、创建由同一个 sshx 二进制提供的 `ssh`/`scp` shim、以 JSONC 方式修改 `remote.SSH.path`，并验证完整调用链。命令幂等，失败时回滚设置和 shim；移动 sshx 可执行文件后再次运行即可修复。通过 npm 安装的集成会写入托管标记，后续 `npm install` 或 `npm update` 会自动刷新到新版本，无需再次手动执行。无需重启应用，也不增加 integration 配置或额外发布产物。
 
 Remote-SSH 的用户可见连接仍由原版 OpenSSH 建立。sshx 临时创建 ControlMaster，使 bootstrap、sidecar、转发和 scp 复用同一次认证。应用集成终端只注入稳定的 `SSHX_CONTEXT_ID` 和 context launcher 路径。探测、未知和歧义调用精确透传；协议不兼容或 sidecar 启动失败时发送原始 bootstrap 字节，并且无论 `strict` 如何设置都保持 OpenSSH 的正常行为。
 

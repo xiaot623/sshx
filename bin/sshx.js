@@ -116,7 +116,7 @@ function findNpmIntegrationsToRefresh() {
 
 function refreshNpmIntegrations(profiles) {
   for (const profile of profiles) {
-    const refresh = spawnSync(binaryPath, ["integrate", "install", profile], {
+    const refresh = spawnSync(binaryPath, ["integrate", "install", "-y", profile], {
       encoding: "utf8",
       env: nativeEnvironment,
     });

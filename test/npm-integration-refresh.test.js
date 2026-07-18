@@ -34,7 +34,7 @@ test("postinstall refreshes a marked integration with the current npm binary", (
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /refreshed vscode integration/);
   assert.deepEqual(readCalls(fixture.logPath), [
-    "1|integrate install vscode",
+    "1|integrate install -y vscode",
   ]);
 });
 
@@ -48,7 +48,7 @@ test("launcher adopts an existing npm integration and refreshes before use", (t)
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(readCalls(fixture.logPath), [
-    "1|integrate install cursor",
+    "1|integrate install -y cursor",
     "1|--version",
   ]);
 });
