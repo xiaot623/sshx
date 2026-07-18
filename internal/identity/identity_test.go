@@ -31,6 +31,12 @@ func TestTargetAndContextIDs(t *testing.T) {
 	if ContextID("install", TargetID(target), "vscode") == ContextID("install", TargetID(target), "cursor") {
 		t.Fatal("profiles must have distinct ContextIDs")
 	}
+	if RuntimeHomeID(TargetID(target)) == RuntimeHomeID(TargetID(Target{User: "root", Hostname: "other.example.com", Port: 22})) {
+		t.Fatal("targets must have distinct runtime home IDs")
+	}
+	if len(RuntimeHomeID(TargetID(target))) != 32 {
+		t.Fatalf("runtime home ID length = %d", len(RuntimeHomeID(TargetID(target))))
+	}
 }
 
 func TestConfigProbeArgsDropsActionOptions(t *testing.T) {

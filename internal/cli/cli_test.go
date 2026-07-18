@@ -113,8 +113,17 @@ func TestRecordVersionStateRotatesCurrentToLast(t *testing.T) {
 }
 
 func TestRemoteLayoutUsesTargetAndRuntime(t *testing.T) {
-	if got := remoteServerHome("target-id"); got != "$HOME/.sshx_server/targets/target-id/runtimes/"+identity.RuntimeID {
+	if got := remoteServerHome("target-id"); got != "$HOME/.sshx_server/runtimes/"+identity.RuntimeHomeID("target-id") {
 		t.Fatalf("remote home = %q", got)
+	}
+}
+
+func TestRemoteRuntimeSocketPathFitsLinuxLimit(t *testing.T) {
+	// Linux sockaddr_un.sun_path is 108 bytes including the trailing NUL.
+	// Reserve enough room for a reasonably long expanded remote home path.
+	path := "/home/a-reasonably-long-user-name" + strings.TrimPrefix(remoteServerHome("target-id"), "$HOME") + "/sock.fs"
+	if len(path) >= 108 {
+		t.Fatalf("remote fs socket path is %d bytes: %q", len(path), path)
 	}
 }
 
@@ -291,7 +300,7 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 		t.Fatalf("stop args = %#v", execCalls[0].args)
 	}
 	if !strings.Contains(strings.Join(execCalls[1].args, " "), "SSHX_SERVER_HOME") ||
-		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/targets/client-remote/runtimes/") {
+		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/runtimes/"+identity.RuntimeHomeID("client-remote")) {
 		t.Fatalf("start args = %#v", execCalls[1].args)
 	}
 }

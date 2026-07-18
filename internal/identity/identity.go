@@ -223,6 +223,12 @@ func ContextID(clientInstallID, targetID, profile string) string {
 	return digest("context", clientInstallID, targetID, strings.ToLower(profile), ContextABI)
 }
 
+// RuntimeHomeID identifies the remote runtime for a target without embedding
+// the full target and runtime identities in Unix socket paths.
+func RuntimeHomeID(targetID string) string {
+	return digest("runtime-home", targetID, RuntimeID)
+}
+
 func NewConnection(ctx context.Context, installPath, sshPath string, args []string, profile string) (Connection, error) {
 	install, err := EnsureInstall(installPath)
 	if err != nil {

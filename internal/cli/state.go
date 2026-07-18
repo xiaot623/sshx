@@ -27,7 +27,7 @@ func generateUUID() (string, error) {
 }
 
 func remoteServerHome(id string) string {
-	return "$HOME/.sshx_server/targets/" + id + "/runtimes/" + identity.RuntimeID
+	return "$HOME/.sshx_server/runtimes/" + identity.RuntimeHomeID(id)
 }
 
 func remoteContextHome(targetID, contextID string) string {

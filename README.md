@@ -161,7 +161,7 @@ The URL port is the remote port. sshx does not bind `127.0.0.1:<port>`; it binds
 
 ### 🏗️ Shared Server Architecture
 
-- Compatible runtime daemons live under `~/.sshx_server/targets/<TargetID>/runtimes/<RuntimeID>` and serve multiple application contexts and sessions.
+- Compatible runtime daemons live under `~/.sshx_server/runtimes/<RuntimeHomeID>` and serve multiple application contexts and sessions. `RuntimeHomeID` is a stable digest of `TargetID` and `RuntimeID`, keeping Unix socket paths safely below platform limits.
 - Client connects through one hidden multiplexed sidecar SSH channel.
 - Server manages port sniffing, forwarding state, and command bridge routing centrally.
 - Clients renew local and remote leases every 5 seconds. A daemon expires a client after 15 seconds without a heartbeat.
@@ -341,7 +341,7 @@ commands:
 └─────────────────────────────────┘     └─────────────────────────────────┘
 ```
 
-1. **Connection**: `sshx remote` opens a normal SSH session and starts a compatible runtime under `~/.sshx_server/targets/<TargetID>/runtimes/<RuntimeID>`.
+1. **Connection**: `sshx remote` opens a normal SSH session and starts a compatible runtime under `~/.sshx_server/runtimes/<RuntimeHomeID>`.
 2. **Sidecar channel**: One hidden SSH channel multiplexes command, port, heartbeat, and optional RemoteFS traffic. ContextID routes VS Code/Cursor terminals to a healthy live session.
 3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback (`127.0.0.1` / `::1`) and wildcard (`0.0.0.0` / `::`) listeners.
 4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using `ssh -W`.
