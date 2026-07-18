@@ -22,6 +22,9 @@
   "scripts": {
     "build": "node scripts/build-native.js",
     "build:go": "go build -trimpath -ldflags \"-X github.com/xiaot623/sshx/internal/version.Version=${npm_package_version}\" -o sshx ./cmd/sshx",
+    "site": "npm --prefix docs install --no-audit --no-fund && npm --prefix docs run site",
+    "site:dev": "npm --prefix docs install --no-audit --no-fund && npm --prefix docs run dev",
+    "site:preview": "npm --prefix docs run preview",
     "check": "go vet ./...",
     "test": "go test ./... && node --test test/*.test.js",
     "postinstall": "node ./bin/sshx.js --npm-refresh-integrations",
