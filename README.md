@@ -26,7 +26,7 @@ sshx is designed to be **safe to alias**. Hosts without sshx configuration are u
 
 ## Architecture
 
-![sshx system architecture](docs/architecture.svg)
+![sshx system architecture](docs/assets/architecture.svg)
 
 Each user-visible session remains a normal OpenSSH connection (or a `docker exec` session for container targets). One hidden multiplexed sidecar channel carries control and optional RemoteFS traffic to a shared target-side server, while one on-demand local daemon owns DNS records and TCP forwards across active client terminals. Automatic port forwarding uses SSH `direct-tcpip`; Docker targets support shells and the command bridge but do not use automatic port scanning.
 
