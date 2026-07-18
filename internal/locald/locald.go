@@ -390,6 +390,8 @@ func (s *Server) releaseSessionWithGrace(sessionID string) {
 	s.mu.Lock()
 	session := s.sessions[sessionID]
 	if session != nil {
+		// Handoff grace preserves the target's domain and forwarding listeners,
+		// but a disconnected session's SSH transport is no longer active.
 		delete(s.sessions, sessionID)
 		if rec := s.targets[session.TargetKey]; rec != nil && rec.Sessions > 0 {
 			rec.Sessions--
