@@ -94,6 +94,62 @@ func TestVersionFlagPrintsClientVersion(t *testing.T) {
 	}
 }
 
+func TestHelpFlagPrintsSSHXHelpThenOpenSSHHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &stdout, &stderr)
+	r.SSHPath = "/custom/ssh"
+	r.ExecCombined = func(_ context.Context, name string, args []string) ([]byte, error) {
+		if name != "/custom/ssh" {
+			t.Fatalf("executable = %q", name)
+		}
+		if len(args) != 0 {
+			t.Fatalf("ssh help args = %#v, want no destination", args)
+		}
+		if !strings.Contains(stdout.String(), "SSHX COMMANDS") || !strings.HasSuffix(stdout.String(), "OPENSSH HELP\n") {
+			t.Fatalf("sshx help was not written before OpenSSH ran:\n%s", stdout.String())
+		}
+		return []byte("usage: ssh [options] destination\n"), &exec.ExitError{}
+	}
+
+	code := r.Run(context.Background(), []string{"--help"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	help := stdout.String()
+	for _, want := range []string{
+		"sshx [--no-wrap] [ssh-options] destination",
+		"--timeout=<duration>",
+		"integrate install [-y] <vscode|cursor>",
+		"local <command>",
+		"SSHX_CONFIG=<path>",
+		"COMMANDBRIDGE=0|1",
+		"SSHX_REMOTE_BINARY=<path>",
+		"RUNTIME ENVIRONMENT (SET BY SSHX)",
+		"SSHX_WORKSPACE",
+		"OPENSSH HELP\nusage: ssh [options] destination",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help does not contain %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestHelpFlagReportsSSHLaunchFailure(t *testing.T) {
+	var stderr bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	r.ExecCombined = func(context.Context, string, []string) ([]byte, error) {
+		return nil, errors.New("ssh is missing")
+	}
+
+	if code := r.Run(context.Background(), []string{"--help"}); code != 1 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if !strings.Contains(stderr.String(), "exec ssh help: ssh is missing") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestRecordVersionStateRotatesCurrentToLast(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "version-state.json")
 	if err := recordVersionState(path, "0.0.1-rc.1"); err != nil {

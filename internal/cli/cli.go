@@ -66,6 +66,7 @@ type Runner struct {
 	Exec            func(context.Context, string, []string) error
 	ExecInput       func(context.Context, string, []string, io.Reader) error
 	ExecOutput      func(context.Context, string, []string) ([]byte, error)
+	ExecCombined    func(context.Context, string, []string) ([]byte, error)
 	DownloadBinary  func(context.Context, string, string) (string, error)
 	StartBridge     func(context.Context, string, []string, string) (*BridgeSession, error)
 	EnsureResolver  func(context.Context) error
@@ -95,6 +96,7 @@ func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
 		Exec:          defaultExec,
 		ExecInput:     defaultExecInput,
 		ExecOutput:    defaultExecOutput,
+		ExecCombined:  defaultExecCombinedOutput,
 	}
 	r.DownloadBinary = defaultDownloadBinary
 	r.StartBridge = r.defaultStartBridge
@@ -119,6 +121,9 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Fprintf(r.Stdout, "sshx %s\n", clientVersion())
 		return 0
+	}
+	if len(args) == 1 && args[0] == "--help" {
+		return r.runHelp(ctx)
 	}
 	if len(args) > 0 {
 		switch args[0] {
