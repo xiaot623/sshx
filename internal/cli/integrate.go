@@ -23,7 +23,10 @@ func (r *Runner) runIntegrate(ctx context.Context, args []string) int {
 		fmt.Fprintf(r.Stderr, "sshx integrate: %v\n", err)
 		return 1
 	}
-	result, err := integration.Install(ctx, profile, integration.InstallOptions{Executable: executable})
+	result, err := integration.Install(ctx, profile, integration.InstallOptions{
+		Executable: executable,
+		NPMManaged: os.Getenv("SSHX_NPM_LAUNCHER") == "1",
+	})
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx integrate: %v\n", err)
 		return 1

@@ -30,7 +30,7 @@ func TestInstallCreatesOneBinaryShimsAndPreservesSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := InstallOptions{
-		HomeDir: home, ConfigHome: filepath.Join(home, "config"), GOOS: "linux", Executable: driver,
+		HomeDir: home, ConfigHome: filepath.Join(home, "config"), GOOS: "linux", Executable: driver, NPMManaged: true,
 		LookPath: func(name string) (string, error) {
 			if name == "ssh" {
 				return ssh, nil
@@ -66,6 +66,13 @@ func TestInstallCreatesOneBinaryShimsAndPreservesSettings(t *testing.T) {
 	}
 	if mode := fileMode(t, settings); mode != 0o640 {
 		t.Fatalf("settings mode = %#o", mode)
+	}
+	marker := filepath.Join(filepath.Dir(filepath.Dir(result.SSHShim)), npmManagedMarker)
+	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "1\n" {
+		t.Fatalf("npm marker = %q, %v", contents, err)
+	}
+	if mode := fileMode(t, marker); mode != 0o600 {
+		t.Fatalf("npm marker mode = %#o", mode)
 	}
 	// Re-running install is the repair and upgrade operation.
 	second, err := Install(context.Background(), VSCode, opts)

@@ -16,7 +16,10 @@ import (
 	"github.com/xiaot623/sshx/internal/processlock"
 )
 
-const settingsKey = "remote.SSH.path"
+const (
+	settingsKey      = "remote.SSH.path"
+	npmManagedMarker = ".npm-managed"
+)
 
 type Profile string
 
@@ -41,6 +44,7 @@ type InstallOptions struct {
 	ConfigHome string
 	GOOS       string
 	Executable string
+	NPMManaged bool
 	LookPath   func(string) (string, error)
 	Run        func(context.Context, string, ...string) ([]byte, error)
 }
@@ -233,6 +237,11 @@ func Install(ctx context.Context, profile Profile, opts InstallOptions) (Install
 	}
 	if err := WriteDescriptor(filepath.Join(staging, "integration.json"), descriptor); err != nil {
 		return InstallResult{}, err
+	}
+	if opts.NPMManaged {
+		if err := atomicWrite(filepath.Join(staging, npmManagedMarker), []byte("1\n"), 0o600); err != nil {
+			return InstallResult{}, err
+		}
 	}
 	if err := validateProfile(staging, executable, descriptor); err != nil {
 		return InstallResult{}, err
