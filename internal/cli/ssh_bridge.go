@@ -148,6 +148,10 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	var fsMu sync.RWMutex
 	var fsPeer *remotefs.Peer
 	var mountManager *remoteMountManager
+	var workspaceBackend *remotefs.RootBackend
+	workspaceMountID := "workspace"
+	mountRoot := ""
+	workspace := ""
 	readOnly := os.Getenv("FS_READ_ONLY") == "1"
 	if r.remoteFS {
 		mountManager = newRemoteMountManager(sessionID, readOnly)
@@ -262,23 +266,82 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			<-peer.Done()
 			cancel()
 		}()
+		if !r.integrationSidecar {
+			cwd, cwdErr := os.Getwd()
+			if cwdErr != nil {
+				err = cwdErr
+			} else if within, withinErr := remotefs.PathWithin(localReverseMountsRoot(), cwd); withinErr != nil {
+				err = withinErr
+			} else if within {
+				err = bridge.ErrMountedCwd
+			}
+			if err == nil {
+				var layout remotefs.ExportLayout
+				layout, err = remotefs.CurrentExportLayout(cwd)
+				if err == nil {
+					workspaceBackend, err = remotefs.OpenRootBackendWithOptions(layout.RootPath, remotefs.RootBackendOptions{DisableDelete: true})
+				}
+				if err == nil {
+					err = peer.RegisterBackend(workspaceMountID, workspaceBackend)
+				}
+				if err == nil {
+					mountCtx, mountCancel := context.WithTimeout(bridgeCtx, 10*time.Second)
+					mountRoot, err = peer.CreateMountAtWithOptions(mountCtx, workspaceMountID, layout.MountPath, remotefs.MountOptions{ReadOnly: readOnly})
+					mountCancel()
+				}
+				if err == nil {
+					workspace, err = remotefs.WorkspacePathBelow(mountRoot, filepath.ToSlash(layout.RelativeCwd))
+				}
+			}
+			if err != nil {
+				if mountRoot != "" {
+					releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = peer.ReleaseMount(releaseCtx, workspaceMountID)
+					releaseCancel()
+				}
+				_ = peer.UnregisterBackend(workspaceMountID)
+				if workspaceBackend != nil {
+					_ = workspaceBackend.CloseBackend()
+				}
+				if mountManager != nil {
+					mountManager.Close()
+				}
+				_ = peer.Close()
+				cancel()
+				closeLifecycle()
+				_ = muxSession.Close()
+				controlProxy.stop()
+				return nil, fmt.Errorf("remote fs: %w", err)
+			}
+		}
 	}
 
 	var stopOnce sync.Once
 	stop := func() {
 		stopOnce.Do(func() {
 			autoForwardStopped.Store(true)
-			cancel()
-			_ = muxSession.Close()
-			if mountManager != nil {
-				mountManager.Close()
-			}
 			fsMu.RLock()
 			peer := fsPeer
 			fsMu.RUnlock()
 			if peer != nil {
+				if mountRoot != "" {
+					releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = peer.ReleaseMount(releaseCtx, workspaceMountID)
+					releaseCancel()
+				}
+				if workspaceBackend != nil {
+					_ = peer.UnregisterBackend(workspaceMountID)
+				}
 				_ = peer.Close()
 			}
+			if workspaceBackend != nil {
+				_ = workspaceBackend.CloseBackend()
+			}
+			if mountManager != nil {
+				mountManager.Close()
+			}
+			cancel()
+			_ = muxSession.Close()
 			closeLifecycle()
 			controlProxy.stop()
 			select {
@@ -287,7 +350,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			}
 		})
 	}
-	return &BridgeSession{SessionID: sessionID, ContextID: connection.ContextID, RemoteFS: r.remoteFS, ReadOnly: readOnly, Done: bridgeCtx.Done(), stop: stop}, nil
+	return &BridgeSession{SessionID: sessionID, ContextID: connection.ContextID, RemoteFS: r.remoteFS, MountRoot: mountRoot, Workspace: workspace, ReadOnly: readOnly, Done: bridgeCtx.Done(), stop: stop}, nil
 }
 
 func sshControlPath(args []string) string {

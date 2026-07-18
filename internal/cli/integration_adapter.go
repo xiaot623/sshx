@@ -161,6 +161,7 @@ func (r *Runner) runIntegrationSidecar(
 	sidecarRunner.commandBridge = cfg.Features.CommandBridge
 	sidecarRunner.autoForward = cfg.Features.AutoForward
 	sidecarRunner.remoteFS = cfg.Features.RemoteFS
+	sidecarRunner.integrationSidecar = true
 
 	sidecarFeatures := cfg.Features
 	if sidecarRunner.autoForward {

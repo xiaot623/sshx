@@ -73,7 +73,7 @@ func TestRemoteFSMountStartupReclaimsOnlyStaleSessions(t *testing.T) {
 	}
 }
 
-func TestRemoteFSSessionDoesNotExportLocalWorkspaceToRemote(t *testing.T) {
+func TestIntegrationRemoteFSSessionDoesNotExportLocalWorkspaceToRemote(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"remote", "sh", "-c", "cat note.txt"})
 	session := &BridgeSession{SessionID: "session-1", ContextID: "context-1", RemoteFS: true, ReadOnly: true}
 	args := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/id", session)
@@ -91,6 +91,30 @@ func TestRemoteFSSessionDoesNotExportLocalWorkspaceToRemote(t *testing.T) {
 	}
 	if strings.Contains(command, "SSHX_WORKSPACE") || strings.Contains(command, "SSHX_MOUNT_ROOT") {
 		t.Fatalf("remote command still exports a local workspace: %q", command)
+	}
+}
+
+func TestDirectRemoteFSSessionExportsLocalWorkspaceToRemote(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"remote", "sh", "-c", "cat note.txt"})
+	session := &BridgeSession{
+		SessionID: "session-1",
+		ContextID: "context-1",
+		RemoteFS:  true,
+		MountRoot: "/tmp/mounts/session-1/Users/xiaot",
+		Workspace: "/tmp/mounts/session-1/Users/xiaot/workspace/sshx",
+		ReadOnly:  true,
+	}
+	args := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/id", session)
+	command := args[len(args)-1]
+	for _, want := range []string{
+		"SSHX_MOUNT_ROOT",
+		"SSHX_WORKSPACE",
+		"cd -- \"$SSHX_WORKSPACE\"",
+		"cat note.txt",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("remote command %q does not contain %q", command, want)
+		}
 	}
 }
 

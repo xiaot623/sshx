@@ -5,7 +5,7 @@
 **sshx** is a drop-in wrapper around OpenSSH. Wrap it as `alias ssh=sshx` and your existing SSH workflow works exactly as before — every flag, config, and connection passes through verbatim. But when you connect to a host (or Docker container) with sshx-aware features enabled, you unlock a connection-scoped shared remote server that gives you:
 
 - 🔄 **Reverse command bridge** — run `sshx local <cmd>` *on the remote* to execute commands on your local machine, with stdout, stderr, exit code, and stdin all propagated.
-- 📁 **Remote-to-local filesystem** — opt in to let local tools work directly with files from the active remote session.
+- 📁 **Bidirectional workspace mount** — direct CLI sessions can use remote tools on local files, and local tools on remote files.
 - 🔌 **Automatic port forwarding** — remote local listeners (loopback `127.0.0.1` and wildcard `0.0.0.0`; e.g., a dev server on `0.0.0.0:8080` or `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
 - 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. Command bridge support works inside containers via `docker exec`.
@@ -68,17 +68,19 @@ sshx local --timeout=30 npm test
 - Commands have no implicit deadline. Put `--timeout=<duration>` immediately after the target to opt in; bare numbers mean seconds, and values such as `500ms`, `30s`, and `2m` are accepted. Timed-out commands exit with status 124.
 - Policy: a configurable deny list controls which commands are blocked.
 
-### 📁 Remote-to-Local Filesystem (opt-in, beta)
+### 📁 Bidirectional Workspace Mount (opt-in, beta)
 
-Set `features.remoteFs: true` to let a command launched with `sshx local <cmd>` access the remote working tree through a local FUSE mount:
+Set `features.remoteFs: true` to expose the command initiator's workspace through a read-write FUSE mount:
 
+- A direct `sshx remote <cmd>` exports the local home (or the current directory when outside the home), mounts it on the remote Linux target, and starts the remote command in the mapped local working directory.
+- A direct interactive `sshx remote` shell still starts in the remote home; `SSHX_MOUNT_ROOT` and `SSHX_WORKSPACE` point to the mounted local source tree.
 - The remote home is exported lazily on the first local command. A working directory outside the remote home creates a separate lazy export for that root.
 - The local command starts at the corresponding mounted working directory. Absolute command arguments are not rewritten.
 - Mounts are reused for the sidecar session, so detached tools such as `open` and `code` can continue reading files after the bridge request returns.
-- Local files are never exported or mounted on the remote host.
+- VS Code/Cursor Remote-SSH integration sidecars stay remote-to-local only: those application sessions do not export a local workspace to the remote host.
 - With RemoteFS disabled, the command runs from the local home and receives `SSHX_REMOTE_CWD` plus `SSHX_REMOTE_FS=0`.
 
-The mounted remote tree permits reads, writes, and creation, but blocks file/directory deletion and rename. It can include sensitive remote files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust.
+Mounted trees permit reads, writes, and creation, but block file/directory deletion and rename in both directions. They can include sensitive files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust.
 
 Set `FS_READ_ONLY=1` on the client when starting sshx to make the session mounts read-only:
 
@@ -88,13 +90,13 @@ FS_READ_ONLY=1 sshx debian@orb pwd
 
 The value is exported into the remote session, and later `sshx local <cmd>` mounts remain read-only.
 
-FUSE is required only on the local machine receiving the mounted remote tree. A mount failure fails that `sshx local` invocation instead of running it from the wrong directory. Linux needs `/dev/fuse` plus `fusermount`/`fusermount3`; macOS needs a current macFUSE installation and is currently beta.
+FUSE is required on the machine receiving a mounted tree. Direct `sshx remote` sessions therefore require FUSE on the remote Linux target; `sshx local` with RemoteFS requires FUSE on the local client. A mount failure fails the invocation instead of running it from the wrong directory.
 
 #### FUSE setup
 
-The local machine receiving the mounted view needs a working FUSE runtime. The remote Linux host exports files through the sshx protocol and does not need FUSE.
+Each machine that receives a mounted view needs a working FUSE runtime. The remote Linux target needs FUSE for direct local-to-remote workspace mounts; a macOS client needs macFUSE for remote-to-local mounts.
 
-**Linux client**
+**Linux client/target**
 
 Install the FUSE 3 userspace tools (the kernel normally already includes the FUSE driver):
 
@@ -314,8 +316,9 @@ features:
   # <host>.<user>.sshx:<remote-port>.
   autoForward: true
 
-  # Lazily mount remote files for local commands. Default: false.
-  # Requires FUSE only on the local machine.
+  # Bidirectional workspace mounts for direct CLI sessions. Default: false.
+  # VS Code/Cursor integrations remain remote-to-local only.
+  # Requires FUSE on each machine receiving a mount.
   remoteFs: false
 
 commands:
@@ -406,7 +409,7 @@ sshx/
 
 - [x] **v1** — Command bridge (non-interactive), auto port forwarding, domain binding, shared server
 - [ ] **v2** — Streaming stdin for command bridge, GitHub binary releases, Windows client support
-- [x] **remoteFs beta** — Lazy remote-to-local workspace mounting on Linux/macOS clients
+- [x] **remoteFs beta** — Bidirectional direct-CLI workspace mounting, with remote-to-local-only application integrations
 
 ---
 

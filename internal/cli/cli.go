@@ -19,6 +19,8 @@ type BridgeSession struct {
 	SessionID string
 	ContextID string
 	RemoteFS  bool
+	MountRoot string
+	Workspace string
 	ReadOnly  bool
 	Done      <-chan struct{}
 	stop      func()
@@ -69,11 +71,12 @@ type Runner struct {
 	EnsureResolver  func(context.Context) error
 	ResolveIdentity func(context.Context, string, []string, string) (identity.Connection, error)
 
-	commandPolicy config.CommandPolicy
-	commandBridge bool
-	autoForward   bool
-	remoteFS      bool
-	connection    identity.Connection
+	commandPolicy      config.CommandPolicy
+	commandBridge      bool
+	autoForward        bool
+	remoteFS           bool
+	integrationSidecar bool
+	connection         identity.Connection
 }
 
 func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {

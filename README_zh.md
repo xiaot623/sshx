@@ -5,7 +5,7 @@
 **sshx** 是 OpenSSH 的即插即用封装器。设置 `alias ssh=sshx` 后，你现有的 SSH 工作流完全不受影响——所有参数、配置和连接都原样透传。但当连接到启用了 sshx 特性的主机（或 Docker 容器）时，你会获得一个随连接生命周期存在的共享远程服务器，提供以下能力：
 
 - 🔄 **反向命令桥** — 在*远程*执行 `sshx local <cmd>`，命令实际在你的本地机器上运行，stdout、stderr、退出码和 stdin 全部正确传递。
-- 📁 **远端到本地文件系统** — 按需开启后，让本地工具直接处理当前远端会话中的文件。
+- 📁 **双向工作区挂载** — 普通 CLI 会话既可用远端工具操作本地文件，也可用本地工具操作远端文件。
 - 🔌 **自动端口转发** — 远程本地监听端口（回环 `127.0.0.1` 与通配 `0.0.0.0`；如在 `0.0.0.0:8080` 或 `localhost:8080` 上的开发服务器）被自动检测并转发到本地。
 - 🌐 **本地域名绑定** — 在本地浏览器中通过 `<主机>.<用户名>.sshx:<端口>` 访问转发端口，无需手动设置 `-L` 参数。
 - 🐳 **Docker 容器支持** — 通过名称或 ID 直接连接运行中的容器：`sshx my-container`。命令桥可通过 `docker exec` 在容器内工作。
@@ -68,17 +68,19 @@ sshx local --timeout=30 npm test
 - 命令默认没有隐式截止时间。如需限制，请紧跟 target 指定 `--timeout=<时长>`；裸数字按秒解释，也支持 `500ms`、`30s`、`2m`。超时退出码为 124。
 - 策略：通过可配置的拒绝列表控制哪些命令被阻止。
 
-### 📁 远端到本地文件系统（按需开启，Beta）
+### 📁 双向工作区挂载（按需开启，Beta）
 
-设置 `features.remoteFs: true` 后，通过 `sshx local <cmd>` 启动的本地工具可以访问远端工作树：
+设置 `features.remoteFs: true` 后，命令发起方的工作区会通过读写 FUSE 挂载暴露给另一端：
 
+- 普通 `sshx remote <cmd>` 会导出本地 HOME（当前目录位于 HOME 外时改为导出当前目录），挂载到远端 Linux，并从映射后的本地工作目录启动远端命令。
+- 普通交互式 `sshx remote` shell 仍从远端 HOME 启动；`SSHX_MOUNT_ROOT` 与 `SSHX_WORKSPACE` 指向已挂载的本地源码树。
 - 第一次本地命令按需导出并挂载远端 HOME；远端 cwd 位于 HOME 外时，为对应根目录建立独立的按需导出。
 - 本地命令从映射后的远端工作目录启动，但不会自动重写命令参数中的绝对路径。
 - 挂载在 sidecar 会话内复用，因此 `open`、`code` 等脱离请求继续运行的工具仍可读取文件。
-- 本地文件不会被导出或挂载到远端。
+- VS Code/Cursor Remote-SSH 集成 sidecar 仍保持单向：这类应用会话不会把本地工作区导出到远端。
 - RemoteFS 关闭时，本地命令从本地 HOME 启动，并获得 `SSHX_REMOTE_CWD` 和 `SSHX_REMOTE_FS=0`。
 
-挂载后的远端目录允许读取、写入和新建，但禁止删除文件/目录及重命名。它可能包含 shell 配置、SSH 凭据等敏感文件，请只对可信 target 开启 `remoteFs`。
+两个方向的挂载目录都允许读取、写入和新建，但禁止删除文件/目录及重命名。挂载可能包含 shell 配置、SSH 凭据等敏感文件，请只对可信 target 开启 `remoteFs`。
 
 在 client 启动 sshx 时设置 `FS_READ_ONLY=1`，即可让该会话的挂载只读：
 
@@ -88,13 +90,13 @@ FS_READ_ONLY=1 sshx debian@orb pwd
 
 该值会被导出到远端会话，之后执行 `sshx local <cmd>` 建立的挂载保持只读。
 
-只有接收远端挂载的本地机器需要 FUSE。挂载失败时，当前 `sshx local` 命令会失败，不会在错误目录继续执行。Linux 需要 `/dev/fuse` 与 `fusermount`/`fusermount3`；macOS 需要当前版本的 macFUSE，现阶段标记为 Beta。
+接收挂载目录的一端需要 FUSE。因此普通 `sshx remote` 需要远端 Linux 安装 FUSE；启用 RemoteFS 的 `sshx local` 需要本地客户端安装 FUSE。挂载失败时当前调用会直接失败，不会在错误目录继续执行。
 
 #### FUSE 环境配置
 
-接收挂载视图的本地机器需要可用的 FUSE 环境。远端 Linux 主机通过 sshx 协议导出文件，不需要安装 FUSE。
+每个接收挂载视图的机器都需要可用的 FUSE 环境：远端 Linux 为普通 CLI 的本地到远端挂载提供 FUSE；macOS 客户端通过 macFUSE 接收远端到本地挂载。
 
-**Linux client**
+**Linux 客户端/目标端**
 
 安装 FUSE 3 用户态工具（通常内核已经包含 FUSE 驱动）：
 
@@ -314,8 +316,9 @@ features:
   # <host>.<user>.sshx:<远程端口> 暴露。
   autoForward: true
 
-  # 为本地命令按需挂载远端文件。默认：false。
-  # 只有本地机器需要 FUSE。
+  # 普通 CLI 会话使用双向工作区挂载。默认：false。
+  # VS Code/Cursor 集成仍仅使用远端到本地方向。
+  # 每个接收挂载的一端都需要 FUSE。
   remoteFs: false
 
 commands:
@@ -406,7 +409,7 @@ sshx/
 
 - [x] **v1** — 命令桥（非交互式）、自动端口转发、域名绑定、共享服务器
 - [ ] **v2** — 命令桥流式 stdin、GitHub 二进制发布、Windows 客户端支持
-- [x] **remoteFs Beta** — Linux/macOS 客户端按需挂载远端工作区
+- [x] **remoteFs Beta** — 普通 CLI 双向挂载；应用集成仅远端到本地挂载
 
 ---
 

@@ -19,7 +19,7 @@ import (
 
 const (
 	ContextABI     = "context-v1"
-	RuntimeID      = "bridge-v1.mux-v1.remotefs-v1"
+	RuntimeID      = "bridge-v1.mux-v1.remotefs-v2"
 	LocalRuntimeID = "locald-v1.forward-v1"
 )
 

@@ -15,7 +15,31 @@ import (
 	"github.com/xiaot623/sshx/internal/remotefs"
 )
 
-func startRemoteFSServer(t *testing.T) (context.Context, string, *Server) {
+type captureRemoteMountDriver struct {
+	backend chan remotefs.Backend
+	options chan remotefs.MountOptions
+}
+
+type testRemoteMount struct {
+	path string
+	done chan error
+	once sync.Once
+}
+
+func (d *captureRemoteMountDriver) Mount(_ context.Context, path string, backend remotefs.Backend, options remotefs.MountOptions) (remotefs.Mount, error) {
+	d.backend <- backend
+	d.options <- options
+	return &testRemoteMount{path: path, done: make(chan error)}, nil
+}
+
+func (m *testRemoteMount) Path() string       { return m.path }
+func (m *testRemoteMount) Done() <-chan error { return m.done }
+func (m *testRemoteMount) Unmount(context.Context) error {
+	m.once.Do(func() { close(m.done) })
+	return nil
+}
+
+func startRemoteFSServer(t *testing.T, drivers ...remotefs.MountDriver) (context.Context, string, *Server) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	socket := shortSocketPath(t)
@@ -24,6 +48,9 @@ func startRemoteFSServer(t *testing.T) (context.Context, string, *Server) {
 		Token:        "secret",
 		Version:      "test-version",
 		DrainTimeout: time.Second,
+	}
+	if len(drivers) > 0 {
+		server.MountDriver = drivers[0]
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -91,18 +118,47 @@ func waitForRemoteFSPeer(t *testing.T, server *Server, sessionID string) {
 	}
 }
 
-func TestRemoteFSRejectsLocalToRemoteMountChannel(t *testing.T) {
-	ctx, socket, _ := startRemoteFSServer(t)
+func TestRemoteFSAcceptsLocalToRemoteMountForDirectSession(t *testing.T) {
+	driver := &captureRemoteMountDriver{backend: make(chan remotefs.Backend, 1), options: make(chan remotefs.MountOptions, 1)}
+	ctx, socket, _ := startRemoteFSServer(t, driver)
 	clientPeer, _ := connectRemoteFSPair(t, ctx, socket, nil)
-	backend, err := remotefs.OpenRootBackend(t.TempDir())
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "local.txt"), []byte("from-local"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backend, err := remotefs.OpenRootBackend(root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = backend.CloseBackend() })
 	if err := clientPeer.RegisterBackend("local-export", backend); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clientPeer.CreateMount(ctx, "local-export"); err == nil {
-		t.Fatal("server accepted a local-to-remote mount request")
+	path, err := clientPeer.CreateMountAtWithOptions(ctx, "local-export", "Users/xiaot", remotefs.MountOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != "xiaot" {
+		t.Fatalf("mount path = %q", path)
+	}
+	mountedBackend := <-driver.backend
+	if options := <-driver.options; !options.ReadOnly {
+		t.Fatal("read-only mount option was not propagated")
+	}
+	handle, _, err := mountedBackend.Open(ctx, "local.txt", remotefs.OpenRead, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := mountedBackend.Read(ctx, handle, 0, 32)
+	_ = mountedBackend.Close(ctx, handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "from-local" {
+		t.Fatalf("mounted data = %q", data)
+	}
+	if err := clientPeer.ReleaseMount(ctx, "local-export"); err != nil {
+		t.Fatal(err)
 	}
 }
 

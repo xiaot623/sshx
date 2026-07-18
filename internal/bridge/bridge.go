@@ -29,6 +29,7 @@ import (
 )
 
 var ErrNoClient = errors.New("no active sshx client bridge session")
+var ErrMountedCwd = errors.New("cwd is inside an sshx mount; leave the mount before running this command")
 
 type CommandResult struct {
 	ExitCode int
@@ -72,6 +73,8 @@ type Server struct {
 	DrainTimeout     time.Duration
 	Version          string
 	FSSocketPath     string
+	MountRoot        string
+	MountDriver      remotefs.MountDriver
 
 	mu            sync.Mutex
 	clients       []*clientConn
@@ -79,6 +82,9 @@ type Server struct {
 	fsBackends    map[string]map[string]*remotefs.RootBackend
 	fsExporting   map[string]map[string]chan struct{}
 	fsConnecting  map[string]bool
+	fsMounts      map[string]remotefs.Mount
+	fsMounting    map[string]bool
+	fsUnmounting  map[string]chan struct{}
 	observedPorts map[int]bool
 	portMisses    map[int]int
 	lastActive    time.Time
@@ -142,8 +148,23 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.fsConnecting == nil {
 		s.fsConnecting = map[string]bool{}
 	}
+	if s.fsMounts == nil {
+		s.fsMounts = map[string]remotefs.Mount{}
+	}
+	if s.fsMounting == nil {
+		s.fsMounting = map[string]bool{}
+	}
+	if s.fsUnmounting == nil {
+		s.fsUnmounting = map[string]chan struct{}{}
+	}
 	if s.FSSocketPath == "" {
 		s.FSSocketPath = s.SocketPath + ".fs"
+	}
+	if s.MountRoot == "" {
+		s.MountRoot = filepath.Join(filepath.Dir(s.SocketPath), "mounts")
+	}
+	if s.MountDriver == nil {
+		s.MountDriver = remotefs.GoFuseDriver{}
 	}
 	serveCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
@@ -156,6 +177,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		return err
 	}
 	defer lock.Release()
+	s.cleanupStaleMounts()
 	_ = os.Remove(s.SocketPath)
 	ln, err := net.Listen("unix", s.SocketPath)
 	if err != nil {
@@ -286,7 +308,14 @@ func (s *Server) handleFSConn(ctx context.Context, conn net.Conn) {
 		s.mu.Unlock()
 		sessionID = candidate
 		return nil
-	}, remotefs.PeerOptions{})
+	}, remotefs.PeerOptions{
+		OnMount: func(mountCtx context.Context, peer *remotefs.Peer, mountID, mountPath string, options remotefs.MountOptions) (string, error) {
+			return s.mountRemoteFS(mountCtx, ctx, sessionID, peer, mountID, mountPath, options)
+		},
+		OnUnmount: func(unmountCtx context.Context, mountID string) error {
+			return s.unmountRemoteFS(unmountCtx, sessionID, mountID)
+		},
+	})
 	if reserved {
 		s.mu.Lock()
 		delete(s.fsConnecting, sessionID)
@@ -323,6 +352,208 @@ func (s *Server) handleFSConn(ctx context.Context, conn net.Conn) {
 func safeSessionID(sessionID string) bool {
 	return sessionID != "" && sessionID != "." && sessionID != ".." &&
 		filepath.Base(sessionID) == sessionID && !strings.ContainsAny(sessionID, `/\`)
+}
+
+func fsMountKey(sessionID, mountID string) string {
+	return sessionID + "\x00" + mountID
+}
+
+func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionID string, peer *remotefs.Peer, mountID, mountHierarchy string, options remotefs.MountOptions) (string, error) {
+	if mountID == "" {
+		return "", errors.New("remote fs mountId is required")
+	}
+	key := fsMountKey(sessionID, mountID)
+	s.mu.Lock()
+	if s.fsMounting[sessionID] || s.hasFSMountForSessionLocked(sessionID) {
+		s.mu.Unlock()
+		return "", errors.New("remote fs mount already exists")
+	}
+	s.fsMounting[sessionID] = true
+	s.mu.Unlock()
+	sessionPath := filepath.Join(s.MountRoot, sessionID)
+	path, err := remotefs.MountPathBelow(sessionPath, mountHierarchy)
+	if err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	_ = syscall.Unmount(path, 0)
+	if err := os.RemoveAll(path); err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	if err := os.MkdirAll(sessionPath, 0o700); err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(sessionPath, ".mount-path"), []byte(mountHierarchy+"\n"), 0o600); err != nil {
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	// The request context only owns mount setup. A successful mount must outlive
+	// the mount.create handler and is released explicitly by the peer lifecycle.
+	mountCtx, mountCancel := context.WithCancel(lifetimeCtx)
+	stopRequestCancel := context.AfterFunc(requestCtx, mountCancel)
+	mount, err := s.MountDriver.Mount(mountCtx, path, peer.RemoteBackend(mountID), options)
+	stopRequestCancel()
+	if err != nil {
+		mountCancel()
+		_ = os.RemoveAll(sessionPath)
+		s.mu.Lock()
+		delete(s.fsMounting, sessionID)
+		s.mu.Unlock()
+		return "", err
+	}
+	s.mu.Lock()
+	delete(s.fsMounting, sessionID)
+	peerClosed := false
+	select {
+	case <-peer.Done():
+		peerClosed = true
+	default:
+	}
+	if s.draining || peerClosed || requestCtx.Err() != nil {
+		s.mu.Unlock()
+		_ = mount.Unmount(context.Background())
+		mountCancel()
+		if err := requestCtx.Err(); err != nil {
+			return "", err
+		}
+		return "", errors.New("remote fs session closed while mounting")
+	}
+	s.fsMounts[key] = &lifetimeMount{Mount: mount, cancel: mountCancel}
+	s.lastActive = time.Now()
+	s.mu.Unlock()
+	return path, nil
+}
+
+type lifetimeMount struct {
+	remotefs.Mount
+	cancel context.CancelFunc
+}
+
+func (m *lifetimeMount) Unmount(ctx context.Context) error {
+	err := m.Mount.Unmount(ctx)
+	if err == nil {
+		m.cancel()
+	}
+	return err
+}
+
+func (s *Server) unmountRemoteFS(ctx context.Context, sessionID, mountID string) error {
+	key := fsMountKey(sessionID, mountID)
+	for {
+		s.mu.Lock()
+		if s.fsMounting[sessionID] {
+			s.mu.Unlock()
+			return syscall.EBUSY
+		}
+		if done := s.fsUnmounting[key]; done != nil {
+			s.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		mount := s.fsMounts[key]
+		if mount == nil {
+			s.mu.Unlock()
+			return nil
+		}
+		done := make(chan struct{})
+		s.fsUnmounting[key] = done
+		s.mu.Unlock()
+
+		err := mount.Unmount(ctx)
+		s.mu.Lock()
+		if err == nil {
+			delete(s.fsMounts, key)
+		}
+		delete(s.fsUnmounting, key)
+		s.lastActive = time.Now()
+		close(done)
+		s.mu.Unlock()
+		if err == nil {
+			_ = os.RemoveAll(filepath.Join(s.MountRoot, sessionID))
+		}
+		return err
+	}
+}
+
+func (s *Server) hasFSMountForSessionLocked(sessionID string) bool {
+	prefix := sessionID + "\x00"
+	for key := range s.fsMounts {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) cleanupStaleMounts() {
+	entries, err := os.ReadDir(s.MountRoot)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !safeSessionID(entry.Name()) {
+			continue
+		}
+		sessionPath := filepath.Join(s.MountRoot, entry.Name())
+		mountPath := filepath.Join(sessionPath, "workspace")
+		if marker, readErr := os.ReadFile(filepath.Join(sessionPath, ".mount-path")); readErr == nil {
+			if resolved, resolveErr := remotefs.MountPathBelow(sessionPath, strings.TrimSpace(string(marker))); resolveErr == nil {
+				mountPath = resolved
+			} else {
+				continue
+			}
+		}
+		if mounted, statErr := managedPathMounted(mountPath); statErr == nil && !mounted {
+			_ = os.RemoveAll(sessionPath)
+			continue
+		}
+		unmountErr := syscall.Unmount(mountPath, 0)
+		detached := unmountErr == nil || errors.Is(unmountErr, syscall.EINVAL) || errors.Is(unmountErr, syscall.ENOENT)
+		if !detached {
+			if binary, lookErr := exec.LookPath("fusermount3"); lookErr == nil {
+				detached = exec.Command(binary, "-uz", mountPath).Run() == nil
+			} else if binary, lookErr := exec.LookPath("fusermount"); lookErr == nil {
+				detached = exec.Command(binary, "-uz", mountPath).Run() == nil
+			}
+		}
+		if detached {
+			_ = os.RemoveAll(sessionPath)
+		}
+	}
+}
+
+func managedPathMounted(path string) (bool, error) {
+	parentInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return false, err
+	}
+	pathInfo, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	parentStat, parentOK := parentInfo.Sys().(*syscall.Stat_t)
+	pathStat, pathOK := pathInfo.Sys().(*syscall.Stat_t)
+	if !parentOK || !pathOK {
+		return true, nil
+	}
+	return parentStat.Dev != pathStat.Dev, nil
 }
 
 func removeSocketIfOwned(path string, owned os.FileInfo) {

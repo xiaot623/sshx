@@ -59,6 +59,13 @@ func remoteBridgeEnvScript(remoteHome string, session *BridgeSession) string {
 	} else {
 		script += "; SSHX_REMOTE_FS=0; export SSHX_REMOTE_FS"
 	}
+	if session.Workspace != "" {
+		script += "; SSHX_WORKSPACE=" + shellQuote(session.Workspace)
+		if session.MountRoot != "" {
+			script += "; SSHX_MOUNT_ROOT=" + shellQuote(session.MountRoot)
+		}
+		script += "; export SSHX_WORKSPACE SSHX_MOUNT_ROOT"
+	}
 	return script
 }
 
