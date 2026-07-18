@@ -5,78 +5,106 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/integration"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 )
 
-func TestTransformVSCodeBootstrap(t *testing.T) {
-	script := []byte("#!/bin/sh\nVSCODE_AGENT_FOLDER=$HOME/.vscode-server\necho ready\n")
-	got, ok := transformBootstrap(integration.VSCode, script, "context", "$HOME/.sshx/context")
-	if !ok {
-		t.Fatal("script was not recognized")
+func TestIntegrationSessionWrapsEveryRemoteCommand(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"-T", "-D", "4123", "host", "bash", "-s"})
+	got := integrationSessionSSHArgs(parsed, "context-id", "$HOME/.sshx/context")
+	// Keep the forwarding options and target byte-for-byte before replacing the remote command.
+	if len(got) != 5 || strings.Join(got[:4], " ") != "-T -D 4123 host" {
+		t.Fatalf("connection args = %#v", got)
 	}
-	for _, want := range []string{"VSCODE_AGENT_FOLDER=\"${VSCODE_AGENT_FOLDER%/}/sshx/context\"", "SSHX_CONTEXT_ID='context'", "$HOME/.sshx/context/bin:$PATH"} {
-		if !strings.Contains(string(got), want) {
-			t.Fatalf("missing %q in:\n%s", want, got)
+	remoteCommand := got[len(got)-1]
+	for _, want := range []string{"SSHX_CONTEXT_ID=", "context-id", "$HOME/.sshx/context/bin", `exec "$shell" -c`, "bash -s"} {
+		if !strings.Contains(remoteCommand, want) {
+			t.Fatalf("missing %q in remote command: %q", want, remoteCommand)
 		}
 	}
-	for _, forbidden := range []string{"SSHX_SESSION_ID", "SSHX_BRIDGE_SOCKET", "SSHX_BRIDGE_TOKEN", "SSHX_RUNTIME_ID", "SSHX_SERVER_HOME", "SSHX_REMOTE_FS"} {
-		if strings.Contains(string(got), forbidden) {
-			t.Fatalf("bootstrap leaked %s into the application terminal environment:\n%s", forbidden, got)
+	for _, forbidden := range []string{"VSCODE_AGENT_FOLDER", "SERVER_DATA_DIR"} {
+		if strings.Contains(remoteCommand, forbidden) {
+			t.Fatalf("remote command contains application-specific variable %s: %q", forbidden, remoteCommand)
 		}
 	}
 }
 
-func TestTransformCursorRequiresBothAnchors(t *testing.T) {
-	if _, ok := transformBootstrap(integration.Cursor, []byte("VSCODE_AGENT_FOLDER=x\n"), "c", "h"); ok {
-		t.Fatal("Cursor script without SERVER_DATA_DIR was accepted")
-	}
-	script := []byte("SERVER_DATA_DIR=$HOME/.cursor-server\nVSCODE_AGENT_FOLDER=$SERVER_DATA_DIR\n")
-	got, ok := transformBootstrap(integration.Cursor, script, "c", "h")
-	if !ok || !strings.Contains(string(got), "SERVER_DATA_DIR=\"${SERVER_DATA_DIR%/}/sshx/c\"") {
-		t.Fatalf("Cursor transform = %v\n%s", ok, got)
+func TestIntegrationSessionLeavesNonShellActionsUntouched(t *testing.T) {
+	for _, args := range [][]string{
+		{"-N", "-L", "8080:localhost:80", "host"},
+		{"-s", "host", "sftp"},
+	} {
+		parsed := sshcompat.Parse(args)
+		got := integrationSessionSSHArgs(parsed, "context-id", "$HOME/.sshx/context")
+		if strings.Join(got, " ") != strings.Join(args, " ") {
+			t.Fatalf("args = %q, want %q", strings.Join(got, " "), strings.Join(args, " "))
+		}
 	}
 }
 
-func TestSupportedRemoteSSHScriptFixtures(t *testing.T) {
-	fixtures := []struct {
-		profile integration.Profile
-		path    string
+func TestIntegrationRecognizesOpenSSHControlOperations(t *testing.T) {
+	for _, args := range [][]string{{"-O", "check", "host"}, {"-Oexit", "host"}, {"host", "echo", "ok"}} {
+		parsed := sshcompat.Parse(args)
+		got := hasSSHControlOperation(parsed)
+		want := strings.HasPrefix(args[0], "-O")
+		if got != want {
+			t.Fatalf("hasSSHControlOperation(%#v) = %v, want %v", args, got, want)
+		}
+	}
+}
+
+func TestIntegrationSessionWrapperExportsContext(t *testing.T) {
+	home := t.TempDir()
+	parsed := sshcompat.Parse([]string{"host", `printf '%s' "$SSHX_CONTEXT_ID|$PATH"`})
+	got := integrationSessionSSHArgs(parsed, "context-id", "$HOME/.sshx/context")
+	cmd := exec.Command("/bin/sh", "-c", got[len(got)-1])
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "SHELL=/bin/sh"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper failed: %v\n%s", err, out)
+	}
+	wantPrefix := "context-id|" + filepath.Join(home, ".sshx/context/bin") + ":"
+	if !strings.HasPrefix(string(out), wantPrefix) {
+		t.Fatalf("wrapper environment = %q, want prefix %q", out, wantPrefix)
+	}
+}
+
+func TestIntegrationSessionWrapsDefaultLoginShell(t *testing.T) {
+	for _, tc := range []struct {
+		args       []string
+		wantPrefix string
 	}{
-		{integration.VSCode, "testdata/vscode-remote-ssh-0.122.0/local-server.sh"},
-		{integration.VSCode, "testdata/vscode-remote-ssh-0.122.0/exec-server.sh"},
-		{integration.Cursor, "testdata/cursor-remote-ssh-1.1.10/dynamic-forward.sh"},
-		{integration.Cursor, "testdata/cursor-remote-ssh-1.1.10/socket-forward.sh"},
-	}
-	for _, fixture := range fixtures {
-		t.Run(filepath.Base(fixture.path), func(t *testing.T) {
-			script, err := os.ReadFile(fixture.path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			transformed, ok := transformBootstrap(fixture.profile, script, "context-id", "$HOME/.sshx/context")
-			if !ok {
-				t.Fatal("fixture was not recognized")
-			}
-			if !strings.Contains(string(transformed), "/sshx/context-id") || !strings.Contains(string(transformed), "SSHX_CONTEXT_ID='context-id'") {
-				t.Fatalf("fixture was not isolated and injected:\n%s", transformed)
-			}
-		})
+		{[]string{"host"}, "-t host"},
+		{[]string{"-T", "host"}, "-T host"},
+	} {
+		got := integrationSessionSSHArgs(sshcompat.Parse(tc.args), "context-id", "$HOME/.sshx/context")
+		if len(got) < 2 || strings.Join(got[:len(got)-1], " ") != tc.wantPrefix || !strings.Contains(got[len(got)-1], `exec "$shell" -l`) {
+			t.Fatalf("wrapped args = %#v", got)
+		}
 	}
 }
 
 func TestInsertBeforeTarget(t *testing.T) {
-	parsed := sshcompat.Parse([]string{"-T", "-D", "1234", "host", "bash"})
-	got := insertBeforeTarget(parsed, []string{"-S", "/tmp/master"})
-	want := "-T -D 1234 -S /tmp/master host bash"
-	if strings.Join(got, " ") != want {
-		t.Fatalf("args = %q, want %q", strings.Join(got, " "), want)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-T", "-D", "1234", "host", "bash"}, "-T -D 1234 -S /tmp/master host bash"},
+		{[]string{"-T", "--", "host", "bash"}, "-T -S /tmp/master -- host bash"},
+	} {
+		parsed := sshcompat.Parse(tc.args)
+		got := insertBeforeTarget(parsed, []string{"-S", "/tmp/master"})
+		if strings.Join(got, " ") != tc.want {
+			t.Fatalf("args = %q, want %q", strings.Join(got, " "), tc.want)
+		}
 	}
 }
 
@@ -125,7 +153,7 @@ func TestSCPWithDifferentRemoteHostsIsAmbiguous(t *testing.T) {
 	}
 }
 
-func TestUnknownBootstrapIsExactPassthroughEvenWithStrictConfig(t *testing.T) {
+func TestIntegrationStartsOpenSSHBeforeStdinEOF(t *testing.T) {
 	isolateHome(t)
 	root := filepath.Join(t.TempDir(), "vscode")
 	binDir := filepath.Join(root, "bin")
@@ -133,16 +161,10 @@ func TestUnknownBootstrapIsExactPassthroughEvenWithStrictConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	upstream := filepath.Join(t.TempDir(), "ssh")
-	script := `#!/bin/sh
-if [ "${1:-}" = "-G" ]; then
-  printf '%s\n' 'user alice' 'hostname example.com' 'port 22' 'hostkeyalias none'
-  exit 0
-fi
-printf 'args:'
-for arg in "$@"; do printf '<%s>' "$arg"; done
-printf '\nstdin:'
-cat
-`
+	artifacts := t.TempDir()
+	ready := filepath.Join(artifacts, "ready")
+	received := filepath.Join(artifacts, "stdin")
+	script := "#!/bin/sh\n: > " + shellQuote(ready) + "\ncat > " + shellQuote(received) + "\n"
 	if err := os.WriteFile(upstream, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -159,21 +181,47 @@ cat
 	if err := os.WriteFile(configPath, []byte("strict: true\nfeatures:\n  commandBridge: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	input := "#!/bin/sh\necho not-a-vscode-bootstrap\n"
+	reader, writer := io.Pipe()
+	defer writer.Close()
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	runner := NewRunner(strings.NewReader(input), stdout, stderr)
+	runner := NewRunner(reader, stdout, stderr)
 	runner.InvocationPath = invocation
 	runner.ConfigPath = configPath
-	code := runner.Run(context.Background(), []string{"-T", "host", "bash"})
-	if code != 0 {
-		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	runner.ResolveIdentity = func(context.Context, string, []string, string) (identity.Connection, error) {
+		return identity.Connection{TargetID: "target-id", ContextID: "context-id", SessionID: "12345678-1234-4234-8234-123456789abc"}, nil
 	}
-	want := "args:<-T><host><bash>\nstdin:" + input
-	if stdout.String() != want {
-		t.Fatalf("passthrough = %q, want %q", stdout.String(), want)
+	result := make(chan int, 1)
+	go func() {
+		result <- runner.Run(context.Background(), []string{"-T", "host", "bash"})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("OpenSSH was not started while integration stdin remained open")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("adapter polluted stderr: %q", stderr.String())
+	input := []byte("echo ready\n")
+	if _, err := writer.Write(input); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-result:
+		if code != 0 {
+			t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("integration did not finish after stdin closed")
+	}
+	got, err := os.ReadFile(received)
+	if err != nil || !bytes.Equal(got, input) {
+		t.Fatalf("upstream stdin = %q, %v; want %q", got, err, input)
 	}
 }
 

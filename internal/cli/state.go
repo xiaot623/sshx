@@ -62,6 +62,11 @@ func remoteBridgeEnvScript(remoteHome string, session *BridgeSession) string {
 	return script
 }
 
+func integrationContextEnvScript(contextID, contextHome string) string {
+	bin := strings.ReplaceAll(contextHome, `"`, `\"`) + "/bin"
+	return "SSHX_CONTEXT_ID=" + shellQuote(contextID) + "; PATH=\"" + bin + ":$PATH\"; export SSHX_CONTEXT_ID PATH"
+}
+
 type versionState struct {
 	CurrentVersion string `json:"current_version"`
 	LastVersion    string `json:"last_version,omitempty"`

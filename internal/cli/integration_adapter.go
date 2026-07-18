@@ -10,19 +10,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/xiaot623/sshx/internal/config"
+	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/integration"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 )
-
-const maxBootstrapScript = 8 << 20
 
 type activeIntegrationSession struct {
 	TargetID    string `json:"targetId"`
@@ -32,178 +29,162 @@ type activeIntegrationSession struct {
 	PID         int    `json:"pid"`
 }
 
-var assignmentPatterns = map[string]*regexp.Regexp{
-	"VSCODE_AGENT_FOLDER": regexp.MustCompile(`(?m)^[\t ]*(?:export[\t ]+)?VSCODE_AGENT_FOLDER[\t ]*=`),
-	"SERVER_DATA_DIR":     regexp.MustCompile(`(?m)^[\t ]*(?:export[\t ]+)?SERVER_DATA_DIR[\t ]*=`),
-}
-
 func (r *Runner) runIntegrationAdapter(ctx context.Context, invocation string, args []string) int {
 	descriptor, err := integration.DescriptorForInvocation(invocation)
 	if err != nil {
 		return r.execAdapterCommand(ctx, "ssh", args, r.Stdin)
 	}
 	if filepath.Base(invocation) == "scp" {
+		cleanArgs, noWrap := removeNoWrap(args)
+		if noWrap || os.Getenv("SSHX_DISABLE") == "1" {
+			return r.execAdapterCommand(ctx, descriptor.SCPPath, cleanArgs, r.Stdin)
+		}
 		return r.runIntegratedSCP(ctx, descriptor, args)
 	}
 	parsed := sshcompat.Parse(args)
-	if parsed.InfoMode || parsed.Target == "" {
-		return r.execAdapterCommand(ctx, descriptor.SSHPath, args, r.Stdin)
-	}
-	if !isBootstrapShell(parsed.RemoteCommand) {
-		return r.runIntegratedAuxSSH(ctx, descriptor, parsed)
-	}
-	input, err := io.ReadAll(io.LimitReader(r.Stdin, maxBootstrapScript+1))
-	if err != nil || len(input) > maxBootstrapScript {
-		r.logIntegration(descriptor.Profile, fmt.Errorf("bootstrap input unavailable: %w", err))
-		return r.execAdapterCommand(ctx, descriptor.SSHPath, args, io.MultiReader(bytes.NewReader(input), r.Stdin))
+	if parsed.NoWrap || os.Getenv("SSHX_DISABLE") == "1" || parsed.InfoMode || parsed.Target == "" || hasSSHControlOperation(parsed) {
+		return r.execAdapterCommand(ctx, descriptor.SSHPath, parsed.Args, r.Stdin)
 	}
 	if err := config.EnsureDefault(r.ConfigPath); err != nil {
 		r.logIntegration(descriptor.Profile, err)
-		return r.execAdapterCommand(ctx, descriptor.SSHPath, args, bytes.NewReader(input))
+		return r.execAdapterCommand(ctx, descriptor.SSHPath, parsed.Args, r.Stdin)
 	}
 	cfg, err := config.Load(r.ConfigPath)
 	if err != nil || !cfg.Features.Enabled() {
 		if err != nil {
 			r.logIntegration(descriptor.Profile, err)
 		}
-		return r.execAdapterCommand(ctx, descriptor.SSHPath, args, bytes.NewReader(input))
+		return r.execAdapterCommand(ctx, descriptor.SSHPath, parsed.Args, r.Stdin)
 	}
 	connection, err := r.ResolveIdentity(ctx, descriptor.SSHPath, baseSSHArgs(parsed), string(descriptor.Profile))
 	if err != nil {
 		r.logIntegration(descriptor.Profile, err)
-		return r.execAdapterCommand(ctx, descriptor.SSHPath, args, bytes.NewReader(input))
+		return r.execAdapterCommand(ctx, descriptor.SSHPath, parsed.Args, r.Stdin)
 	}
 	remoteHome := remoteServerHome(connection.TargetID)
 	contextHome := remoteContextHome(connection.TargetID, connection.ContextID)
-	transformed, ok := transformBootstrap(descriptor.Profile, input, connection.ContextID, contextHome)
-	if !ok {
-		r.logIntegration(descriptor.Profile, errors.New("bootstrap script did not match the validated application profile"))
-		return r.execAdapterCommand(ctx, descriptor.SSHPath, args, bytes.NewReader(input))
+
+	var controlDir, controlPath string
+	controlMaster := false
+	if session, ok := readIntegrationSession(descriptor.Profile, connection.TargetID); ok {
+		controlPath = session.ControlPath
+	} else {
+		controlDir, controlPath, err = newControlPath(connection.SessionID)
+		if err != nil {
+			r.logIntegration(descriptor.Profile, err)
+			return r.execAdapterCommand(ctx, descriptor.SSHPath, parsed.Args, r.Stdin)
+		}
+		controlMaster = true
+		defer os.RemoveAll(controlDir)
 	}
-	controlDir, controlPath, err := newControlPath(connection.SessionID)
-	if err != nil {
-		r.logIntegration(descriptor.Profile, err)
-		return r.execAdapterCommand(ctx, descriptor.SSHPath, args, bytes.NewReader(input))
+
+	mainParsedInput := sshcompat.Parse(stripControlOptions(integrationSessionSSHArgs(parsed, connection.ContextID, contextHome)))
+	controlOptions := []string{"-o", "ControlMaster=no", "-S", controlPath}
+	if controlMaster {
+		controlOptions = []string{"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-S", controlPath}
 	}
-	defer os.RemoveAll(controlDir)
-	masterParsedInput := sshcompat.Parse(stripControlOptions(parsed.Args))
-	masterArgs := insertBeforeTarget(masterParsedInput, []string{"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-S", controlPath})
-	sidecarParsedInput := sshcompat.Parse(stripAuxiliaryActionOptions(masterParsedInput.Args))
+	mainArgs := insertBeforeTarget(mainParsedInput, controlOptions)
+
+	sidecarParsedInput := sshcompat.Parse(stripAuxiliaryActionOptions(stripControlOptions(parsed.Args)))
 	sidecarArgs := insertBeforeTarget(sidecarParsedInput, []string{"-o", "ControlMaster=no", "-o", "ControlPath=" + controlPath, "-o", "ClearAllForwardings=yes"})
 	sidecarBase := baseSSHArgs(sshcompat.Parse(sidecarArgs))
 
 	mainCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var sidecar *BridgeSession
-	var sidecarMu sync.Mutex
 	done := make(chan struct{})
-	bootstrapDecision := make(chan bool, 1)
 	go func() {
 		defer close(done)
-		useTransformed := false
-		defer func() {
-			if !useTransformed {
-				bootstrapDecision <- false
-			}
-		}()
-		if !waitForPath(mainCtx, controlPath) {
-			r.logIntegration(descriptor.Profile, errors.New("OpenSSH control master did not become ready"))
-			return
-		}
-		registryPath := integrationSessionPath(descriptor.Profile, connection.TargetID, connection.SessionID)
-		if err := writeIntegrationSession(registryPath, activeIntegrationSession{
-			TargetID: connection.TargetID, ContextID: connection.ContextID, SessionID: connection.SessionID,
-			ControlPath: controlPath, PID: os.Getpid(),
-		}); err != nil {
-			r.logIntegration(descriptor.Profile, err)
-		}
-		defer removeIntegrationSession(registryPath, controlPath)
-		logWriter, closeLog := r.integrationLogWriter(descriptor.Profile)
-		defer closeLog()
-		sidecarRunner := NewRunner(bytes.NewReader(nil), io.Discard, logWriter)
-		sidecarRunner.SSHPath = descriptor.SSHPath
-		sidecarRunner.ConfigPath = r.ConfigPath
-		sidecarRunner.connection = connection
-		sidecarRunner.commandPolicy = cfg.Commands
-		sidecarRunner.commandBridge = cfg.Features.CommandBridge
-		sidecarRunner.autoForward = cfg.Features.AutoForward
-		sidecarRunner.remoteFS = cfg.Features.RemoteFS
-		sidecarFeatures := cfg.Features
-		if sidecarRunner.autoForward {
-			if err := sidecarRunner.EnsureResolver(mainCtx); err != nil {
-				_, _ = fmt.Fprintf(logWriter, "%s resolver: %v\n", time.Now().UTC().Format(time.RFC3339Nano), err)
-				sidecarRunner.autoForward = false
-				sidecarFeatures.AutoForward = false
-			}
-		}
-		if err := sidecarRunner.ensureRemoteServer(mainCtx, sidecarBase, sidecarFeatures, remoteHome); err != nil {
-			r.logIntegration(descriptor.Profile, fmt.Errorf("sidecar bootstrap: %w", err))
-			return
-		}
-		if err := sidecarRunner.ensureRemoteContextLauncher(mainCtx, sidecarBase, connection, remoteHome, cfg.Features.RemoteFS); err != nil {
-			r.logIntegration(descriptor.Profile, fmt.Errorf("context launcher: %w", err))
-			return
-		}
-		s, err := sidecarRunner.StartBridge(mainCtx, parsed.Target, sidecarBase, remoteHome)
-		if err != nil {
-			r.logIntegration(descriptor.Profile, fmt.Errorf("sidecar: %w", err))
-			return
-		}
-		sidecarMu.Lock()
-		sidecar = s
-		sidecarMu.Unlock()
-		useTransformed = true
-		bootstrapDecision <- true
-		<-mainCtx.Done()
-		s.Stop()
+		r.runIntegrationSidecar(mainCtx, descriptor, cfg, connection, parsed.Target, sidecarBase, remoteHome, controlPath)
 	}()
-	bootstrapReader, bootstrapWriter := io.Pipe()
-	inputDone := make(chan struct{})
-	go func() {
-		defer close(inputDone)
-		var payload []byte
-		select {
-		case enhanced := <-bootstrapDecision:
-			if enhanced {
-				payload = transformed
-			} else {
-				payload = input
-			}
-		case <-mainCtx.Done():
-			_ = bootstrapWriter.CloseWithError(mainCtx.Err())
-			return
-		}
-		_, err := io.Copy(bootstrapWriter, bytes.NewReader(payload))
-		_ = bootstrapWriter.CloseWithError(err)
-	}()
-	exitCode := r.execAdapterCommand(mainCtx, descriptor.SSHPath, masterArgs, bootstrapReader)
+
+	exitCode := r.execAdapterCommand(mainCtx, descriptor.SSHPath, mainArgs, r.Stdin)
 	cancel()
-	_ = bootstrapReader.Close()
-	select {
-	case <-inputDone:
-	case <-time.After(time.Second):
-	}
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		sidecarMu.Lock()
-		if sidecar != nil {
-			sidecar.Stop()
-		}
-		sidecarMu.Unlock()
 	}
 	return exitCode
 }
 
-func (r *Runner) runIntegratedAuxSSH(ctx context.Context, descriptor integration.Descriptor, parsed sshcompat.Parsed) int {
-	connection, err := r.ResolveIdentity(ctx, descriptor.SSHPath, baseSSHArgs(parsed), string(descriptor.Profile))
-	if err == nil {
-		if session, ok := readIntegrationSession(descriptor.Profile, connection.TargetID); ok {
-			args := insertBeforeTarget(parsed, []string{"-o", "ControlMaster=no", "-S", session.ControlPath})
-			return r.execAdapterCommand(ctx, descriptor.SSHPath, args, r.Stdin)
+func hasSSHControlOperation(parsed sshcompat.Parsed) bool {
+	for i := 0; i < parsed.TargetIndex; i++ {
+		if strings.HasPrefix(parsed.Args[i], "-O") {
+			return true
 		}
 	}
-	return r.execAdapterCommand(ctx, descriptor.SSHPath, parsed.Args, r.Stdin)
+	return false
+}
+
+func removeNoWrap(args []string) ([]string, bool) {
+	out := make([]string, 0, len(args))
+	found := false
+	for _, arg := range args {
+		if arg == "--no-wrap" {
+			found = true
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out, found
+}
+
+func (r *Runner) runIntegrationSidecar(
+	ctx context.Context,
+	descriptor integration.Descriptor,
+	cfg config.Config,
+	connection identity.Connection,
+	target string,
+	sshArgs []string,
+	remoteHome string,
+	controlPath string,
+) {
+	if !waitForPath(ctx, controlPath) {
+		r.logIntegration(descriptor.Profile, errors.New("OpenSSH control master did not become ready"))
+		return
+	}
+	registryPath := integrationSessionPath(descriptor.Profile, connection.TargetID, connection.SessionID)
+	if err := writeIntegrationSession(registryPath, activeIntegrationSession{
+		TargetID: connection.TargetID, ContextID: connection.ContextID, SessionID: connection.SessionID,
+		ControlPath: controlPath, PID: os.Getpid(),
+	}); err != nil {
+		r.logIntegration(descriptor.Profile, err)
+	}
+	defer removeIntegrationSession(registryPath, controlPath)
+
+	logWriter, closeLog := r.integrationLogWriter(descriptor.Profile)
+	defer closeLog()
+	sidecarRunner := NewRunner(bytes.NewReader(nil), io.Discard, logWriter)
+	sidecarRunner.SSHPath = descriptor.SSHPath
+	sidecarRunner.ConfigPath = r.ConfigPath
+	sidecarRunner.connection = connection
+	sidecarRunner.commandPolicy = cfg.Commands
+	sidecarRunner.commandBridge = cfg.Features.CommandBridge
+	sidecarRunner.autoForward = cfg.Features.AutoForward
+	sidecarRunner.remoteFS = cfg.Features.RemoteFS
+
+	sidecarFeatures := cfg.Features
+	if sidecarRunner.autoForward {
+		if err := sidecarRunner.EnsureResolver(ctx); err != nil {
+			_, _ = fmt.Fprintf(logWriter, "%s resolver: %v\n", time.Now().UTC().Format(time.RFC3339Nano), err)
+			sidecarRunner.autoForward = false
+			sidecarFeatures.AutoForward = false
+		}
+	}
+	if err := sidecarRunner.ensureRemoteServer(ctx, sshArgs, sidecarFeatures, remoteHome); err != nil {
+		r.logIntegration(descriptor.Profile, fmt.Errorf("remote server: %w", err))
+		return
+	}
+	if err := sidecarRunner.ensureRemoteContextLauncher(ctx, sshArgs, connection, remoteHome, cfg.Features.RemoteFS); err != nil {
+		r.logIntegration(descriptor.Profile, fmt.Errorf("context launcher: %w", err))
+		return
+	}
+	sidecar, err := sidecarRunner.StartBridge(ctx, target, sshArgs, remoteHome)
+	if err != nil {
+		r.logIntegration(descriptor.Profile, fmt.Errorf("sidecar: %w", err))
+		return
+	}
+	defer sidecar.Stop()
+	<-ctx.Done()
 }
 
 func (r *Runner) runIntegratedSCP(ctx context.Context, descriptor integration.Descriptor, args []string) int {
@@ -262,10 +243,8 @@ func (r *Runner) execAdapterCommand(ctx context.Context, path string, args []str
 	}()
 	err := cmd.Wait()
 	close(done)
-	// os/exec normally owns the stdin-copy goroutine and waits for it before
-	// returning from Wait. The integration bootstrap intentionally gates stdin
-	// until the control master is ready, so an authentication failure could
-	// otherwise leave Wait blocked even after OpenSSH has already exited.
+	// The source reader can remain open after OpenSSH exits (for example a TTY
+	// or a caller-owned pipe), so stop our copy goroutine without delaying exit.
 	if closer, ok := stdin.(interface{ CloseWithError(error) error }); ok {
 		_ = closer.CloseWithError(io.ErrClosedPipe)
 	}
@@ -288,69 +267,18 @@ func (r *Runner) execAdapterCommand(ctx context.Context, path string, args []str
 	return 1
 }
 
-func isBootstrapShell(command []string) bool {
-	if len(command) == 0 {
-		return false
-	}
-	name := filepath.Base(command[0])
-	return name == "bash" || name == "sh"
-}
-
-func transformBootstrap(profile integration.Profile, script []byte, contextID, contextHome string) ([]byte, bool) {
-	text := string(script)
-	anchors := []string{"VSCODE_AGENT_FOLDER"}
-	if profile == integration.Cursor {
-		anchors = []string{"SERVER_DATA_DIR", "VSCODE_AGENT_FOLDER"}
-	}
-	insertAt := -1
-	for _, anchor := range anchors {
-		matches := assignmentPatterns[anchor].FindAllStringIndex(text, -1)
-		if len(matches) != 1 {
-			return nil, false
-		}
-		lineEnd := strings.IndexByte(text[matches[0][1]:], '\n')
-		if lineEnd < 0 {
-			lineEnd = len(text)
-		} else {
-			lineEnd += matches[0][1] + 1
-		}
-		if lineEnd > insertAt {
-			insertAt = lineEnd
-		}
-	}
-	if insertAt < 0 {
-		return nil, false
-	}
-	lines := []string{}
-	if profile == integration.Cursor {
-		lines = append(lines,
-			`SERVER_DATA_DIR="${SERVER_DATA_DIR%/}/sshx/`+contextID+`"`,
-			`VSCODE_AGENT_FOLDER="$SERVER_DATA_DIR"`,
-			`export SERVER_DATA_DIR VSCODE_AGENT_FOLDER`,
-		)
-	} else {
-		lines = append(lines,
-			`VSCODE_AGENT_FOLDER="${VSCODE_AGENT_FOLDER%/}/sshx/`+contextID+`"`,
-			`export VSCODE_AGENT_FOLDER`,
-		)
-	}
-	lines = append(lines,
-		"SSHX_CONTEXT_ID="+shellQuote(contextID),
-		"PATH=\""+strings.ReplaceAll(contextHome, `"`, `\"`)+"/bin:$PATH\"",
-		"export SSHX_CONTEXT_ID PATH",
-	)
-	injection := strings.Join(lines, "\n") + "\n"
-	return []byte(text[:insertAt] + injection + text[insertAt:]), true
-}
-
 func insertBeforeTarget(parsed sshcompat.Parsed, options []string) []string {
 	if parsed.TargetIndex < 0 || parsed.TargetIndex > len(parsed.Args) {
 		return append([]string(nil), parsed.Args...)
 	}
+	insertAt := parsed.TargetIndex
+	if insertAt > 0 && parsed.Args[insertAt-1] == "--" {
+		insertAt--
+	}
 	out := make([]string, 0, len(parsed.Args)+len(options))
-	out = append(out, parsed.Args[:parsed.TargetIndex]...)
+	out = append(out, parsed.Args[:insertAt]...)
 	out = append(out, options...)
-	out = append(out, parsed.Args[parsed.TargetIndex:]...)
+	out = append(out, parsed.Args[insertAt:]...)
 	return out
 }
 

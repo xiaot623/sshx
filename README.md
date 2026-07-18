@@ -201,7 +201,7 @@ sshx integrate install cursor
 
 The command locates OpenSSH, installs paired `ssh`/`scp` shims backed by the same sshx binary, patches JSONC `remote.SSH.path`, and verifies the complete invocation chain. It is idempotent and rolls back settings and shims on failure; run it again to repair the integration after moving the sshx executable. No restart, integration-specific configuration, or extra binary is required.
 
-Remote-SSH remains the user-visible OpenSSH connection. sshx creates a temporary ControlMaster so bootstrap, sidecar, forwarding, and scp reuse the same authentication. Only a stable `SSHX_CONTEXT_ID` and context-launcher path are injected into application terminals. Probe, unknown, and ambiguous calls are exact passthrough; an incompatible or failed sidecar receives the original bootstrap bytes and preserves normal OpenSSH behavior regardless of `strict`.
+Remote-SSH remains the user-visible OpenSSH connection. Every real SSH session through an integration shim receives the same application context wrapper, while information probes remain exact passthrough. The wrapper exports a stable `SSHX_CONTEXT_ID` and context-launcher path before executing the original remote command; stdin is never inspected or buffered. Each live session owns a sidecar, and temporary ControlMaster sockets let concurrent SSH and scp calls reuse authentication without a resident integration daemon.
 
 ### Download Binary
 

@@ -38,13 +38,17 @@ func sessionSSHArgs(parsed sshcompat.Parsed, remoteHome string) []string {
 }
 
 func sessionSSHArgsForBridge(parsed sshcompat.Parsed, remoteHome string, session *BridgeSession) []string {
-	args := baseSSHArgs(parsed)
-	if len(args) == 0 {
-		return append([]string(nil), parsed.Args...)
-	}
 	envLine := remoteServerEnvScript(remoteHome)
 	if session != nil {
 		envLine = remoteBridgeEnvScript(remoteHome, session)
+	}
+	return sessionSSHArgsWithEnv(parsed, envLine)
+}
+
+func sessionSSHArgsWithEnv(parsed sshcompat.Parsed, envLine string) []string {
+	args := baseSSHArgs(parsed)
+	if len(args) == 0 {
+		return append([]string(nil), parsed.Args...)
 	}
 	if len(parsed.RemoteCommand) == 0 {
 		if hasSSHSessionlessFlag(args) {
@@ -56,6 +60,43 @@ func sessionSSHArgsForBridge(parsed sshcompat.Parsed, remoteHome string, session
 		return append(args, remoteLoginShellWithEnv(envLine))
 	}
 	return append(args, remoteExecShellWithEnv(envLine, parsed.RemoteCommand))
+}
+
+func integrationSessionSSHArgs(parsed sshcompat.Parsed, contextID, contextHome string) []string {
+	args := baseSSHArgs(parsed)
+	if len(args) == 0 || hasSSHSubsystemFlag(args) || (len(parsed.RemoteCommand) == 0 && hasSSHSessionlessFlag(args)) {
+		return append([]string(nil), parsed.Args...)
+	}
+	// Wrap every session-producing command at the SSH boundary. The remote
+	// command inherits the context while its stdin remains a native SSH stream.
+	envLine := integrationContextEnvScript(contextID, contextHome)
+	if len(parsed.RemoteCommand) == 0 {
+		if !hasSSHDisableTTYFlag(args) && !hasSSHForceTTYFlag(args) {
+			args = append([]string{"-t"}, args...)
+		}
+		script := strings.Join([]string{
+			envLine,
+			"shell=${SHELL:-sh}",
+			"exec \"$shell\" -l",
+		}, "\n")
+		return append(args, remoteShell(script))
+	}
+	command := strings.Join(parsed.RemoteCommand, " ")
+	script := strings.Join([]string{
+		envLine,
+		"shell=${SHELL:-sh}",
+		"exec \"$shell\" -c " + shellQuote(command),
+	}, "\n")
+	return append(args, remoteShell(script))
+}
+
+func hasSSHSubsystemFlag(args []string) bool {
+	for _, arg := range args {
+		if shortOptionClusterContains(arg, 's') {
+			return true
+		}
+	}
+	return false
 }
 
 func remoteLoginShell(remoteHome string) string {

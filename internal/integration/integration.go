@@ -62,6 +62,27 @@ func ParseProfile(value string) (Profile, error) {
 	}
 }
 
+func validProfile(profile Profile) bool {
+	value := string(profile)
+	if len(value) == 0 || len(value) > 64 || value == "." || value == ".." {
+		return false
+	}
+	for i, r := range value {
+		if i == 0 && !isProfileAlphaNumeric(r) {
+			return false
+		}
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isProfileAlphaNumeric(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= '0' && r <= '9'
+}
+
 func DefaultRoot(home string) string {
 	if override := os.Getenv("SSHX_INTEGRATIONS_DIR"); override != "" {
 		return override
@@ -299,7 +320,7 @@ func ReadDescriptor(path string) (Descriptor, error) {
 	if err := json.Unmarshal(b, &descriptor); err != nil {
 		return Descriptor{}, err
 	}
-	if descriptor.Schema != 1 || (descriptor.Profile != VSCode && descriptor.Profile != Cursor) || descriptor.SSHPath == "" || descriptor.SCPPath == "" {
+	if descriptor.Schema != 1 || !validProfile(descriptor.Profile) || descriptor.SSHPath == "" || descriptor.SCPPath == "" {
 		return Descriptor{}, errors.New("invalid sshx integration descriptor")
 	}
 	return descriptor, nil

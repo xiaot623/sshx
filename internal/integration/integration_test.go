@@ -187,6 +187,28 @@ func TestIntegrationShimChainIsUnwrappedAndCyclesAreRejected(t *testing.T) {
 	}
 }
 
+func TestDescriptorSupportsSafeThirdPartyProfiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "integration.json")
+	descriptor := Descriptor{Schema: 1, Profile: "third-party_app", SSHPath: "/usr/bin/ssh", SCPPath: "/usr/bin/scp"}
+	if err := WriteDescriptor(path, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadDescriptor(path)
+	if err != nil || got.Profile != descriptor.Profile {
+		t.Fatalf("descriptor = %#v, %v", got, err)
+	}
+
+	for _, profile := range []Profile{"../escape", "..", ".hidden", "UPPERCASE"} {
+		descriptor.Profile = profile
+		if err := WriteDescriptor(path, descriptor); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadDescriptor(path); err == nil {
+			t.Fatalf("unsafe integration profile %q was accepted", profile)
+		}
+	}
+}
+
 func writeExecutable(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
