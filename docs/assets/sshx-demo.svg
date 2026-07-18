@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">sshx command bridge terminal demo</title>
+  <desc id="desc">An animated terminal installs sshx, runs commands on a remote Linux server and the local Mac, then installs the VS Code integration.</desc>
+
+  <defs>
+    <linearGradient id="canvas" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07110d"/>
+      <stop offset="0.52" stop-color="#0a0f12"/>
+      <stop offset="1" stop-color="#07100f"/>
+    </linearGradient>
+    <linearGradient id="terminal" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#11191a"/>
+      <stop offset="1" stop-color="#090f10"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#34d399"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop stop-color="#34d399" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#34d399" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#000" flood-opacity=".55"/>
+    </filter>
+    <filter id="softGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <clipPath id="screenClip">
+      <rect x="54" y="122" width="1092" height="540" rx="0"/>
+    </clipPath>
+    <style>
+      .ui { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+      .muted { fill: #678079; }
+      .command { fill: #b7f7d8; font-size: 19px; font-weight: 560; letter-spacing: -.2px; }
+      .prompt { fill: #2dd4bf; font-size: 19px; font-weight: 700; }
+      .output { fill: #829a93; font-size: 15px; }
+      .success { fill: #6ee7b7; }
+      .step { animation: reset 24s ease-in-out infinite; }
+      .type1 { animation: type1 24s steps(31, end) infinite; }
+      .type2 { animation: type2 24s steps(27, end) infinite; }
+      .type3 { animation: type3 24s steps(13, end) infinite; }
+      .type4 { animation: type4 24s steps(19, end) infinite; }
+      .type5 { animation: type5 24s steps(30, end) infinite; }
+      .show1 { animation: show1 24s ease infinite; }
+      .show2 { animation: show2 24s ease infinite; }
+      .show3 { animation: show3 24s ease infinite; }
+      .show5 { animation: show5 24s ease infinite; }
+      .out1 { animation: out1 24s ease infinite; }
+      .out2 { animation: out2 24s ease infinite; }
+      .out3 { animation: out3 24s ease infinite; }
+      .out4 { animation: out4 24s ease infinite; }
+      .out5 { animation: out5 24s ease infinite; }
+      .badge1 { animation: badge1 24s cubic-bezier(.2,.8,.2,1) infinite; transform-origin: 1042px 267px; }
+      .badge2 { animation: badge2 24s cubic-bezier(.2,.8,.2,1) infinite; transform-origin: 1032px 469px; }
+      .progress { animation: progress 24s linear infinite; transform-origin: left; }
+      .live-dot { animation: pulse 1.8s ease-in-out infinite; }
+      .caret { fill: #70f5bd; animation: blink .76s steps(1) infinite; }
+
+      @keyframes type1 { 0%,2.5% { clip-path: inset(0 100% 0 0); opacity: 1 } 10%,94% { clip-path: inset(0 0 0 0); opacity: 1 } 97%,100% { clip-path: inset(0 0 0 0); opacity: 0 } }
+      @keyframes type2 { 0%,15% { clip-path: inset(0 100% 0 0); opacity: 1 } 25%,94% { clip-path: inset(0 0 0 0); opacity: 1 } 97%,100% { opacity: 0 } }
+      @keyframes type3 { 0%,31% { clip-path: inset(0 100% 0 0); opacity: 1 } 36%,94% { clip-path: inset(0 0 0 0); opacity: 1 } 97%,100% { opacity: 0 } }
+      @keyframes type4 { 0%,46% { clip-path: inset(0 100% 0 0); opacity: 1 } 53%,94% { clip-path: inset(0 0 0 0); opacity: 1 } 97%,100% { opacity: 0 } }
+      @keyframes type5 { 0%,64% { clip-path: inset(0 100% 0 0); opacity: 1 } 75%,94% { clip-path: inset(0 0 0 0); opacity: 1 } 97%,100% { opacity: 0 } }
+      @keyframes show1 { 0%,2.5% { opacity: 0 } 2.6%,94% { opacity: 1 } 97%,100% { opacity: 0 } }
+      @keyframes show2 { 0%,15% { opacity: 0 } 15.1%,94% { opacity: 1 } 97%,100% { opacity: 0 } }
+      @keyframes show3 { 0%,31% { opacity: 0 } 31.1%,94% { opacity: 1 } 97%,100% { opacity: 0 } }
+      @keyframes show5 { 0%,64% { opacity: 0 } 64.1%,94% { opacity: 1 } 97%,100% { opacity: 0 } }
+      @keyframes out1 { 0%,10% { opacity: 0; transform: translateY(-3px) } 12%,94% { opacity: 1; transform: translateY(0) } 97%,100% { opacity: 0 } }
+      @keyframes out2 { 0%,25% { opacity: 0; transform: translateY(-3px) } 27%,94% { opacity: 1; transform: translateY(0) } 97%,100% { opacity: 0 } }
+      @keyframes out3 { 0%,36% { opacity: 0; transform: translateY(-3px) } 39%,94% { opacity: 1; transform: translateY(0) } 97%,100% { opacity: 0 } }
+      @keyframes out4 { 0%,53% { opacity: 0; transform: translateY(-3px) } 55%,94% { opacity: 1; transform: translateY(0) } 97%,100% { opacity: 0 } }
+      @keyframes out5 { 0%,75% { opacity: 0; transform: translateY(-3px) } 78%,94% { opacity: 1; transform: translateY(0) } 97%,100% { opacity: 0 } }
+      @keyframes badge1 { 0%,26% { opacity: 0; transform: translateX(12px) scale(.92) } 29%,94% { opacity: 1; transform: translateX(0) scale(1) } 97%,100% { opacity: 0 } }
+      @keyframes badge2 { 0%,54% { opacity: 0; transform: translateX(12px) scale(.92) } 57%,94% { opacity: 1; transform: translateX(0) scale(1) } 97%,100% { opacity: 0 } }
+      @keyframes progress { 0% { transform: scaleX(0) } 91% { transform: scaleX(1) } 100% { transform: scaleX(1) } }
+      @keyframes pulse { 0%,100% { opacity: .45 } 50% { opacity: 1 } }
+      @keyframes blink { 0%,48% { opacity: 1 } 49%,100% { opacity: 0 } }
+      @keyframes reset { 0%,94% { opacity: 1 } 97%,100% { opacity: 0 } }
+
+      @media (prefers-reduced-motion: reduce) {
+        .type1,.type2,.type3,.type4,.type5,.show1,.show2,.show3,.show5,.out1,.out2,.out3,.out4,.out5,.badge1,.badge2,.progress,.step { animation: none; opacity: 1; clip-path: none; transform: none; }
+        .caret,.live-dot { display: none; }
+      }
+    </style>
+  </defs>
+
+  <rect width="1200" height="720" fill="url(#canvas)"/>
+  <ellipse cx="160" cy="86" rx="330" ry="280" fill="url(#glow)"/>
+  <ellipse cx="1090" cy="650" rx="370" ry="310" fill="url(#glow)" opacity=".75"/>
+  <path d="M0 627 C250 555 385 700 650 622 S1000 532 1200 625 V720 H0Z" fill="#071a14" opacity=".42"/>
+
+  <g filter="url(#shadow)">
+    <rect x="28" y="28" width="1144" height="664" rx="22" fill="url(#terminal)" stroke="#294139" stroke-width="1.2"/>
+    <rect x="29" y="29" width="1142" height="92" rx="21" fill="#111a1a"/>
+    <path d="M29 100 H1171 V121 H29Z" fill="#111a1a"/>
+    <path d="M29 121 H1171" stroke="#263832"/>
+  </g>
+
+  <g class="ui">
+    <circle cx="63" cy="69" r="7" fill="#ff6b67"/>
+    <circle cx="87" cy="69" r="7" fill="#f7c94c"/>
+    <circle cx="111" cy="69" r="7" fill="#45d483"/>
+
+    <g transform="translate(161 49)">
+      <rect width="49" height="39" rx="11" fill="#18372c" stroke="#285944"/>
+      <path d="M14 14h10l-4 4 4 4H14m12 0h8" fill="none" stroke="#65e6ad" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <text x="226" y="66" fill="#d5e7df" font-size="15" font-weight="650">sshx</text>
+    <text x="226" y="85" class="muted" font-size="11" letter-spacing="1.25">BRIDGE WITHOUT BOUNDARIES</text>
+
+    <g transform="translate(897 53)">
+      <rect width="229" height="32" rx="16" fill="#0a1211" stroke="#263b34"/>
+      <circle class="live-dot" cx="18" cy="16" r="5" fill="#45d483"/>
+      <text x="32" y="20" fill="#8da39b" font-size="11.5" font-weight="650" letter-spacing=".65">LIVE COMMAND BRIDGE</text>
+    </g>
+  </g>
+
+  <g clip-path="url(#screenClip)">
+    <!-- 01 · Install -->
+    <g class="step mono">
+      <text x="76" y="164" class="prompt show1">❯</text>
+      <text x="104" y="164" class="command type1">npm install -g @hahahhh/sshx</text>
+      <g class="out1">
+        <path d="M104 179v14" stroke="#24473b" stroke-width="2"/>
+        <circle cx="104" cy="193" r="3" fill="#34d399"/>
+        <text x="120" y="198" class="output success">added 1 package in 2s</text>
+      </g>
+    </g>
+
+    <!-- 02 · Remote Linux -->
+    <g class="step mono">
+      <text x="76" y="239" class="prompt show2">❯</text>
+      <text x="104" y="239" class="command type2">sshx myserver uname -a</text>
+      <g class="out2">
+        <text x="104" y="270" class="output">Linux myserver 6.8.0-52-generic #53-Ubuntu SMP x86_64 GNU/Linux</text>
+        <g class="badge1 ui">
+          <rect x="962" y="246" width="157" height="30" rx="15" fill="#102b21" stroke="#286348"/>
+          <circle cx="982" cy="261" r="5" fill="#45d483"/>
+          <text x="995" y="265" fill="#86efac" font-size="10.5" font-weight="750" letter-spacing=".8">REMOTE · LINUX</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- 03 · Interactive session -->
+    <g class="step mono">
+      <text x="76" y="331" class="prompt show3">❯</text>
+      <text x="104" y="331" class="command type3">sshx myserver</text>
+      <g class="out3">
+        <path d="M104 346v17" stroke="#24473b" stroke-width="2"/>
+        <circle cx="104" cy="363" r="3" fill="#34d399"/>
+        <text x="120" y="368" class="output success">connected</text>
+        <text x="216" y="368" class="output">secure sidecar ready</text>
+      </g>
+    </g>
+
+    <!-- 04 · Local macOS through the bridge -->
+    <g class="step mono">
+      <g class="out3">
+        <text x="76" y="423" fill="#799087" font-size="15">dev@myserver:~$</text>
+      </g>
+      <text x="227" y="423" class="command type4">sshx local uname -a</text>
+      <g class="out4">
+        <text x="104" y="459" class="output">Darwin MacBook-Pro.local 24.5.0 Darwin Kernel Version 24.5.0 arm64</text>
+        <g class="badge2 ui">
+          <rect x="963" y="444" width="156" height="30" rx="15" fill="#10282b" stroke="#28606a"/>
+          <circle cx="983" cy="459" r="5" fill="#2dd4bf"/>
+          <text x="996" y="463" fill="#7dd3fc" font-size="10.5" font-weight="750" letter-spacing=".8">LOCAL · macOS</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- 05 · VS Code integration, back on the local Mac -->
+    <g class="step mono">
+      <g class="out4 ui">
+        <path d="M76 495 H1126" stroke="#1c302a" stroke-dasharray="3 7"/>
+        <rect x="76" y="485" width="129" height="20" rx="10" fill="#10221c"/>
+        <text x="91" y="499" fill="#62877a" font-size="9.5" font-weight="700" letter-spacing="1.1">LOCAL SETUP</text>
+      </g>
+      <text x="76" y="545" class="prompt show5">❯</text>
+      <text x="104" y="545" class="command type5">sshx integrate install vscode</text>
+      <g class="out5">
+        <path d="M104 562v35" stroke="#24473b" stroke-width="2"/>
+        <circle cx="104" cy="576" r="3" fill="#34d399"/>
+        <text x="120" y="581" class="output">OpenSSH detected · shims installed · settings updated</text>
+        <circle cx="104" cy="600" r="3" fill="#34d399"/>
+        <text x="120" y="605" class="output success">✓ VS Code Remote SSH is ready</text>
+        <rect class="caret" x="422" y="590" width="9" height="19" rx="1"/>
+      </g>
+    </g>
+  </g>
+
+  <g class="ui">
+    <text x="54" y="678" fill="#526b62" font-size="10.5" font-weight="650" letter-spacing="1.2">INSTALL</text>
+    <text x="564" y="678" fill="#526b62" font-size="10.5" font-weight="650" letter-spacing="1.2">REMOTE ↔ LOCAL</text>
+    <text x="1079" y="678" fill="#526b62" font-size="10.5" font-weight="650" letter-spacing="1.2">INTEGRATE</text>
+    <rect x="54" y="648" width="1092" height="3" rx="1.5" fill="#1c302a"/>
+    <rect class="progress" x="54" y="648" width="1092" height="3" rx="1.5" fill="url(#bar)"/>
+  </g>
+</svg>
