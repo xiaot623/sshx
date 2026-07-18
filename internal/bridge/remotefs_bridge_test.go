@@ -225,6 +225,50 @@ func TestRequesterSelectsHealthySessionByContext(t *testing.T) {
 	}
 }
 
+func TestRequesterRetriesAnotherSessionInContextAfterClientDrops(t *testing.T) {
+	ctx, socket, server := startRemoteFSServer(t)
+	ready := make(chan error, 1)
+	go func() {
+		_ = RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{
+			Ready: ready, AppVersion: "test-version", TargetID: "target-1", ContextID: "context-1", SessionID: "healthy-session",
+			Allow: func([]string) bool { return true },
+			Execute: func(_ context.Context, frame protocol.Frame) protocol.Frame {
+				return protocol.Frame{Type: protocol.TypeCommandResult, ID: frame.ID, Stdout: base64.StdEncoding.EncodeToString([]byte(frame.SessionID))}
+			},
+		}, "secret")
+	}()
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+
+	staleConn, peerConn := net.Pipe()
+	if err := peerConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stale := &clientConn{
+		enc:          protocol.NewEncoder(staleConn),
+		c:            staleConn,
+		sessionID:    "stale-session",
+		contextID:    "context-1",
+		capabilities: map[string]bool{"command.exec.batch-stdin": true},
+		pending:      map[string]chan protocol.Frame{},
+		done:         make(chan struct{}),
+	}
+	server.mu.Lock()
+	server.clients = append([]*clientConn{stale}, server.clients...)
+	server.mu.Unlock()
+
+	result, err := RequestCommandForContextWithMountOptions(
+		ctx, socket, []string{"which-session"}, nil, nil, "", "context-1", "", false, false, time.Second, "secret",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Stdout) != "healthy-session" {
+		t.Fatalf("request routed to %q", result.Stdout)
+	}
+}
+
 func TestRequesterRejectsMismatchedSessionIdentity(t *testing.T) {
 	ctx, socket, _ := startRemoteFSServer(t)
 	conn := mustDialUnix(t, socket)

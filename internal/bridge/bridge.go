@@ -561,14 +561,6 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requester contextId does not match command contextId"})
 		return
 	}
-	client := s.pickClient(req.ContextID, req.SessionID, "command.exec.batch-stdin")
-	if client == nil {
-		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: ErrNoClient.Error()})
-		return
-	}
-	if req.SessionID == "" {
-		req.SessionID = client.sessionID
-	}
 	if req.RemoteFS {
 		if req.Cwd == "" {
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs requires sessionId and cwd"})
@@ -578,39 +570,60 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requestId is required and must match command id"})
 			return
 		}
-		s.mu.Lock()
-		fsPeer := s.fsPeers[req.SessionID]
-		s.mu.Unlock()
-		if fsPeer == nil {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs data session is unavailable"})
-			return
-		}
-		layout, err := remotefs.CurrentExportLayout(req.Cwd)
-		if err != nil {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: fmt.Sprintf("resolve remote home mount: %v", err)})
-			return
-		}
-		mountID := exportMountID(layout.RootPath, layout.MountPath)
-		if err := s.ensureExportBackend(req.SessionID, mountID, layout.RootPath, fsPeer); err != nil {
+	}
+	requestedSessionID := req.SessionID
+	var lastErr error
+	for {
+		client := s.pickClient(req.ContextID, requestedSessionID, "command.exec.batch-stdin")
+		if client == nil {
+			err := ErrNoClient
+			if lastErr != nil {
+				err = lastErr
+			}
 			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: err.Error()})
 			return
 		}
-		if req.Env == nil {
-			req.Env = map[string]string{}
+
+		attempt := req
+		if attempt.SessionID == "" {
+			attempt.SessionID = client.sessionID
 		}
-		req.Env["SSHX_REMOTE_CWD"] = req.Cwd
-		req.Env["SSHX_REMOTE_FS"] = "1"
-		req.MountID = mountID
-		req.MountPath = layout.MountPath
-		req.Cwd = filepath.ToSlash(layout.RelativeCwd)
-	}
-	resp, err := client.request(req)
-	if err != nil {
-		s.removeClient(client)
-		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: err.Error()})
+		if attempt.RemoteFS {
+			s.mu.Lock()
+			fsPeer := s.fsPeers[attempt.SessionID]
+			s.mu.Unlock()
+			if fsPeer == nil {
+				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: "remote fs data session is unavailable"})
+				return
+			}
+			layout, err := remotefs.CurrentExportLayout(attempt.Cwd)
+			if err != nil {
+				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: fmt.Sprintf("resolve remote home mount: %v", err)})
+				return
+			}
+			mountID := exportMountID(layout.RootPath, layout.MountPath)
+			if err := s.ensureExportBackend(attempt.SessionID, mountID, layout.RootPath, fsPeer); err != nil {
+				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: err.Error()})
+				return
+			}
+			if attempt.Env == nil {
+				attempt.Env = map[string]string{}
+			}
+			attempt.Env["SSHX_REMOTE_CWD"] = attempt.Cwd
+			attempt.Env["SSHX_REMOTE_FS"] = "1"
+			attempt.MountID = mountID
+			attempt.MountPath = layout.MountPath
+			attempt.Cwd = filepath.ToSlash(layout.RelativeCwd)
+		}
+		resp, err := client.request(attempt)
+		if err != nil {
+			lastErr = err
+			s.removeClient(client)
+			continue
+		}
+		_ = enc.Encode(resp)
 		return
 	}
-	_ = enc.Encode(resp)
 }
 
 func exportMountID(rootPath, mountPath string) string {
