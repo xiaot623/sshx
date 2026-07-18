@@ -611,6 +611,63 @@ func TestLocalDaemonHandoffGraceAcceptsReplacementLease(t *testing.T) {
 	}
 }
 
+func TestLocalDaemonHandoffGraceWaitsForAllTargets(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const grace = 300 * time.Millisecond
+	socket := shortSocketPath(t)
+	s := &Server{SocketPath: socket, Version: "test-version", HandoffGrace: grace}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+	open := func(leaseID, targetID, target string) *Session {
+		session, err := OpenSession(ctx, socket, Request{
+			SSHPath: "ssh", Target: target, TargetID: targetID, DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
+			LeaseID: leaseID, AppVersion: "test-version",
+		}, 10*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return session
+	}
+	first := open("lease-1", "target-1", "debian-1")
+	second := open("lease-2", "target-2", "debian-2")
+	_ = first.Close()
+	time.Sleep(grace / 2)
+	_ = second.Close()
+
+	// The first target's grace expires while the second target is still
+	// waiting for a replacement lease. The daemon must remain available.
+	deadline := time.Now().Add(grace)
+	for {
+		s.mu.Lock()
+		_, firstExists := s.targets["target-1"]
+		_, secondExists := s.targets["target-2"]
+		s.mu.Unlock()
+		if !firstExists && secondExists {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first target was not cleaned before second target's grace expired")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := ClientRequest(ctx, socket, Request{Type: TypePing}); err != nil {
+		t.Fatalf("daemon exited during another target's handoff grace: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not exit after all target grace periods expired")
+	}
+}
+
 func TestPortMutationRequiresActiveSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

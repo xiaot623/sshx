@@ -421,7 +421,7 @@ func (s *Server) cleanupIdleTarget(key string) {
 		domainName, domainManager = rec.Domain, rec.domainManager
 		delete(s.targets, key)
 	}
-	shutdown = len(s.sessions) == 0
+	shutdown = len(s.sessions) == 0 && len(s.targets) == 0
 	if shutdown {
 		s.draining = true
 	}
