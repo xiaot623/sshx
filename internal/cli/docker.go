@@ -136,6 +136,13 @@ func shortDockerID(id string) string {
 
 func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target dockerTarget, cfg config.Config, timeout time.Duration) int {
 	features := cfg.Features
+	if features.Proxy {
+		if cfg.Strict {
+			fmt.Fprintln(r.Stderr, "sshx: proxy does not support Docker targets")
+			return 1
+		}
+		fmt.Fprintln(r.Stderr, "sshx: proxy skipped for Docker target")
+	}
 	if features.RemoteFS {
 		fmt.Fprintln(r.Stderr, "sshx: remoteFs does not support Docker targets yet")
 		return 1

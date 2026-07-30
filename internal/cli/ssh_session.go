@@ -65,6 +65,10 @@ func sessionSSHArgsWithEnv(parsed sshcompat.Parsed, envLine, workspace string) [
 }
 
 func integrationSessionSSHArgs(parsed sshcompat.Parsed, contextID, contextHome string) []string {
+	return integrationSessionSSHArgsWithProxy(parsed, contextID, contextHome, "", false, false)
+}
+
+func integrationSessionSSHArgsWithProxy(parsed sshcompat.Parsed, contextID, contextHome, sessionID string, useProxy, strict bool) []string {
 	args := baseSSHArgs(parsed)
 	if len(args) == 0 || hasSSHSubsystemFlag(args) || (len(parsed.RemoteCommand) == 0 && hasSSHSessionlessFlag(args)) {
 		return append([]string(nil), parsed.Args...)
@@ -72,6 +76,9 @@ func integrationSessionSSHArgs(parsed sshcompat.Parsed, contextID, contextHome s
 	// Wrap every session-producing command at the SSH boundary. The remote
 	// command inherits the context while its stdin remains a native SSH stream.
 	envLine := integrationContextEnvScript(contextID, contextHome)
+	if useProxy {
+		envLine += "; " + integrationProxyWaitScript(contextHome, sessionID, strict)
+	}
 	if len(parsed.RemoteCommand) == 0 {
 		if !hasSSHDisableTTYFlag(args) && !hasSSHForceTTYFlag(args) {
 			args = append([]string{"-t"}, args...)

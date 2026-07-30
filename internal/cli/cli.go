@@ -16,15 +16,17 @@ import (
 )
 
 type BridgeSession struct {
-	SessionID string
-	ContextID string
-	RemoteFS  bool
-	MountRoot string
-	Workspace string
-	ReadOnly  bool
-	Done      <-chan struct{}
-	stop      func()
-	stopOnce  sync.Once
+	SessionID  string
+	ContextID  string
+	RemoteFS   bool
+	MountRoot  string
+	Workspace  string
+	ReadOnly   bool
+	ProxyHTTP  string
+	ProxySOCKS string
+	Done       <-chan struct{}
+	stop       func()
+	stopOnce   sync.Once
 }
 
 func (s *BridgeSession) Stop() {
@@ -76,6 +78,7 @@ type Runner struct {
 	commandBridge      bool
 	autoForward        bool
 	remoteFS           bool
+	useProxy           bool
 	integrationSidecar bool
 	connection         identity.Connection
 }
@@ -211,6 +214,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	r.commandBridge = features.CommandBridge
 	r.autoForward = features.AutoForward
 	r.remoteFS = features.RemoteFS
+	r.useProxy = features.Proxy
 	if features.AutoForward {
 		if err := r.EnsureResolver(ctx); err != nil {
 			if cfg.Strict {
@@ -226,12 +230,18 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			fmt.Fprintf(r.Stderr, "sshx: remote server unavailable for %s: %v\n", parsed.Target, err)
 			return 1
 		}
-	} else if features.CommandBridge || features.AutoForward || features.RemoteFS {
+		if features.Proxy {
+			fmt.Fprintf(r.Stderr, "sshx: proxy skipped for %s: %v\n", parsed.Target, err)
+		}
+	} else if features.CommandBridge || features.AutoForward || features.RemoteFS || features.Proxy {
 		bridgeSession, err := r.StartBridge(ctx, parsed.Target, sshArgs, remoteHome)
 		if err != nil {
 			if cfg.Strict || features.RemoteFS {
-				fmt.Fprintf(r.Stderr, "sshx: command bridge unavailable for %s: %v\n", parsed.Target, err)
+				fmt.Fprintf(r.Stderr, "sshx: enhanced session unavailable for %s: %v\n", parsed.Target, err)
 				return 1
+			}
+			if features.Proxy {
+				fmt.Fprintf(r.Stderr, "sshx: proxy skipped for %s: %v\n", parsed.Target, err)
 			}
 		} else {
 			remoteReady = true

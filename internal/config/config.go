@@ -20,6 +20,7 @@ type Features struct {
 	CommandBridge bool `yaml:"commandBridge"`
 	AutoForward   bool `yaml:"autoForward"`
 	RemoteFS      bool `yaml:"remoteFs"`
+	Proxy         bool `yaml:"proxy"`
 }
 
 type CommandPolicy struct {
@@ -68,7 +69,8 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// applyFeatureEnvOverrides lets COMMANDBRIDGE / AUTOFORWARD / REMOTEFS=1|0
+// applyFeatureEnvOverrides lets COMMANDBRIDGE / AUTOFORWARD / REMOTEFS /
+// SSHX_USE_PROXY=1|0
 // override the corresponding features from the config file.
 func applyFeatureEnvOverrides(cfg *Config) {
 	overrides := []struct {
@@ -78,6 +80,7 @@ func applyFeatureEnvOverrides(cfg *Config) {
 		{"COMMANDBRIDGE", &cfg.Features.CommandBridge},
 		{"AUTOFORWARD", &cfg.Features.AutoForward},
 		{"REMOTEFS", &cfg.Features.RemoteFS},
+		{"SSHX_USE_PROXY", &cfg.Features.Proxy},
 	}
 	for _, o := range overrides {
 		v, ok := os.LookupEnv(o.env)
@@ -94,7 +97,7 @@ func applyFeatureEnvOverrides(cfg *Config) {
 }
 
 func (f Features) Enabled() bool {
-	return f.CommandBridge || f.AutoForward || f.RemoteFS
+	return f.CommandBridge || f.AutoForward || f.RemoteFS || f.Proxy
 }
 
 func (p CommandPolicy) Allows(argv []string) bool {

@@ -77,6 +77,33 @@ func TestIntegrationSessionWrapperExportsContext(t *testing.T) {
 	}
 }
 
+func TestIntegrationSessionLoadsProxyEnvironment(t *testing.T) {
+	home := t.TempDir()
+	contextHome := "$HOME/.sshx/context"
+	proxyDir := filepath.Join(home, ".sshx", "context", "proxy")
+	if err := os.MkdirAll(proxyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := (proxyEnvironment{
+		HTTP:  "http://sshx:secret@127.0.0.1:43123",
+		SOCKS: "socks5h://sshx:secret@127.0.0.1:43123",
+	}).script()
+	if err := os.WriteFile(filepath.Join(proxyDir, "session-id.env"), []byte(env+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parsed := sshcompat.Parse([]string{"host", `printf '%s' "$HTTP_PROXY|$ALL_PROXY"`})
+	got := integrationSessionSSHArgsWithProxy(parsed, "context-id", contextHome, "session-id", true, true)
+	cmd := exec.Command("/bin/sh", "-c", got[len(got)-1])
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "SHELL=/bin/sh"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper failed: %v\n%s", err, out)
+	}
+	if string(out) != "http://sshx:secret@127.0.0.1:43123|socks5h://sshx:secret@127.0.0.1:43123" {
+		t.Fatalf("proxy environment = %q", out)
+	}
+}
+
 func TestIntegrationSessionWrapsDefaultLoginShell(t *testing.T) {
 	for _, tc := range []struct {
 		args       []string

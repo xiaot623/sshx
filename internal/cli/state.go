@@ -66,6 +66,9 @@ func remoteBridgeEnvScript(remoteHome string, session *BridgeSession) string {
 		}
 		script += "; export SSHX_WORKSPACE SSHX_MOUNT_ROOT"
 	}
+	if session.ProxyHTTP != "" && session.ProxySOCKS != "" {
+		script += "; " + (proxyEnvironment{HTTP: session.ProxyHTTP, SOCKS: session.ProxySOCKS}).script()
+	}
 	return script
 }
 

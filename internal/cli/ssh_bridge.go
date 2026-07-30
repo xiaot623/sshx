@@ -93,6 +93,22 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		}
 	}
 	sessionID := connection.SessionID
+	bridgeSSHArgs := append([]string(nil), sshArgs...)
+	controlDir := ""
+	controlPath := sshControlPath(bridgeSSHArgs)
+	bridgeStarted := false
+	if r.useProxy && !r.integrationSidecar {
+		controlDir, controlPath, err = newControlPath(sessionID)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if controlDir != "" && !bridgeStarted {
+				_ = os.RemoveAll(controlDir)
+			}
+		}()
+		bridgeSSHArgs = proxyControlMasterArgs(bridgeSSHArgs, controlPath)
+	}
 	var localSession *locald.Session
 	if r.autoForward {
 		if err := r.ensureLocalDaemon(ctx, localDaemonSocket); err != nil {
@@ -106,7 +122,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			DNSAddr:      domainDNSAddr(),
 			LeaseID:      sessionID,
 			TargetID:     connection.TargetID,
-			ControlPath:  sshControlPath(sshArgs),
+			ControlPath:  controlPath,
 			AppVersion:   clientVersion(),
 		}, locald.DefaultHeartbeatInterval)
 		if err != nil {
@@ -133,13 +149,19 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	}
 	controlProxy, err := r.startSSHProxy(
 		bridgeCtx,
-		sshArgs,
+		bridgeSSHArgs,
 		remoteShell(remoteServerEnvScript(remoteHome)+"; exec \"$SSHX_SERVER_HOME/sshx\" mux-proxy --control \"$SSHX_SERVER_HOME/sock\" --fs \"$SSHX_SERVER_HOME/sock.fs\""),
 	)
 	if err != nil {
 		cancel()
 		closeLifecycle()
 		return nil, err
+	}
+	if r.useProxy && !r.integrationSidecar && !waitForControlPath(bridgeCtx, controlPath) {
+		cancel()
+		closeLifecycle()
+		controlProxy.stop()
+		return nil, errors.New("timed out waiting for proxy control socket")
 	}
 	muxSession := sshmux.New(controlProxy.conn)
 	readyCh := make(chan error, 1)
@@ -156,6 +178,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	if r.remoteFS {
 		mountManager = newRemoteMountManager(sessionID, readOnly)
 	}
+
 	go func() {
 		opts := bridge.ClientOptions{
 			Ready:      readyCh,
@@ -316,10 +339,25 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		}
 	}
 
+	var tunnel *proxyTunnel
+	if r.useProxy && !r.integrationSidecar {
+		tunnel, err = r.startProxyTunnel(bridgeCtx, bridgeSSHArgs, controlPath)
+		if err != nil {
+			cancel()
+			closeLifecycle()
+			_ = muxSession.Close()
+			controlProxy.stop()
+			return nil, err
+		}
+	}
+
 	var stopOnce sync.Once
 	stop := func() {
 		stopOnce.Do(func() {
 			autoForwardStopped.Store(true)
+			if tunnel != nil {
+				tunnel.Close()
+			}
 			fsMu.RLock()
 			peer := fsPeer
 			fsMu.RUnlock()
@@ -344,13 +382,22 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			_ = muxSession.Close()
 			closeLifecycle()
 			controlProxy.stop()
+			if controlDir != "" {
+				_ = os.RemoveAll(controlDir)
+			}
 			select {
 			case <-errCh:
 			default:
 			}
 		})
 	}
-	return &BridgeSession{SessionID: sessionID, ContextID: connection.ContextID, RemoteFS: r.remoteFS, MountRoot: mountRoot, Workspace: workspace, ReadOnly: readOnly, Done: bridgeCtx.Done(), stop: stop}, nil
+	session := &BridgeSession{SessionID: sessionID, ContextID: connection.ContextID, RemoteFS: r.remoteFS, MountRoot: mountRoot, Workspace: workspace, ReadOnly: readOnly, Done: bridgeCtx.Done(), stop: stop}
+	if tunnel != nil {
+		session.ProxyHTTP = tunnel.environment.HTTP
+		session.ProxySOCKS = tunnel.environment.SOCKS
+	}
+	bridgeStarted = true
+	return session, nil
 }
 
 func sshControlPath(args []string) string {

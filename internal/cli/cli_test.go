@@ -124,6 +124,8 @@ func TestHelpFlagPrintsSSHXHelpThenOpenSSHHelp(t *testing.T) {
 		"local <command>",
 		"SSHX_CONFIG=<path>",
 		"COMMANDBRIDGE=0|1",
+		"SSHX_USE_PROXY=0|1",
+		"SSHX_PROXY_URL=<url>",
 		"SSHX_REMOTE_BINARY=<path>",
 		"RUNTIME ENVIRONMENT (SET BY SSHX)",
 		"SSHX_WORKSPACE",
@@ -626,6 +628,47 @@ features:
 	}
 	if !bridgeStarted {
 		t.Fatal("bridge was not started")
+	}
+}
+
+func TestGlobalProxyFeatureStartsBridgeAndInjectsEnvironment(t *testing.T) {
+	isolateHome(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+features:
+  proxy: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var bridgeStarted bool
+	var delegated []string
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	r.ConfigPath = configPath
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return sameVersionRemoteProbe(), nil
+	}
+	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
+		bridgeStarted = true
+		return &BridgeSession{
+			SessionID:  "test",
+			ProxyHTTP:  "http://sshx:secret@127.0.0.1:43123",
+			ProxySOCKS: "socks5h://sshx:secret@127.0.0.1:43123",
+			stop:       func() {},
+		}, nil
+	}
+	r.Exec = func(_ context.Context, _ string, args []string) error {
+		delegated = append([]string(nil), args...)
+		return nil
+	}
+	code := r.Run(context.Background(), []string{"remote", "env"})
+	if code != 0 || !bridgeStarted {
+		t.Fatalf("code = %d, bridgeStarted = %v", code, bridgeStarted)
+	}
+	joined := strings.Join(delegated, " ")
+	for _, want := range []string{"HTTP_PROXY=", "ALL_PROXY=", "127.0.0.1:43123", "NO_PROXY="} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("delegated command missing %q: %s", want, joined)
+		}
 	}
 }
 
