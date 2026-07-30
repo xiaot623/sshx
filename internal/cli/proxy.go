@@ -82,7 +82,10 @@ func (r *Runner) startProxyTunnel(ctx context.Context, sshArgs []string, control
 		server:      server,
 		controlPath: controlPath,
 		sshArgs:     append([]string(nil), sshArgs...),
-		spec:        "127.0.0.1:" + strconv.Itoa(remotePort) + ":127.0.0.1:" + localPort,
+		// OpenSSH indexes dynamically allocated remote forwards by their
+		// original listen port (0), not by the allocated port it reports.
+		// The cancel operation must therefore repeat the request verbatim.
+		spec: requestSpec,
 		environment: proxyEnvironment{
 			HTTP:  (&url.URL{Scheme: "http", User: user, Host: remoteAddress}).String(),
 			SOCKS: (&url.URL{Scheme: "socks5h", User: user, Host: remoteAddress}).String(),

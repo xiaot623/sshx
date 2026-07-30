@@ -104,7 +104,7 @@ func TestStartProxyTunnelCreatesAndCancelsDynamicForward(t *testing.T) {
 	if len(operations) != 2 {
 		t.Fatalf("operations = %#v", operations)
 	}
-	if got := strings.Join(operations[1], " "); !strings.Contains(got, "-O cancel") || !strings.Contains(got, "127.0.0.1:42123:127.0.0.1:") {
+	if got := strings.Join(operations[1], " "); !strings.Contains(got, "-O cancel") || !strings.Contains(got, "127.0.0.1:0:127.0.0.1:") {
 		t.Fatalf("cancel operation = %s", got)
 	}
 }
