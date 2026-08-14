@@ -34,7 +34,7 @@ func TestProxyControlOperationDoesNotRepeatUserForwards(t *testing.T) {
 		"-p", "2222",
 		"host",
 	}
-	got := strings.Join(sshControlOperationArgs(args, "/tmp/sshx-master", "forward", "127.0.0.1:0:127.0.0.1:4567"), " ")
+	got := strings.Join(sshControlOperationArgs(args, "/tmp/sshx-master", "forward", "R", "127.0.0.1:0:127.0.0.1:4567"), " ")
 	for _, forbidden := range []string{"-D 1081", "-L 8080", "9000:localhost:90", "9100:localhost:91", "/tmp/old", "ClearAllForwardings=yes", "ExitOnForwardFailure=no"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("control operation retained %q: %s", forbidden, got)
@@ -43,6 +43,52 @@ func TestProxyControlOperationDoesNotRepeatUserForwards(t *testing.T) {
 	for _, required := range []string{"-S /tmp/sshx-master", "-O forward", "-R 127.0.0.1:0:127.0.0.1:4567", "-p 2222", "host"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("control operation lost %q: %s", required, got)
+		}
+	}
+}
+
+func TestControlOperationArgsLocalForwardUsesDashL(t *testing.T) {
+	args := []string{"-t", "-L", "8080:localhost:80", "-p", "2222", "host"}
+	got := strings.Join(sshControlOperationArgs(args, "/tmp/sshx-master", "forward", "L", "127.64.0.1:8080:127.0.0.1:8080"), " ")
+	for _, required := range []string{"-S /tmp/sshx-master", "-O forward", "-L 127.64.0.1:8080:127.0.0.1:8080", "-p 2222", "host"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("local control operation lost %q: %s", required, got)
+		}
+	}
+	for _, forbidden := range []string{"-t", "-L 8080:localhost:80", "-R "} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("local control operation retained %q: %s", forbidden, got)
+		}
+	}
+}
+
+func TestOwnControlMasterForAutoForwardWithoutProxy(t *testing.T) {
+	for _, tc := range []struct {
+		autoForward, useProxy, sidecar, want bool
+	}{
+		{true, false, false, true},
+		{false, true, false, true},
+		{true, true, false, true},
+		{true, false, true, false},
+		{false, true, true, false},
+		{false, false, false, false},
+	} {
+		if got := ownControlMaster(tc.autoForward, tc.useProxy, tc.sidecar); got != tc.want {
+			t.Fatalf("ownControlMaster(autoForward=%v, proxy=%v, sidecar=%v) = %v, want %v", tc.autoForward, tc.useProxy, tc.sidecar, got, tc.want)
+		}
+	}
+}
+
+func TestControlMasterArgsAppliedForAutoForward(t *testing.T) {
+	got := strings.Join(controlMasterArgs([]string{"-t", "-L", "8080:localhost:80", "-p", "2222", "host"}, "/tmp/sshx-master"), " ")
+	for _, required := range []string{"ControlMaster=yes", "ControlPersist=no", "-S /tmp/sshx-master", "ClearAllForwardings=yes", "-p 2222", "host"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("control master args lost %q: %s", required, got)
+		}
+	}
+	for _, forbidden := range []string{"-t", "-L 8080:localhost:80"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("control master args retained %q: %s", forbidden, got)
 		}
 	}
 }

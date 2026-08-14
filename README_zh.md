@@ -394,7 +394,7 @@ commands:
 1. **连接**：`sshx remote` 打开正常 SSH 会话，并在 `~/.sshx_server/runtimes/<RuntimeHomeID>` 下启动兼容 runtime。
 2. **Sidecar 通道**：一条隐藏 SSH 通道复用命令、端口、心跳和可选 RemoteFS 流量；ContextID 将 VS Code/Cursor 终端路由到健康活动 session。
 3. **端口嗅探**：服务器读取 `/proc/net/tcp*`（Linux）来检测回环（`127.0.0.1` / `::1`）和通配（`0.0.0.0` / `::`）监听端口。
-4. **转发**：检测到的端口通过单个共享本地守护进程使用 `ssh -W` 转发。
+4. **转发**：检测到的端口通过单个共享本地守护进程使用 OpenSSH `ssh -O forward -L` 转发。
 5. **域名**：本地 DNS 应答器将 `<target>.<suffix>` 映射到 localhost。浏览器 URL 中的端口选择对应的本地转发端口。
 
 当 `sshx` 用于**不匹配的主机**时（无 sshx 配置或主机不在范围内），会先检查目标是否可解析为运行中的 Docker 容器。如果 SSH 和 Docker 都不匹配，则直接 `exec` 真正的 `ssh`——无守护进程，无安装，无开销。

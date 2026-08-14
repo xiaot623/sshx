@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xiaot623/sshx/internal/bridge"
+	"github.com/xiaot623/sshx/internal/forward"
 	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/locald"
 	sshmux "github.com/xiaot623/sshx/internal/mux"
@@ -94,11 +95,13 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	}
 	sessionID := connection.SessionID
 	bridgeSSHArgs := append([]string(nil), sshArgs...)
+	localSSHArgs := forward.CleanSSHArgs(sshArgs)
 	controlDir := ""
 	controlPath := sshControlPath(bridgeSSHArgs)
 	bridgeStarted := false
 	wantProxy := r.useProxy && !r.integrationSidecar
-	if wantProxy {
+	ownMaster := ownControlMaster(r.autoForward, r.useProxy, r.integrationSidecar)
+	if ownMaster {
 		controlDir, controlPath, err = newControlPath(sessionID)
 		if err != nil {
 			return nil, err
@@ -108,28 +111,14 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 				_ = os.RemoveAll(controlDir)
 			}
 		}()
-		bridgeSSHArgs = proxyControlMasterArgs(bridgeSSHArgs, controlPath)
+		bridgeSSHArgs = controlMasterArgs(bridgeSSHArgs, controlPath)
 	}
-	var localSession *locald.Session
 	if r.autoForward {
 		if err := r.ensureLocalDaemon(ctx, localDaemonSocket); err != nil {
 			return nil, err
 		}
-		localSession, err = locald.OpenSession(ctx, localDaemonSocket, locald.Request{
-			SSHPath:      r.SSHPath,
-			Target:       target,
-			SSHArgs:      append([]string(nil), sshArgs...),
-			DomainSuffix: domainSuffix(),
-			DNSAddr:      domainDNSAddr(),
-			LeaseID:      sessionID,
-			TargetID:     connection.TargetID,
-			ControlPath:  controlPath,
-			AppVersion:   clientVersion(),
-		}, locald.DefaultHeartbeatInterval)
-		if err != nil {
-			return nil, err
-		}
 	}
+	var localSession *locald.Session
 	var lifecycleOnce sync.Once
 	closeLifecycle := func() {
 		lifecycleOnce.Do(func() {
@@ -139,15 +128,6 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		})
 	}
 	bridgeCtx, cancel := context.WithCancel(ctx)
-	if localSession != nil {
-		go func() {
-			select {
-			case <-localSession.Done():
-				cancel()
-			case <-bridgeCtx.Done():
-			}
-		}()
-	}
 	controlProxy, err := r.startSSHProxy(
 		bridgeCtx,
 		bridgeSSHArgs,
@@ -158,20 +138,59 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		closeLifecycle()
 		return nil, err
 	}
-	if wantProxy && !waitForControlPath(bridgeCtx, controlPath) {
-		err = errors.New("timed out waiting for proxy control socket")
-		if !r.skipOptionalProxy(target, err) {
+	var autoForwardStopped atomic.Bool
+	autoForward := r.autoForward
+	if ownMaster && !waitForControlPath(bridgeCtx, controlPath) {
+		err = errors.New("timed out waiting for control socket")
+		if wantProxy && !r.skipOptionalProxy(target, err) {
 			cancel()
 			closeLifecycle()
 			controlProxy.stop()
 			return nil, err
 		}
 		wantProxy = false
+		if autoForward {
+			fmt.Fprintf(r.Stderr, "sshx: auto-forward skipped for %s: %v\n", target, err)
+			autoForwardStopped.Store(true)
+			autoForward = false
+			controlPath = ""
+			if r.strict {
+				cancel()
+				closeLifecycle()
+				controlProxy.stop()
+				return nil, err
+			}
+		}
+	}
+	if autoForward {
+		localSession, err = locald.OpenSession(ctx, localDaemonSocket, locald.Request{
+			SSHPath:      r.SSHPath,
+			Target:       target,
+			SSHArgs:      append([]string(nil), localSSHArgs...),
+			DomainSuffix: domainSuffix(),
+			DNSAddr:      domainDNSAddr(),
+			LeaseID:      sessionID,
+			TargetID:     connection.TargetID,
+			ControlPath:  controlPath,
+			AppVersion:   clientVersion(),
+		}, locald.DefaultHeartbeatInterval)
+		if err != nil {
+			cancel()
+			closeLifecycle()
+			controlProxy.stop()
+			return nil, err
+		}
+		go func() {
+			select {
+			case <-localSession.Done():
+				cancel()
+			case <-bridgeCtx.Done():
+			}
+		}()
 	}
 	muxSession := sshmux.New(controlProxy.conn)
 	readyCh := make(chan error, 1)
 	errCh := make(chan error, 1)
-	var autoForwardStopped atomic.Bool
 	var fsMu sync.RWMutex
 	var fsPeer *remotefs.Peer
 	var mountManager *remoteMountManager
@@ -215,8 +234,8 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		if r.remoteFS {
 			opts.Capabilities = append(opts.Capabilities, "remotefs.fs.v1")
 		}
-		if r.autoForward {
-			opts.OnPortObserved = func(port int) {
+		if autoForward {
+			opts.OnPortObserved = func(host string, port int) {
 				if autoForwardStopped.Load() {
 					return
 				}
@@ -224,10 +243,12 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 					Type:         locald.TypeEnsureTargetPort,
 					SSHPath:      r.SSHPath,
 					Target:       target,
-					SSHArgs:      append([]string(nil), sshArgs...),
+					SSHArgs:      append([]string(nil), localSSHArgs...),
+					RemoteHost:   host,
 					RemotePort:   port,
 					LeaseID:      sessionID,
 					TargetID:     connection.TargetID,
+					ControlPath:  controlPath,
 					DomainSuffix: domainSuffix(),
 					DNSAddr:      domainDNSAddr(),
 				})
@@ -243,7 +264,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 					Type:       locald.TypeRemoveTargetPort,
 					SSHPath:    r.SSHPath,
 					Target:     target,
-					SSHArgs:    append([]string(nil), sshArgs...),
+					SSHArgs:    append([]string(nil), localSSHArgs...),
 					RemotePort: port,
 					LeaseID:    sessionID,
 					TargetID:   connection.TargetID,

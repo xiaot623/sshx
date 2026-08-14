@@ -2,6 +2,7 @@ package ports
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"net"
@@ -12,6 +13,12 @@ import (
 
 var ErrUnsupported = errors.New("port scanning is only supported on Linux servers")
 
+// Listener is a loopback or wildcard TCP listen entry that sshx can auto-forward.
+type Listener struct {
+	Port        int
+	ConnectHost string // "127.0.0.1" or "::1"
+}
+
 // minForwardablePort is the lowest port sshx will auto-forward. Ports below
 // 1024 are privileged: unprivileged users cannot bind them locally, and
 // forwarding them (e.g. sshd on :22) is rarely useful — the session is
@@ -19,8 +26,63 @@ var ErrUnsupported = errors.New("port scanning is only supported on Linux server
 // it bypasses the scanner.
 const minForwardablePort = 1024
 
+// ConnectHost returns the address sshx should dial on the remote when
+// forwarding this listen entry: "127.0.0.1" for IPv4 loopback/wildcard and
+// IPv6 unspecified; "::1" for IPv6 loopback. Empty if not forwardable.
+func ConnectHost(hexAddr string, ipv6 bool) string {
+	ip, ok := parseProcNetIP(hexAddr, ipv6)
+	if !ok {
+		return ""
+	}
+	if ipv6 {
+		if ip.IsLoopback() {
+			return "::1"
+		}
+		if ip.IsUnspecified() {
+			return "127.0.0.1"
+		}
+		return ""
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		return "127.0.0.1"
+	}
+	return ""
+}
+
+// parseProcNetIP decodes a /proc/net/{tcp,tcp6} local_address hex field.
+// The kernel prints each 32-bit word with %08X of a native-endian uint32, so
+// each 4-byte group is converted from host endian to network order before
+// being treated as net.IP.
+func parseProcNetIP(hexAddr string, ipv6 bool) (net.IP, bool) {
+	b, err := hex.DecodeString(hexAddr)
+	if err != nil {
+		return nil, false
+	}
+	want := net.IPv4len
+	if ipv6 {
+		want = net.IPv6len
+	}
+	if len(b) != want {
+		return nil, false
+	}
+	ip := make(net.IP, want)
+	for i := 0; i < want; i += 4 {
+		word := binary.NativeEndian.Uint32(b[i : i+4])
+		binary.BigEndian.PutUint32(ip[i:i+4], word)
+	}
+	return ip, true
+}
+
 func parseProcNetTCP(data string, ipv6 bool) ([]int, error) {
-	seen := map[int]bool{}
+	listeners, err := parseProcNetTCPListeners(data, ipv6)
+	if err != nil {
+		return nil, err
+	}
+	return listenerPorts(listeners), nil
+}
+
+func parseProcNetTCPListeners(data string, ipv6 bool) ([]Listener, error) {
+	byPort := map[int]Listener{}
 	scanner := bufio.NewScanner(strings.NewReader(data))
 	first := true
 	for scanner.Scan() {
@@ -41,11 +103,12 @@ func parseProcNetTCP(data string, ipv6 bool) ([]int, error) {
 		if fields[3] != "0A" {
 			continue
 		}
-		host, port, ok := strings.Cut(fields[1], ":")
+		hexAddr, port, ok := strings.Cut(fields[1], ":")
 		if !ok {
 			continue
 		}
-		if !isLocalListenAddress(host, ipv6) {
+		host := ConnectHost(hexAddr, ipv6)
+		if host == "" {
 			continue
 		}
 		p, err := strconv.ParseInt(port, 16, 32)
@@ -55,51 +118,53 @@ func parseProcNetTCP(data string, ipv6 bool) ([]int, error) {
 		if p < minForwardablePort {
 			continue
 		}
-		seen[int(p)] = true
+		byPort[int(p)] = Listener{Port: int(p), ConnectHost: host}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	out := make([]int, 0, len(seen))
-	for p := range seen {
-		out = append(out, p)
-	}
-	sort.Ints(out)
-	return out, nil
+	return listenersFromMap(byPort), nil
 }
 
-// isLocalListenAddress reports whether a /proc/net/{tcp,tcp6} local_address
-// hex field is an address sshx should auto-forward. sshx forwards services
-// bound to the loopback interface (127.0.0.1 / ::1) and the wildcard addresses
-// (0.0.0.0 / ::), since wildcard listeners are reachable via 127.0.0.1 on the
-// remote host. Bindings on other interfaces are not forwarded.
-func isLocalListenAddress(hexAddr string, ipv6 bool) bool {
-	if ipv6 {
-		b, err := hex.DecodeString(hexAddr)
-		if err != nil || len(b) != net.IPv6len {
-			return false
-		}
-		ip := net.IP(b)
-		return ip.IsLoopback() || ip.IsUnspecified()
+// ScanLoopbackListening returns unique sorted loopback/wildcard listen ports.
+func ScanLoopbackListening() ([]int, error) {
+	listeners, err := ScanLoopbackListeners()
+	if err != nil {
+		return nil, err
 	}
-	if len(hexAddr) != 8 {
-		return false
-	}
-	// 127.0.0.1 (0100007F, little-endian) and 0.0.0.0 (00000000).
-	return strings.EqualFold(hexAddr, "0100007F") || strings.EqualFold(hexAddr, "00000000")
+	return listenerPorts(listeners), nil
 }
 
-func mergePorts(groups ...[]int) []int {
-	seen := map[int]bool{}
+func listenerPorts(listeners []Listener) []int {
+	out := make([]int, len(listeners))
+	for i, l := range listeners {
+		out[i] = l.Port
+	}
+	return out
+}
+
+func mergeListeners(groups ...[]Listener) []Listener {
+	byPort := map[int]Listener{}
 	for _, group := range groups {
-		for _, port := range group {
-			seen[port] = true
+		for _, l := range group {
+			existing, ok := byPort[l.Port]
+			if !ok {
+				byPort[l.Port] = l
+				continue
+			}
+			if existing.ConnectHost == "::1" && l.ConnectHost == "127.0.0.1" {
+				byPort[l.Port] = l
+			}
 		}
 	}
-	out := make([]int, 0, len(seen))
-	for port := range seen {
-		out = append(out, port)
+	return listenersFromMap(byPort)
+}
+
+func listenersFromMap(byPort map[int]Listener) []Listener {
+	out := make([]Listener, 0, len(byPort))
+	for _, l := range byPort {
+		out = append(out, l)
 	}
-	sort.Ints(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Port < out[j].Port })
 	return out
 }

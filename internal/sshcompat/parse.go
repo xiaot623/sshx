@@ -71,3 +71,18 @@ func consumesAttachedValue(arg string) bool {
 	}
 	return optionsWithRequiredValue[arg[:2]]
 }
+
+func InsertBeforeTarget(parsed Parsed, options []string) []string {
+	if parsed.TargetIndex < 0 || parsed.TargetIndex > len(parsed.Args) {
+		return append([]string(nil), parsed.Args...)
+	}
+	insertAt := parsed.TargetIndex
+	if insertAt > 0 && parsed.Args[insertAt-1] == "--" {
+		insertAt--
+	}
+	out := make([]string, 0, len(parsed.Args)+len(options))
+	out = append(out, parsed.Args[:insertAt]...)
+	out = append(out, options...)
+	out = append(out, parsed.Args[insertAt:]...)
+	return out
+}

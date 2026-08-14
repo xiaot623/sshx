@@ -275,7 +275,7 @@ func TestNewClientReceivesCurrentPortSnapshot(t *testing.T) {
 		clientErr <- RunClientConnWithOptions(ctx, clientConn, ClientOptions{
 			Ready:      ready,
 			AppVersion: "test-version",
-			OnPortObserved: func(port int) {
+			OnPortObserved: func(host string, port int) {
 				observed <- port
 			},
 		})

@@ -45,6 +45,7 @@ type Request struct {
 	Target          string   `json:"target,omitempty"`
 	SSHArgs         []string `json:"sshArgs,omitempty"`
 	RemotePort      int      `json:"remotePort,omitempty"`
+	RemoteHost      string   `json:"remoteHost,omitempty"`
 	DomainSuffix    string   `json:"domainSuffix,omitempty"`
 	DNSAddr         string   `json:"dnsAddr,omitempty"`
 	SessionID       string   `json:"sessionId,omitempty"`
@@ -542,7 +543,7 @@ func (s *Server) ensureTargetPort(ctx context.Context, req Request) Response {
 		return Response{OK: false, Error: err.Error()}
 	}
 	fwd := s.forwarder(ctx, targetKey(req))
-	f, err := fwd.Ensure(req.RemotePort, rec.ListenIP)
+	f, err := fwd.Ensure(req.RemotePort, rec.ListenIP, req.RemoteHost)
 	if err != nil {
 		return Response{OK: false, Error: err.Error()}
 	}
@@ -652,20 +653,15 @@ func (s *Server) forwarder(ctx context.Context, key string) *forward.Manager {
 	if f := s.forwarders[key]; f != nil {
 		return f
 	}
-	f := forward.NewDynamicManager(ctx, func() (string, []string, bool) {
+	f := forward.NewDynamicManager(ctx, func() (string, []string, string, bool) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		for _, session := range s.sessions {
 			if session.TargetKey == key {
-				if session.ControlPath != "" {
-					if info, err := os.Stat(session.ControlPath); err != nil || info.Mode()&os.ModeSocket == 0 {
-						continue
-					}
-				}
-				return session.SSHPath, append([]string(nil), session.SSHArgs...), true
+				return session.SSHPath, append([]string(nil), session.SSHArgs...), session.ControlPath, true
 			}
 		}
-		return "", nil, false
+		return "", nil, "", false
 	}, s.Stderr)
 	s.forwarders[key] = f
 	return f

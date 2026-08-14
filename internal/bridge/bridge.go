@@ -43,7 +43,7 @@ type ClientOptions struct {
 	Ready             chan<- error
 	Allow             CommandAllowed
 	Execute           func(context.Context, protocol.Frame) protocol.Frame
-	OnPortObserved    func(port int)
+	OnPortObserved    func(host string, port int)
 	OnPortGone        func(port int)
 	AppVersion        string
 	RuntimeID         string
@@ -632,16 +632,22 @@ func (s *Server) observePorts(ctx context.Context) {
 }
 
 func (s *Server) scanAndBroadcastPorts() {
-	portList, err := ports.ScanLoopbackListening()
+	listeners, err := ports.ScanLoopbackListeners()
 	if err != nil {
 		return
 	}
+	portList := make([]int, 0, len(listeners))
+	hostByPort := make(map[int]string, len(listeners))
+	for _, l := range listeners {
+		portList = append(portList, l.Port)
+		hostByPort[l.Port] = l.ConnectHost
+	}
 	observed, gone := s.applyPortScan(portList)
 	for _, port := range observed {
-		s.broadcast(protocol.Frame{Type: protocol.TypePortObserved, Host: "localhost", Port: port})
+		s.broadcast(protocol.Frame{Type: protocol.TypePortObserved, Host: hostByPort[port], Port: port})
 	}
 	for _, port := range gone {
-		s.broadcast(protocol.Frame{Type: protocol.TypePortGone, Host: "localhost", Port: port})
+		s.broadcast(protocol.Frame{Type: protocol.TypePortGone, Port: port})
 	}
 }
 
@@ -697,8 +703,18 @@ func (s *Server) currentPorts() []int {
 }
 
 func (s *Server) sendCurrentPorts(client *clientConn) {
+	hostByPort := map[int]string{}
+	if listeners, err := ports.ScanLoopbackListeners(); err == nil {
+		for _, l := range listeners {
+			hostByPort[l.Port] = l.ConnectHost
+		}
+	}
 	for _, port := range s.currentPorts() {
-		_ = client.send(protocol.Frame{Type: protocol.TypePortObserved, Host: "localhost", Port: port})
+		host := hostByPort[port]
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		_ = client.send(protocol.Frame{Type: protocol.TypePortObserved, Host: host, Port: port})
 	}
 }
 
@@ -1341,7 +1357,7 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 		}
 		if frame.Type == protocol.TypePortObserved {
 			if opts.OnPortObserved != nil && frame.Port > 0 {
-				opts.OnPortObserved(frame.Port)
+				opts.OnPortObserved(frame.Host, frame.Port)
 			}
 			continue
 		}

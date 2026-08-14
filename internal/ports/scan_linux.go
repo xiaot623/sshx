@@ -4,7 +4,7 @@ package ports
 
 import "os"
 
-func ScanLoopbackListening() ([]int, error) {
+func ScanLoopbackListeners() ([]Listener, error) {
 	tcp4, err := scanProcFile("/proc/net/tcp", false)
 	if err != nil {
 		return nil, err
@@ -13,10 +13,10 @@ func ScanLoopbackListening() ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	return mergePorts(tcp4, tcp6), nil
+	return mergeListeners(tcp4, tcp6), nil
 }
 
-func scanProcFile(path string, ipv6 bool) ([]int, error) {
+func scanProcFile(path string, ipv6 bool) ([]Listener, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -24,5 +24,5 @@ func scanProcFile(path string, ipv6 bool) ([]int, error) {
 		}
 		return nil, err
 	}
-	return parseProcNetTCP(string(b), ipv6)
+	return parseProcNetTCPListeners(string(b), ipv6)
 }

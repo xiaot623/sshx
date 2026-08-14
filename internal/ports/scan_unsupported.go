@@ -2,6 +2,6 @@
 
 package ports
 
-func ScanLoopbackListening() ([]int, error) {
+func ScanLoopbackListeners() ([]Listener, error) {
 	return nil, ErrUnsupported
 }

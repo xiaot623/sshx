@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xiaot623/sshx/internal/forward"
 	localproxy "github.com/xiaot623/sshx/internal/proxy"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 )
@@ -77,7 +78,7 @@ func (r *Runner) startProxyTunnel(ctx context.Context, sshArgs []string, control
 		return nil, err
 	}
 	requestSpec := "127.0.0.1:0:127.0.0.1:" + localPort
-	output, err := r.ExecOutput(ctx, r.SSHPath, sshControlOperationArgs(sshArgs, controlPath, "forward", requestSpec))
+	output, err := r.ExecOutput(ctx, r.SSHPath, sshControlOperationArgs(sshArgs, controlPath, "forward", "R", requestSpec))
 	if err != nil {
 		_ = server.Close()
 		return nil, fmt.Errorf("create reverse proxy forwarding: %w", err)
@@ -85,7 +86,7 @@ func (r *Runner) startProxyTunnel(ctx context.Context, sshArgs []string, control
 	remotePort, err := parseAllocatedPort(output)
 	if err != nil {
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, _ = r.ExecOutput(cancelCtx, r.SSHPath, sshControlOperationArgs(sshArgs, controlPath, "cancel", requestSpec))
+		_, _ = r.ExecOutput(cancelCtx, r.SSHPath, sshControlOperationArgs(sshArgs, controlPath, "cancel", "R", requestSpec))
 		cancel()
 		_ = server.Close()
 		return nil, err
@@ -116,7 +117,7 @@ func (t *proxyTunnel) Close() {
 	t.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_, _ = t.runner.ExecOutput(ctx, t.runner.SSHPath, sshControlOperationArgs(t.sshArgs, t.controlPath, "cancel", t.spec))
+		_, _ = t.runner.ExecOutput(ctx, t.runner.SSHPath, sshControlOperationArgs(t.sshArgs, t.controlPath, "cancel", "R", t.spec))
 		_ = t.server.Close()
 	})
 }
@@ -135,52 +136,16 @@ func parseAllocatedPort(output []byte) (int, error) {
 	return 0, fmt.Errorf("invalid allocated proxy port %q", strings.TrimSpace(string(output)))
 }
 
-func sshControlOperationArgs(sshArgs []string, controlPath, operation, forwardSpec string) []string {
-	clean := stripProxyForwardingOptions(stripAuxiliaryActionOptions(stripControlOptions(sshArgs)))
-	parsed := sshcompat.Parse(clean)
-	options := []string{
-		"-S", controlPath,
-		"-O", operation,
-		"-o", "ExitOnForwardFailure=yes",
-		"-R", forwardSpec,
-	}
-	return insertBeforeTarget(parsed, options)
+func sshControlOperationArgs(sshArgs []string, controlPath, operation, direction, forwardSpec string) []string {
+	return forward.ControlOperationArgs(sshArgs, controlPath, operation, direction, forwardSpec)
 }
 
-func stripProxyForwardingOptions(args []string) []string {
-	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "-o" && i+1 < len(args) {
-			key, _, _ := strings.Cut(args[i+1], "=")
-			if isProxyForwardingOption(key) {
-				i++
-				continue
-			}
-		}
-		if strings.HasPrefix(arg, "-o") && len(arg) > 2 {
-			key, _, _ := strings.Cut(arg[2:], "=")
-			if isProxyForwardingOption(key) {
-				continue
-			}
-		}
-		out = append(out, arg)
-	}
-	return out
+func ownControlMaster(autoForward, useProxy, integrationSidecar bool) bool {
+	return !integrationSidecar && (autoForward || useProxy)
 }
 
-func isProxyForwardingOption(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "clearallforwardings", "exitonforwardfailure", "localforward", "remoteforward", "dynamicforward":
-		return true
-	default:
-		return false
-	}
-}
-
-func proxyControlMasterArgs(sshArgs []string, controlPath string) []string {
-	clean := stripProxyForwardingOptions(stripAuxiliaryActionOptions(stripControlOptions(sshArgs)))
-	parsed := sshcompat.Parse(clean)
+func controlMasterArgs(sshArgs []string, controlPath string) []string {
+	parsed := sshcompat.Parse(forward.CleanSSHArgs(sshArgs))
 	return insertBeforeTarget(parsed, []string{
 		"-o", "ControlMaster=yes",
 		"-o", "ControlPersist=no",
