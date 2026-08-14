@@ -50,21 +50,34 @@ func TestProxyEnvironmentOverridesAndExtendsNoProxy(t *testing.T) {
 		HTTP:  "http://sshx:secret@127.0.0.1:41000",
 		SOCKS: "socks5h://sshx:secret@127.0.0.1:41000",
 	}).script()
-	command := "NO_PROXY=internal; no_proxy=lower; " + script + `; printf '%s\n' "$HTTP_PROXY|$HTTPS_PROXY|$ALL_PROXY|$NO_PROXY|$no_proxy"`
-	output, err := os.ReadFile(runShellToFile(t, command))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(output)
-	for _, want := range []string{
-		"http://sshx:secret@127.0.0.1:41000",
-		"socks5h://sshx:secret@127.0.0.1:41000",
-		"internal,localhost,127.0.0.1,::1",
-		"lower,localhost,127.0.0.1,::1",
+	merged := "internal,lower,localhost,127.0.0.1,::1"
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{name: "both forms", prefix: "NO_PROXY=internal; no_proxy=lower", want: merged},
+		{name: "uppercase only", prefix: "NO_PROXY=internal.example; unset no_proxy", want: "internal.example,localhost,127.0.0.1,::1"},
+		{name: "lowercase only", prefix: "unset NO_PROXY; no_proxy=internal.example", want: "internal.example,localhost,127.0.0.1,::1"},
+		{name: "neither form", prefix: "unset NO_PROXY; unset no_proxy", want: "localhost,127.0.0.1,::1"},
 	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("environment output missing %q: %q", want, got)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			command := tc.prefix + "; " + script + `; printf '%s\n' "$HTTP_PROXY|$HTTPS_PROXY|$ALL_PROXY|$NO_PROXY|$no_proxy"`
+			output, err := os.ReadFile(runShellToFile(t, command))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(output)
+			for _, want := range []string{
+				"http://sshx:secret@127.0.0.1:41000",
+				"socks5h://sshx:secret@127.0.0.1:41000",
+				tc.want + "|" + tc.want,
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("environment output missing %q: %q", want, got)
+				}
+			}
+		})
 	}
 }
 

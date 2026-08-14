@@ -33,8 +33,8 @@ func (e proxyEnvironment) script() string {
 		"http_proxy=$HTTP_PROXY",
 		"https_proxy=$HTTPS_PROXY",
 		"all_proxy=$ALL_PROXY",
-		"NO_PROXY=\"${NO_PROXY:+$NO_PROXY,}" + noProxy + "\"",
-		"no_proxy=\"${no_proxy:+$no_proxy,}" + noProxy + "\"",
+		"NO_PROXY=\"${NO_PROXY:+$NO_PROXY,}${no_proxy:+$no_proxy,}" + noProxy + "\"",
+		"no_proxy=\"$NO_PROXY\"",
 		"export HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy",
 	}, "; ")
 }
