@@ -100,7 +100,7 @@ Set `features.remoteFs: true` to expose the command initiator's workspace throug
 - VS Code/Cursor Remote-SSH integration sidecars stay remote-to-local only: those application sessions do not export a local workspace to the remote host.
 - With RemoteFS disabled, the command runs from the local home and receives `SSHX_REMOTE_CWD` plus `SSHX_REMOTE_FS=0`.
 
-Mounted trees permit reads, writes, and creation, but block file/directory deletion and rename in both directions. They can include sensitive files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust.
+Mounted trees permit reads, writes, and creation. Deletion (unlink/rmdir) is blocked; same-directory rename is allowed so editors can atomic-save; cross-directory rename remains blocked. They can include sensitive files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust.
 
 Set `FS_READ_ONLY=1` on the client when starting sshx to make the session mounts read-only:
 

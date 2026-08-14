@@ -315,9 +315,6 @@ func (b *RootBackend) Rmdir(_ context.Context, name string) error {
 }
 
 func (b *RootBackend) Rename(_ context.Context, oldName, newName string) error {
-	if b.options.DisableDelete {
-		return syscall.EPERM
-	}
 	oldName, err := b.cleanPath(oldName)
 	if err != nil {
 		return err
@@ -325,6 +322,11 @@ func (b *RootBackend) Rename(_ context.Context, oldName, newName string) error {
 	newName, err = b.cleanPath(newName)
 	if err != nil {
 		return err
+	}
+	// DisableDelete blocks unlink/rmdir and cross-directory rename (a move-out).
+	// Same-directory rename, including overwrite, is allowed for atomic editor saves.
+	if b.options.DisableDelete && filepath.Dir(oldName) != filepath.Dir(newName) {
+		return syscall.EPERM
 	}
 	return b.root.Rename(oldName, newName)
 }

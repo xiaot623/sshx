@@ -912,7 +912,8 @@ func (s *Server) ensureExportBackend(sessionID, mountID, rootPath string, peer *
 		}
 		s.mu.Unlock()
 	}
-	backend, err := remotefs.OpenRootBackendWithOptions(rootPath, remotefs.RootBackendOptions{DisableDelete: true})
+	// Exclude the session mount tree so reverse mounts cannot recurse into a home export.
+	backend, err := remotefs.OpenRootBackendWithOptions(rootPath, remotefs.RootBackendOptions{DisableDelete: true}, s.MountRoot)
 	if err != nil {
 		finish()
 		return fmt.Errorf("open remote workspace: %w", err)

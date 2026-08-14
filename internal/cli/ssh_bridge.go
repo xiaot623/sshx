@@ -328,7 +328,8 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 				var layout remotefs.ExportLayout
 				layout, err = remotefs.CurrentExportLayout(cwd)
 				if err == nil {
-					workspaceBackend, err = remotefs.OpenRootBackendWithOptions(layout.RootPath, remotefs.RootBackendOptions{DisableDelete: true})
+					// Exclude reverse-mount root in case a nested runtime dir would recurse.
+					workspaceBackend, err = remotefs.OpenRootBackendWithOptions(layout.RootPath, remotefs.RootBackendOptions{DisableDelete: true}, localReverseMountsRoot())
 				}
 				if err == nil {
 					err = peer.RegisterBackend(workspaceMountID, workspaceBackend)
