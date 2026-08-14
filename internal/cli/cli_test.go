@@ -672,6 +672,45 @@ features:
 	}
 }
 
+func TestNonStrictKeepsBridgeWhenProxyIsUnavailable(t *testing.T) {
+	isolateHome(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+features:
+  commandBridge: true
+  autoForward: true
+  proxy: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var delegated []string
+	var stderr bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	r.ConfigPath = configPath
+	r.EnsureResolver = func(context.Context) error { return nil }
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return sameVersionRemoteProbe(), nil
+	}
+	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
+		return &BridgeSession{SessionID: "test", stop: func() {}}, nil
+	}
+	r.Exec = func(_ context.Context, _ string, args []string) error {
+		delegated = append([]string(nil), args...)
+		return nil
+	}
+	code := r.Run(context.Background(), []string{"remote", "env"})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	joined := strings.Join(delegated, " ")
+	if !strings.Contains(joined, "SSHX_SERVER_HOME") || !strings.Contains(joined, "SSHX_SESSION_ID") {
+		t.Fatalf("fell back to raw SSH: %s", joined)
+	}
+	if strings.Contains(joined, "HTTP_PROXY=") || strings.Contains(joined, "ALL_PROXY=") {
+		t.Fatalf("injected proxy environment after skip: %s", joined)
+	}
+}
+
 func TestInternalSSHUsesOptionsBeforeTargetAndExcludesRemoteCommand(t *testing.T) {
 	isolateHome(t)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")

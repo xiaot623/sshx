@@ -97,7 +97,8 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	controlDir := ""
 	controlPath := sshControlPath(bridgeSSHArgs)
 	bridgeStarted := false
-	if r.useProxy && !r.integrationSidecar {
+	wantProxy := r.useProxy && !r.integrationSidecar
+	if wantProxy {
 		controlDir, controlPath, err = newControlPath(sessionID)
 		if err != nil {
 			return nil, err
@@ -157,11 +158,15 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		closeLifecycle()
 		return nil, err
 	}
-	if r.useProxy && !r.integrationSidecar && !waitForControlPath(bridgeCtx, controlPath) {
-		cancel()
-		closeLifecycle()
-		controlProxy.stop()
-		return nil, errors.New("timed out waiting for proxy control socket")
+	if wantProxy && !waitForControlPath(bridgeCtx, controlPath) {
+		err = errors.New("timed out waiting for proxy control socket")
+		if !r.skipOptionalProxy(target, err) {
+			cancel()
+			closeLifecycle()
+			controlProxy.stop()
+			return nil, err
+		}
+		wantProxy = false
 	}
 	muxSession := sshmux.New(controlProxy.conn)
 	readyCh := make(chan error, 1)
@@ -340,9 +345,9 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	}
 
 	var tunnel *proxyTunnel
-	if r.useProxy && !r.integrationSidecar {
+	if wantProxy {
 		tunnel, err = r.startProxyTunnel(bridgeCtx, bridgeSSHArgs, controlPath)
-		if err != nil {
+		if err != nil && !r.skipOptionalProxy(target, err) {
 			cancel()
 			closeLifecycle()
 			_ = muxSession.Close()

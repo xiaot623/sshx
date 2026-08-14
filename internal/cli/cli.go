@@ -79,6 +79,7 @@ type Runner struct {
 	autoForward        bool
 	remoteFS           bool
 	useProxy           bool
+	strict             bool
 	integrationSidecar bool
 	connection         identity.Connection
 }
@@ -215,6 +216,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	r.autoForward = features.AutoForward
 	r.remoteFS = features.RemoteFS
 	r.useProxy = features.Proxy
+	r.strict = cfg.Strict
 	if features.AutoForward {
 		if err := r.EnsureResolver(ctx); err != nil {
 			if cfg.Strict {

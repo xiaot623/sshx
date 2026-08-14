@@ -49,6 +49,20 @@ type proxyTunnel struct {
 	closeOnce   sync.Once
 }
 
+// skipOptionalProxy reports a non-strict proxy setup failure and returns true
+// when the enhanced session should continue without proxy. Strict mode returns
+// false so the caller can abort.
+func (r *Runner) skipOptionalProxy(target string, err error) bool {
+	if err == nil {
+		return true
+	}
+	if r.strict {
+		return false
+	}
+	fmt.Fprintf(r.Stderr, "sshx: proxy skipped for %s: %v\n", target, err)
+	return true
+}
+
 func (r *Runner) startProxyTunnel(ctx context.Context, sshArgs []string, controlPath string) (*proxyTunnel, error) {
 	if controlPath == "" {
 		return nil, errors.New("proxy requires an OpenSSH control socket")

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +92,28 @@ func TestIntegrationProxyWaitScriptIsSessionScoped(t *testing.T) {
 	}
 	if strings.Contains(script, "session-b") {
 		t.Fatalf("wait script mixed sessions: %s", script)
+	}
+}
+
+func TestSkipOptionalProxyContinuesUnlessStrict(t *testing.T) {
+	err := errors.New("create reverse proxy forwarding: remote port forwarding failed")
+
+	var stderr bytes.Buffer
+	runner := NewRunner(strings.NewReader(""), ioDiscard{}, &stderr)
+	if !runner.skipOptionalProxy("host", err) {
+		t.Fatal("non-strict mode aborted optional proxy failure")
+	}
+	if !strings.Contains(stderr.String(), "sshx: proxy skipped for host") || !strings.Contains(stderr.String(), err.Error()) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	stderr.Reset()
+	runner.strict = true
+	if runner.skipOptionalProxy("host", err) {
+		t.Fatal("strict mode skipped required proxy failure")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 
