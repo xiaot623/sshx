@@ -85,8 +85,7 @@ func TestIntegrationSessionLoadsProxyEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := (proxyEnvironment{
-		HTTP:  "http://sshx:secret@127.0.0.1:43123",
-		SOCKS: "socks5h://sshx:secret@127.0.0.1:43123",
+		URL: "socks5h://127.0.0.1:43123",
 	}).script()
 	if err := os.WriteFile(filepath.Join(proxyDir, "session-id.env"), []byte(env+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -99,7 +98,7 @@ func TestIntegrationSessionLoadsProxyEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrapper failed: %v\n%s", err, out)
 	}
-	if string(out) != "http://sshx:secret@127.0.0.1:43123|socks5h://sshx:secret@127.0.0.1:43123" {
+	if string(out) != "socks5h://127.0.0.1:43123|socks5h://127.0.0.1:43123" {
 		t.Fatalf("proxy environment = %q", out)
 	}
 }

@@ -419,8 +419,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	}
 	session := &BridgeSession{SessionID: sessionID, ContextID: connection.ContextID, RemoteFS: r.remoteFS, MountRoot: mountRoot, Workspace: workspace, ReadOnly: readOnly, Done: bridgeCtx.Done(), stop: stop}
 	if tunnel != nil {
-		session.ProxyHTTP = tunnel.environment.HTTP
-		session.ProxySOCKS = tunnel.environment.SOCKS
+		session.ProxyURL = tunnel.environment.URL
 	}
 	bridgeStarted = true
 	return session, nil

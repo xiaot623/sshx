@@ -125,7 +125,6 @@ func TestHelpFlagPrintsSSHXHelpThenOpenSSHHelp(t *testing.T) {
 		"SSHX_CONFIG=<path>",
 		"COMMANDBRIDGE=0|1",
 		"SSHX_USE_PROXY=0|1",
-		"SSHX_PROXY_URL=<url>",
 		"SSHX_REMOTE_BINARY=<path>",
 		"RUNTIME ENVIRONMENT (SET BY SSHX)",
 		"SSHX_WORKSPACE",
@@ -650,10 +649,9 @@ features:
 	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
 		bridgeStarted = true
 		return &BridgeSession{
-			SessionID:  "test",
-			ProxyHTTP:  "http://sshx:secret@127.0.0.1:43123",
-			ProxySOCKS: "socks5h://sshx:secret@127.0.0.1:43123",
-			stop:       func() {},
+			SessionID: "test",
+			ProxyURL:  "socks5h://127.0.0.1:43123",
+			stop:      func() {},
 		}, nil
 	}
 	r.Exec = func(_ context.Context, _ string, args []string) error {

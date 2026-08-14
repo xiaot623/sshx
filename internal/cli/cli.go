@@ -16,17 +16,16 @@ import (
 )
 
 type BridgeSession struct {
-	SessionID  string
-	ContextID  string
-	RemoteFS   bool
-	MountRoot  string
-	Workspace  string
-	ReadOnly   bool
-	ProxyHTTP  string
-	ProxySOCKS string
-	Done       <-chan struct{}
-	stop       func()
-	stopOnce   sync.Once
+	SessionID string
+	ContextID string
+	RemoteFS  bool
+	MountRoot string
+	Workspace string
+	ReadOnly  bool
+	ProxyURL  string
+	Done      <-chan struct{}
+	stop      func()
+	stopOnce  sync.Once
 }
 
 func (s *BridgeSession) Stop() {

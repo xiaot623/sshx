@@ -34,13 +34,13 @@ func TestProxyControlOperationDoesNotRepeatUserForwards(t *testing.T) {
 		"-p", "2222",
 		"host",
 	}
-	got := strings.Join(sshControlOperationArgs(args, "/tmp/sshx-master", "forward", "R", "127.0.0.1:0:127.0.0.1:4567"), " ")
-	for _, forbidden := range []string{"-D 1081", "-L 8080", "9000:localhost:90", "9100:localhost:91", "/tmp/old", "ClearAllForwardings=yes", "ExitOnForwardFailure=no"} {
+	got := strings.Join(sshControlOperationArgs(args, "/tmp/sshx-master", "forward", "R", "127.0.0.1:0"), " ")
+	for _, forbidden := range []string{"-D 1081", "-L 8080", "9000:localhost:90", "9100:localhost:91", "/tmp/old", "ClearAllForwardings=yes", "ExitOnForwardFailure=no", "127.0.0.1:0:"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("control operation retained %q: %s", forbidden, got)
 		}
 	}
-	for _, required := range []string{"-S /tmp/sshx-master", "-O forward", "-R 127.0.0.1:0:127.0.0.1:4567", "-p 2222", "host"} {
+	for _, required := range []string{"-S /tmp/sshx-master", "-O forward", "-R 127.0.0.1:0", "-p 2222", "host"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("control operation lost %q: %s", required, got)
 		}
@@ -95,8 +95,7 @@ func TestControlMasterArgsAppliedForAutoForward(t *testing.T) {
 
 func TestProxyEnvironmentOverridesAndExtendsNoProxy(t *testing.T) {
 	script := (proxyEnvironment{
-		HTTP:  "http://sshx:secret@127.0.0.1:41000",
-		SOCKS: "socks5h://sshx:secret@127.0.0.1:41000",
+		URL: "socks5h://127.0.0.1:41000",
 	}).script()
 	merged := "internal,lower,localhost,127.0.0.1,::1"
 	for _, tc := range []struct {
@@ -117,8 +116,7 @@ func TestProxyEnvironmentOverridesAndExtendsNoProxy(t *testing.T) {
 			}
 			got := string(output)
 			for _, want := range []string{
-				"http://sshx:secret@127.0.0.1:41000",
-				"socks5h://sshx:secret@127.0.0.1:41000",
+				"socks5h://127.0.0.1:41000|socks5h://127.0.0.1:41000|socks5h://127.0.0.1:41000",
 				tc.want + "|" + tc.want,
 			} {
 				if !strings.Contains(got, want) {
@@ -164,9 +162,6 @@ func TestSkipOptionalProxyContinuesUnlessStrict(t *testing.T) {
 }
 
 func TestStartProxyTunnelCreatesAndCancelsDynamicForward(t *testing.T) {
-	for _, name := range []string{"SSHX_PROXY_URL", "ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
-		t.Setenv(name, "")
-	}
 	var operations [][]string
 	runner := NewRunner(strings.NewReader(""), ioDiscard{}, ioDiscard{})
 	runner.ExecOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
@@ -180,15 +175,29 @@ func TestStartProxyTunnelCreatesAndCancelsDynamicForward(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(tunnel.environment.HTTP, "127.0.0.1:42123") || !strings.Contains(tunnel.environment.SOCKS, "127.0.0.1:42123") {
+	if tunnel.environment.URL != "socks5h://127.0.0.1:42123" {
 		t.Fatalf("environment = %#v", tunnel.environment)
+	}
+	if strings.Contains(tunnel.environment.script(), "@") {
+		t.Fatalf("proxy environment contains credentials: %s", tunnel.environment.script())
 	}
 	tunnel.Close()
 	if len(operations) != 2 {
 		t.Fatalf("operations = %#v", operations)
 	}
-	if got := strings.Join(operations[1], " "); !strings.Contains(got, "-O cancel") || !strings.Contains(got, "127.0.0.1:0:127.0.0.1:") {
-		t.Fatalf("cancel operation = %s", got)
+	forwarded := strings.Join(operations[0], " ")
+	if !strings.Contains(forwarded, "-O forward") || !strings.Contains(forwarded, "-R 127.0.0.1:0") {
+		t.Fatalf("forward operation = %s", forwarded)
+	}
+	if strings.Contains(forwarded, "127.0.0.1:0:") {
+		t.Fatalf("forward spec included a destination: %s", forwarded)
+	}
+	canceled := strings.Join(operations[1], " ")
+	if !strings.Contains(canceled, "-O cancel") || !strings.Contains(canceled, "-R 127.0.0.1:0") {
+		t.Fatalf("cancel operation = %s", canceled)
+	}
+	if strings.Contains(canceled, "127.0.0.1:0:") {
+		t.Fatalf("cancel spec included a destination: %s", canceled)
 	}
 }
 

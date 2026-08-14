@@ -166,24 +166,17 @@ ls /dev/macfuse*
 
 ### 🛡️ 远端出口代理（按需开启）
 
-设置 `features.proxy: true` 或使用 `SSHX_USE_PROXY=1`，即可在远端会话中获得经过 OpenSSH 返回本地的、带认证的 HTTP 与 SOCKS5 代理端点：
+设置 `features.proxy: true` 或使用 `SSHX_USE_PROXY=1`，即可在远端会话中获得 OpenSSH 原生的远端动态 SOCKS 端点，流量从笔记本侧出口：
 
 ```sh
 SSHX_USE_PROXY=1 sshx remote
-
-# 也可显式指定本地上游，支持 URL 凭据以及 http、https、socks5、socks5h：
-SSHX_USE_PROXY=1 SSHX_PROXY_URL=socks5h://127.0.0.1:7890 sshx remote
 ```
 
-sshx 会在远端会话内覆盖大小写 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY`，并保留已有的 `NO_PROXY`，追加远端回环地址。
+sshx 在已有 ControlMaster 上执行 `ssh -O forward -R 127.0.0.1:0`（不带本地目的地址），由 OpenSSH 在远端充当 SOCKS 服务器，连接从客户端离开。远端会话内会覆盖大小写 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY` 为 `socks5h://127.0.0.1:<port>`，因此只读取 `HTTP_PROXY` 的 curl、Git 等工具也能走代理。已有 `NO_PROXY` 会保留，并追加远端回环地址。
 
-本地出口按以下顺序选择：
+不再启动自定义本地 HTTP/SOCKS 进程，也没有每会话凭据或 `SSHX_PROXY_URL` 链式上游。通过 `socks5h://` 发送的域名在笔记本上解析；本机使用 TUN 时，该出口会被 TUN 自然接管。
 
-1. 显式设置的 `SSHX_PROXY_URL`。
-2. 普通 HTTP 请求依次使用 `HTTP_PROXY`、`ALL_PROXY`；HTTPS CONNECT 和通用 SOCKS TCP 依次使用 `ALL_PROXY`、`HTTPS_PROXY`、`HTTP_PROXY`。同时读取小写形式，并由本地 `NO_PROXY`/`no_proxy` 规则决定是否绕过上游。
-3. 本地普通 TCP 连接；本机使用 TUN 时，该连接会自然被 TUN 接管。
-
-远端入口只绑定 `127.0.0.1`，使用动态端口和每会话随机凭据。通过 `ALL_PROXY=socks5h://...` 发送的域名会在本地或所选本地上游解析。上游请求失败会直接失败，不会静默降级成本地直连。
+远端入口只绑定 `127.0.0.1`，端口由 OpenSSH 动态分配。
 
 该能力覆盖 curl、Git、常见包管理器等遵循代理环境变量的 TCP 应用；不提供远端 TUN、UDP/ICMP、PAC/系统 GUI 代理发现，也不支持 Docker target。
 
@@ -408,7 +401,7 @@ commands:
 - 在**客户端**上执行 `sshx local ...`（非远程会话中）— 立即报错并给出清晰提示。`local` 是全局保留名称。
 - `remoteFs` 不会静默回退到未挂载的命令；FUSE 挂载失败即失败。
 - 远端导出使用 Go `os.Root` 锚定，拒绝路径穿越和符号链接逃逸。
-- 远端出口代理只绑定回环地址，并使用每会话随机凭据。
+- 远端出口代理是 OpenSSH 远端动态 SOCKS，只绑定回环地址。
 - Docker 容器未运行或不可达时纯透传——sshx 回退到原始 `ssh`，无副作用。
 - 不匹配的主机纯透传——不创建文件，不启动进程。
 
@@ -443,7 +436,6 @@ sshx/
 │   ├── remotefs/      # FS 协议、安全后端与 FUSE adapter
 │   ├── ports/         # 端口嗅探（/proc/net/tcp*）
 │   ├── forward/       # TCP 转发
-│   ├── proxy/         # 本地带认证 HTTP/SOCKS 出口代理
 │   ├── domain/        # DNS 解析器
 │   └── locald/        # 本地守护进程（socket、DNS、转发）
 ├── scripts/           # 集成测试

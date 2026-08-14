@@ -39,7 +39,6 @@ ENVIRONMENT
   AUTOFORWARD=0|1              Override the autoForward config feature
   REMOTEFS=0|1                 Override the remoteFs config feature
   SSHX_USE_PROXY=0|1           Override the proxy config feature
-  SSHX_PROXY_URL=<url>         Use an explicit local HTTP(S) or SOCKS5 upstream
   SSHX_DOMAIN_DNS_ADDR=<addr>  Override the local DNS listener address
                                (default: 127.0.0.1:53535)
   SSHX_CACHE_DIR=<path>        Override the local download/cache directory

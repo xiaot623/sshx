@@ -166,25 +166,17 @@ Absolute source paths are preserved as a hierarchy below sshx's private session 
 
 ### 🛡️ Remote Egress Proxy (opt-in)
 
-Set `features.proxy: true` or run with `SSHX_USE_PROXY=1` to give the remote session authenticated HTTP and SOCKS5 proxy endpoints that travel back over OpenSSH:
+Set `features.proxy: true` or run with `SSHX_USE_PROXY=1` to give the remote session an OpenSSH remote dynamic SOCKS endpoint. Traffic exits the laptop:
 
 ```sh
 SSHX_USE_PROXY=1 sshx remote
-
-# Optionally force a local upstream. Supported schemes (URL credentials work):
-# http, https, socks5, socks5h
-SSHX_USE_PROXY=1 SSHX_PROXY_URL=socks5h://127.0.0.1:7890 sshx remote
 ```
 
-sshx overrides uppercase and lowercase `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` inside the remote session. Existing `NO_PROXY` values are preserved and extended with remote loopback addresses.
+sshx asks the existing ControlMaster to allocate a remote SOCKS listener with `ssh -O forward -R 127.0.0.1:0` (no local destination). OpenSSH then acts as a SOCKS server on the remote, and connections leave through the client. sshx overrides uppercase and lowercase `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` inside the remote session to `socks5h://127.0.0.1:<port>` so curl, Git, and other tools that only look at `HTTP_PROXY` still work. Existing `NO_PROXY` values are preserved and extended with remote loopback addresses.
 
-Local egress selection is:
+There is no custom local HTTP/SOCKS process, no per-session credentials, and no `SSHX_PROXY_URL` chain-through. DNS names sent through `socks5h://` are resolved on the laptop. A local TUN proxy naturally captures that laptop egress.
 
-1. `SSHX_PROXY_URL`, when set.
-2. For ordinary HTTP requests, `HTTP_PROXY` then `ALL_PROXY`; for HTTPS CONNECT and general SOCKS TCP connections, `ALL_PROXY`, `HTTPS_PROXY`, then `HTTP_PROXY`. Lowercase forms are also read, and local `NO_PROXY`/`no_proxy` rules bypass the selected upstream.
-3. A normal local TCP connection. A local TUN proxy naturally captures this connection.
-
-The remote listener is bound only to `127.0.0.1`, uses a dynamically allocated port, and requires per-session credentials. DNS names sent through `ALL_PROXY=socks5h://...` are resolved locally or by the configured local upstream. Upstream failures fail the affected request and never silently fall back to a direct connection.
+The remote listener is bound only to `127.0.0.1` and uses a dynamically allocated port.
 
 This feature covers TCP applications that honor proxy environment variables, including tools such as curl, Git, and many package managers. It does not provide a remote TUN device, UDP/ICMP forwarding, PAC/system-GUI proxy discovery, or Docker target support.
 
@@ -409,7 +401,7 @@ When `sshx` is invoked for a **non-matching host** (no sshx config, or host not 
 - `sshx local ...` on a **client** (not inside a remote session) — errors immediately with a clear message. `local` is globally reserved.
 - `remoteFs` never silently falls back to an unmounted command. A failed FUSE mount fails the invocation.
 - Remote exports are anchored with Go's `os.Root`; path traversal and symlink escapes are rejected.
-- The remote egress proxy binds only to loopback and uses random per-session credentials.
+- The remote egress proxy is OpenSSH remote dynamic SOCKS bound only to loopback.
 - Docker containers that aren't running or can't be reached are pure passthrough — sshx falls back to raw `ssh` with no side effects.
 - Unmatched hosts are pure passthrough — no files created, no processes started.
 
@@ -444,7 +436,6 @@ sshx/
 │   ├── remotefs/      # FS protocol, secure backend, and FUSE adapter
 │   ├── ports/         # Port sniffing (/proc/net/tcp*)
 │   ├── forward/       # TCP forwarding
-│   ├── proxy/         # Authenticated local HTTP/SOCKS egress proxy
 │   ├── domain/        # DNS resolver
 │   └── locald/        # Local daemon (socket, DNS, forwarding)
 ├── scripts/           # Integration tests
