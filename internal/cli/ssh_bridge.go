@@ -227,7 +227,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 				if mountManager == nil {
 					return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "remote fs mount manager is unavailable"}
 				}
-				return mountManager.Execute(commandCtx, frame, peer)
+				return mountManager.Execute(commandCtx, frame)
 			},
 		}
 		opts.Capabilities = []string{"command.exec.batch-stdin", "heartbeat.v1"}
@@ -300,7 +300,10 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 
 	if r.remoteFS {
 		var peer *remotefs.Peer
-		peer, err = remotefs.Connect(bridgeCtx, muxSession.Channel(sshmux.ChannelFS), sessionID, token, remotefs.PeerOptions{})
+		peer, err = remotefs.Connect(bridgeCtx, muxSession.Channel(sshmux.ChannelFS), sessionID, token, remotefs.PeerOptions{
+			OnMount:   mountManager.OnMount,
+			OnUnmount: mountManager.OnUnmount,
+		})
 		if err != nil {
 			cancel()
 			closeLifecycle()
@@ -448,22 +451,34 @@ func sshControlPath(args []string) string {
 type remoteMountEntry struct {
 	mount     remotefs.Mount
 	mountPath string
+	cancel    context.CancelFunc
 }
 
 type remoteMountManager struct {
-	sessionID string
-	readOnly  bool
-	rootPath  string
-	lease     *os.File
-	initErr   error
-	mu        sync.Mutex
-	mounts    map[string]remoteMountEntry
-	closing   bool
-	active    sync.WaitGroup
+	sessionID      string
+	readOnly       bool
+	rootPath       string
+	lease          *os.File
+	initErr        error
+	driver         remotefs.MountDriver
+	lifetimeCtx    context.Context
+	lifetimeCancel context.CancelFunc
+	mu             sync.Mutex
+	mounts         map[string]remoteMountEntry
+	closing        bool
+	active         sync.WaitGroup
 }
 
 func newRemoteMountManager(sessionID string, readOnly bool) *remoteMountManager {
-	m := &remoteMountManager{sessionID: sessionID, readOnly: readOnly, mounts: map[string]remoteMountEntry{}}
+	lifetimeCtx, lifetimeCancel := context.WithCancel(context.Background())
+	m := &remoteMountManager{
+		sessionID:      sessionID,
+		readOnly:       readOnly,
+		mounts:         map[string]remoteMountEntry{},
+		driver:         remotefs.GoFuseDriver{},
+		lifetimeCtx:    lifetimeCtx,
+		lifetimeCancel: lifetimeCancel,
+	}
 	root := localReverseMountsRoot()
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		m.initErr = err
@@ -500,7 +515,85 @@ func newRemoteMountManager(sessionID string, readOnly bool) *remoteMountManager 
 	return m
 }
 
-func (m *remoteMountManager) Execute(ctx context.Context, frame protocol.Frame, peer *remotefs.Peer) protocol.Frame {
+func (m *remoteMountManager) OnMount(requestCtx context.Context, peer *remotefs.Peer, mountID, mountHierarchy string, options remotefs.MountOptions) (string, error) {
+	if !safeMountComponent(mountID) {
+		return "", errors.New("remote fs mountId is invalid")
+	}
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return "", errors.New("remote fs session is closing")
+	}
+	if m.initErr != nil {
+		err := m.initErr
+		m.mu.Unlock()
+		return "", fmt.Errorf("initialize local remote fs mounts: %w", err)
+	}
+	if entry, exists := m.mounts[mountID]; exists {
+		path := entry.mount.Path()
+		m.mu.Unlock()
+		return path, nil
+	}
+	m.active.Add(1)
+	m.mu.Unlock()
+	defer m.active.Done()
+
+	base := filepath.Join(m.rootPath, mountID)
+	if m.readOnly {
+		options.ReadOnly = true
+	}
+	// The request context only owns mount setup. A successful mount must outlive
+	// the mount.create handler; Close() cancels the session lifetime context.
+	mountCtx, mountCancel := context.WithCancel(m.lifetimeCtx)
+	stopRequestCancel := context.AfterFunc(requestCtx, mountCancel)
+	mount, err := remotefs.MountLocal(mountCtx, m.driver, base, mountHierarchy, peer.RemoteBackend(mountID), options)
+	stopRequestCancel()
+	if err != nil {
+		mountCancel()
+		return "", err
+	}
+	m.mu.Lock()
+	if existing, exists := m.mounts[mountID]; exists {
+		m.mu.Unlock()
+		_ = mount.Unmount(context.Background())
+		mountCancel()
+		return existing.mount.Path(), nil
+	}
+	if m.closing || requestCtx.Err() != nil {
+		m.mu.Unlock()
+		_ = mount.Unmount(context.Background())
+		mountCancel()
+		if err := requestCtx.Err(); err != nil {
+			return "", err
+		}
+		return "", errors.New("remote fs session is closing")
+	}
+	m.mounts[mountID] = remoteMountEntry{mount: mount, mountPath: base, cancel: mountCancel}
+	path := mount.Path()
+	m.mu.Unlock()
+	return path, nil
+}
+
+func (m *remoteMountManager) OnUnmount(_ context.Context, mountID string) error {
+	m.mu.Lock()
+	entry, exists := m.mounts[mountID]
+	if !exists {
+		m.mu.Unlock()
+		return nil
+	}
+	delete(m.mounts, mountID)
+	m.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := entry.mount.Unmount(ctx)
+	cancel()
+	if entry.cancel != nil {
+		entry.cancel()
+	}
+	_ = os.RemoveAll(entry.mountPath)
+	return err
+}
+
+func (m *remoteMountManager) Execute(ctx context.Context, frame protocol.Frame) protocol.Frame {
 	if !safeMountComponent(frame.MountID) || !safeMountComponent(frame.SessionID) {
 		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "remote fs command is missing mount/session identity"}
 	}
@@ -516,37 +609,15 @@ func (m *remoteMountManager) Execute(ctx context.Context, frame protocol.Frame, 
 		m.mu.Unlock()
 		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: fmt.Sprintf("initialize local remote fs mounts: %v", m.initErr)}
 	}
+	entry, exists := m.mounts[frame.MountID]
+	if !exists {
+		m.mu.Unlock()
+		// Mounts are created by OnMount (mount.create), not by command.exec.
+		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "remote fs mount is not available"}
+	}
 	m.active.Add(1)
 	m.mu.Unlock()
 	defer m.active.Done()
-	m.mu.Lock()
-	entry, exists := m.mounts[frame.MountID]
-	if !exists {
-		mountRoot := filepath.Join(m.rootPath, frame.MountID)
-		mountPath, err := remotefs.MountPathBelow(mountRoot, frame.MountPath)
-		if err != nil {
-			m.mu.Unlock()
-			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
-		}
-		if err := os.MkdirAll(mountRoot, 0o700); err != nil {
-			m.mu.Unlock()
-			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
-		}
-		if err := os.WriteFile(filepath.Join(mountRoot, ".mount-path"), []byte(frame.MountPath+"\n"), 0o600); err != nil {
-			m.mu.Unlock()
-			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
-		}
-		driver := remotefs.GoFuseDriver{}
-		mount, err := driver.Mount(ctx, mountPath, peer.RemoteBackend(frame.MountID), remotefs.MountOptions{ReadOnly: frame.MountReadOnly || m.readOnly})
-		if err != nil {
-			_ = os.RemoveAll(mountRoot)
-			m.mu.Unlock()
-			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: fmt.Sprintf("mount remote workspace: %v", err)}
-		}
-		entry = remoteMountEntry{mount: mount, mountPath: mountRoot}
-		m.mounts[frame.MountID] = entry
-	}
-	m.mu.Unlock()
 	workspace, err := remotefs.WorkspacePathBelow(entry.mount.Path(), frame.Cwd)
 	if err != nil {
 		return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: err.Error()}
@@ -584,7 +655,13 @@ func (m *remoteMountManager) Close() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = entry.mount.Unmount(ctx)
 		cancel()
+		if entry.cancel != nil {
+			entry.cancel()
+		}
 		_ = os.RemoveAll(entry.mountPath)
+	}
+	if m.lifetimeCancel != nil {
+		m.lifetimeCancel()
 	}
 	if m.lease != nil {
 		_ = syscall.Flock(int(m.lease.Fd()), syscall.LOCK_UN)

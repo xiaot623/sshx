@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,7 +72,22 @@ func startRemoteFSServer(t *testing.T, drivers ...remotefs.MountDriver) (context
 	return ctx, socket, server
 }
 
-func connectRemoteFSPair(t *testing.T, ctx context.Context, socket string, execute func(context.Context, protocol.Frame) protocol.Frame) (*remotefs.Peer, <-chan error) {
+func dummyClientMountOptions(t *testing.T) remotefs.PeerOptions {
+	t.Helper()
+	dir := t.TempDir()
+	return remotefs.PeerOptions{
+		OnMount: func(_ context.Context, _ *remotefs.Peer, mountID, _ string, _ remotefs.MountOptions) (string, error) {
+			path := filepath.Join(dir, mountID)
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				return "", err
+			}
+			return path, nil
+		},
+		OnUnmount: func(context.Context, string) error { return nil },
+	}
+}
+
+func connectRemoteFSPair(t *testing.T, ctx context.Context, socket string, execute func(context.Context, protocol.Frame) protocol.Frame, opts ...remotefs.PeerOptions) (*remotefs.Peer, <-chan error) {
 	t.Helper()
 	controlReady := make(chan error, 1)
 	controlErr := make(chan error, 1)
@@ -93,7 +109,16 @@ func connectRemoteFSPair(t *testing.T, ctx context.Context, socket string, execu
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := remotefs.Connect(ctx, conn, "session-1", "secret", remotefs.PeerOptions{})
+	peerOpts := dummyClientMountOptions(t)
+	if len(opts) > 0 {
+		if opts[0].OnMount != nil {
+			peerOpts.OnMount = opts[0].OnMount
+		}
+		if opts[0].OnUnmount != nil {
+			peerOpts.OnUnmount = opts[0].OnUnmount
+		}
+	}
+	peer, err := remotefs.Connect(ctx, conn, "session-1", "secret", peerOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +245,75 @@ func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 	server.mu.Unlock()
 	if exports != 1 {
 		t.Fatalf("session exports = %d, want one reused export", exports)
+	}
+}
+
+func TestRequesterOffersClientMountOnceThenForwardsCommand(t *testing.T) {
+	ctx, socket, server := startRemoteFSServer(t)
+	var onMountCount atomic.Int32
+	var executeCount atomic.Int32
+	execute := func(_ context.Context, frame protocol.Frame) protocol.Frame {
+		executeCount.Add(1)
+		if frame.MountID == "" || frame.MountPath == "" {
+			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "command.exec is missing mount identity"}
+		}
+		return protocol.Frame{Type: protocol.TypeCommandResult, ID: frame.ID, Stdout: base64.StdEncoding.EncodeToString([]byte("ok"))}
+	}
+	mountDir := t.TempDir()
+	_, _ = connectRemoteFSPair(t, ctx, socket, execute, remotefs.PeerOptions{
+		OnMount: func(_ context.Context, _ *remotefs.Peer, mountID, _ string, _ remotefs.MountOptions) (string, error) {
+			onMountCount.Add(1)
+			path := filepath.Join(mountDir, mountID)
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				return "", err
+			}
+			return path, nil
+		},
+	})
+	waitForRemoteFSPeer(t, server, "session-1")
+	remoteRoot := t.TempDir()
+	for range 2 {
+		result, err := RequestCommandForSessionWithMountOptions(
+			ctx, socket, []string{"true"}, nil, nil, remoteRoot,
+			"session-1", true, true, time.Second, "secret",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(result.Stdout) != "ok" {
+			t.Fatalf("stdout = %q", result.Stdout)
+		}
+	}
+	if got := onMountCount.Load(); got != 1 {
+		t.Fatalf("OnMount calls = %d, want 1", got)
+	}
+	if got := executeCount.Load(); got != 2 {
+		t.Fatalf("command.exec calls = %d, want 2", got)
+	}
+}
+
+func TestRequesterDoesNotForwardCommandWhenClientMountFails(t *testing.T) {
+	ctx, socket, server := startRemoteFSServer(t)
+	var executeCount atomic.Int32
+	execute := func(_ context.Context, frame protocol.Frame) protocol.Frame {
+		executeCount.Add(1)
+		return protocol.Frame{Type: protocol.TypeCommandResult, ID: frame.ID}
+	}
+	_, _ = connectRemoteFSPair(t, ctx, socket, execute, remotefs.PeerOptions{
+		OnMount: func(context.Context, *remotefs.Peer, string, string, remotefs.MountOptions) (string, error) {
+			return "", os.ErrPermission
+		},
+	})
+	waitForRemoteFSPeer(t, server, "session-1")
+	_, err := RequestCommandForSessionWithMountOptions(
+		ctx, socket, []string{"true"}, nil, nil, t.TempDir(),
+		"session-1", true, true, time.Second, "secret",
+	)
+	if err == nil {
+		t.Fatal("expected mount.create failure to stop command.exec")
+	}
+	if executeCount.Load() != 0 {
+		t.Fatalf("command.exec calls = %d, want 0", executeCount.Load())
 	}
 }
 

@@ -76,26 +76,28 @@ type Server struct {
 	MountRoot        string
 	MountDriver      remotefs.MountDriver
 
-	mu            sync.Mutex
-	clients       []*clientConn
-	fsPeers       map[string]*remotefs.Peer
-	fsBackends    map[string]map[string]*remotefs.RootBackend
-	fsExporting   map[string]map[string]chan struct{}
-	fsConnecting  map[string]bool
-	fsMounts      map[string]remotefs.Mount
-	fsMounting    map[string]bool
-	fsUnmounting  map[string]chan struct{}
-	observedPorts map[int]bool
-	portMisses    map[int]int
-	lastActive    time.Time
-	everHadClient bool
-	shutdown      chan struct{}
-	shutdownOnce  sync.Once
-	listener      net.Listener
-	cancel        context.CancelFunc
-	draining      bool
-	connections   map[net.Conn]struct{}
-	connWG        sync.WaitGroup
+	mu             sync.Mutex
+	clients        []*clientConn
+	fsPeers        map[string]*remotefs.Peer
+	fsBackends     map[string]map[string]*remotefs.RootBackend
+	fsExporting    map[string]map[string]chan struct{}
+	fsClientMounts map[string]map[string]struct{}
+	fsOffering     map[string]map[string]chan struct{}
+	fsConnecting   map[string]bool
+	fsMounts       map[string]remotefs.Mount
+	fsMounting     map[string]bool
+	fsUnmounting   map[string]chan struct{}
+	observedPorts  map[int]bool
+	portMisses     map[int]int
+	lastActive     time.Time
+	everHadClient  bool
+	shutdown       chan struct{}
+	shutdownOnce   sync.Once
+	listener       net.Listener
+	cancel         context.CancelFunc
+	draining       bool
+	connections    map[net.Conn]struct{}
+	connWG         sync.WaitGroup
 }
 
 type clientConn struct {
@@ -144,6 +146,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	if s.fsExporting == nil {
 		s.fsExporting = map[string]map[string]chan struct{}{}
+	}
+	if s.fsClientMounts == nil {
+		s.fsClientMounts = map[string]map[string]struct{}{}
+	}
+	if s.fsOffering == nil {
+		s.fsOffering = map[string]map[string]chan struct{}{}
 	}
 	if s.fsConnecting == nil {
 		s.fsConnecting = map[string]bool{}
@@ -371,46 +379,20 @@ func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionI
 	s.fsMounting[sessionID] = true
 	s.mu.Unlock()
 	sessionPath := filepath.Join(s.MountRoot, sessionID)
-	path, err := remotefs.MountPathBelow(sessionPath, mountHierarchy)
-	if err != nil {
-		s.mu.Lock()
-		delete(s.fsMounting, sessionID)
-		s.mu.Unlock()
-		return "", err
-	}
-	_ = syscall.Unmount(path, 0)
-	if err := os.RemoveAll(path); err != nil {
-		s.mu.Lock()
-		delete(s.fsMounting, sessionID)
-		s.mu.Unlock()
-		return "", err
-	}
-	if err := os.MkdirAll(sessionPath, 0o700); err != nil {
-		s.mu.Lock()
-		delete(s.fsMounting, sessionID)
-		s.mu.Unlock()
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(sessionPath, ".mount-path"), []byte(mountHierarchy+"\n"), 0o600); err != nil {
-		s.mu.Lock()
-		delete(s.fsMounting, sessionID)
-		s.mu.Unlock()
-		return "", err
-	}
 	// The request context only owns mount setup. A successful mount must outlive
 	// the mount.create handler and is released explicitly by the peer lifecycle.
 	mountCtx, mountCancel := context.WithCancel(lifetimeCtx)
 	stopRequestCancel := context.AfterFunc(requestCtx, mountCancel)
-	mount, err := s.MountDriver.Mount(mountCtx, path, peer.RemoteBackend(mountID), options)
+	mount, err := remotefs.MountLocal(mountCtx, s.MountDriver, sessionPath, mountHierarchy, peer.RemoteBackend(mountID), options)
 	stopRequestCancel()
 	if err != nil {
 		mountCancel()
-		_ = os.RemoveAll(sessionPath)
 		s.mu.Lock()
 		delete(s.fsMounting, sessionID)
 		s.mu.Unlock()
 		return "", err
 	}
+	path := mount.Path()
 	s.mu.Lock()
 	delete(s.fsMounting, sessionID)
 	peerClosed := false
@@ -853,6 +835,10 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: err.Error()})
 				return
 			}
+			if err := s.ensureClientMount(attempt.SessionID, mountID, layout.MountPath, fsPeer, attempt.MountReadOnly); err != nil {
+				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: err.Error()})
+				return
+			}
 			if attempt.Env == nil {
 				attempt.Env = map[string]string{}
 			}
@@ -947,6 +933,64 @@ func (s *Server) ensureExportBackend(sessionID, mountID, rootPath string, peer *
 	return nil
 }
 
+func (s *Server) ensureClientMount(sessionID, mountID, mountPath string, peer *remotefs.Peer, readOnly bool) error {
+	for {
+		s.mu.Lock()
+		if mounts := s.fsClientMounts[sessionID]; mounts != nil {
+			if _, offered := mounts[mountID]; offered {
+				s.mu.Unlock()
+				return nil
+			}
+		}
+		if offering := s.fsOffering[sessionID]; offering != nil {
+			if wait := offering[mountID]; wait != nil {
+				s.mu.Unlock()
+				<-wait
+				continue
+			}
+		} else {
+			s.fsOffering[sessionID] = map[string]chan struct{}{}
+		}
+		wait := make(chan struct{})
+		s.fsOffering[sessionID][mountID] = wait
+		s.mu.Unlock()
+		break
+	}
+	finish := func() {
+		s.mu.Lock()
+		if offering := s.fsOffering[sessionID]; offering != nil {
+			if wait := offering[mountID]; wait != nil {
+				delete(offering, mountID)
+				close(wait)
+			}
+			if len(offering) == 0 {
+				delete(s.fsOffering, sessionID)
+			}
+		}
+		s.mu.Unlock()
+	}
+	mountCtx, mountCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, err := peer.CreateMountAtWithOptions(mountCtx, mountID, mountPath, remotefs.MountOptions{ReadOnly: readOnly})
+	mountCancel()
+	if err != nil {
+		finish()
+		return fmt.Errorf("mount remote workspace: %w", err)
+	}
+	s.mu.Lock()
+	if s.fsPeers[sessionID] != peer {
+		s.mu.Unlock()
+		finish()
+		return errors.New("remote fs session closed while offering the mount")
+	}
+	if s.fsClientMounts[sessionID] == nil {
+		s.fsClientMounts[sessionID] = map[string]struct{}{}
+	}
+	s.fsClientMounts[sessionID][mountID] = struct{}{}
+	s.mu.Unlock()
+	finish()
+	return nil
+}
+
 func (s *Server) addClient(c *clientConn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -982,6 +1026,7 @@ func (s *Server) removeClient(c *clientConn) {
 		delete(s.fsPeers, c.sessionID)
 		backends = s.fsBackends[c.sessionID]
 		delete(s.fsBackends, c.sessionID)
+		delete(s.fsClientMounts, c.sessionID)
 	}
 	s.mu.Unlock()
 	if found {
