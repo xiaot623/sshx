@@ -37,9 +37,6 @@ func SetStringProperty(src []byte, key, value string) ([]byte, error) {
 		out = append(out, src[span.valueEnd:]...)
 		return out, nil
 	}
-	if closeBrace < 0 {
-		return nil, errors.New("settings root must be a JSON object")
-	}
 	prefix := src[:closeBrace]
 	comma := ""
 	last := lastSignificant(prefix)
@@ -47,7 +44,8 @@ func SetStringProperty(src []byte, key, value string) ([]byte, error) {
 		comma = ","
 	}
 	indent := detectIndent(src)
-	entry := comma + "\n" + indent + string(mustJSON(key)) + ": " + string(encoded) + "\n"
+	keyJSON, _ := json.Marshal(key)
+	entry := comma + "\n" + indent + string(keyJSON) + ": " + string(encoded) + "\n"
 	out := make([]byte, 0, len(src)+len(entry))
 	out = append(out, prefix...)
 	out = append(out, entry...)
@@ -58,40 +56,21 @@ func SetStringProperty(src []byte, key, value string) ([]byte, error) {
 func lastSignificant(src []byte) byte {
 	var last byte
 	for i := 0; i < len(src); {
-		switch src[i] {
-		case ' ', '\t', '\r', '\n':
-			i++
-		case '"':
+		i = skipTrivia(src, i)
+		if i >= len(src) {
+			return last
+		}
+		if src[i] == '"' {
 			last = '"'
 			end, err := stringEnd(src, i)
 			if err != nil {
 				return last
 			}
 			i = end
-		case '/':
-			if i+1 < len(src) && src[i+1] == '/' {
-				i += 2
-				for i < len(src) && src[i] != '\n' {
-					i++
-				}
-				continue
-			}
-			if i+1 < len(src) && src[i+1] == '*' {
-				i += 2
-				for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
-					i++
-				}
-				if i+1 < len(src) {
-					i += 2
-				}
-				continue
-			}
-			last = src[i]
-			i++
-		default:
-			last = src[i]
-			i++
+			continue
 		}
+		last = src[i]
+		i++
 	}
 	return last
 }
@@ -254,9 +233,4 @@ func detectIndent(src []byte) string {
 		}
 	}
 	return "  "
-}
-
-func mustJSON(value string) []byte {
-	b, _ := json.Marshal(value)
-	return b
 }

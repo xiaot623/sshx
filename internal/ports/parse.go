@@ -4,14 +4,11 @@ import (
 	"bufio"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"net"
 	"sort"
 	"strconv"
 	"strings"
 )
-
-var ErrUnsupported = errors.New("port scanning is only supported on Linux servers")
 
 // Listener is a loopback or wildcard TCP listen entry that sshx can auto-forward.
 type Listener struct {
@@ -26,15 +23,15 @@ type Listener struct {
 // it bypasses the scanner.
 const minForwardablePort = 1024
 
-// ConnectHost returns the address sshx should dial on the remote when
+// connectHost returns the address sshx should dial on the remote when
 // forwarding this listen entry: "127.0.0.1" for IPv4 loopback/wildcard and
 // IPv6 unspecified; "::1" for IPv6 loopback. Empty if not forwardable.
-func ConnectHost(hexAddr string, ipv6 bool) string {
-	ip, ok := parseProcNetIP(hexAddr, ipv6)
+func connectHost(hexAddr string) string {
+	ip, ok := parseProcNetIP(hexAddr)
 	if !ok {
 		return ""
 	}
-	if ipv6 {
+	if len(ip) == net.IPv6len {
 		if ip.IsLoopback() {
 			return "::1"
 		}
@@ -53,16 +50,13 @@ func ConnectHost(hexAddr string, ipv6 bool) string {
 // The kernel prints each 32-bit word with %08X of a native-endian uint32, so
 // each 4-byte group is converted from host endian to network order before
 // being treated as net.IP.
-func parseProcNetIP(hexAddr string, ipv6 bool) (net.IP, bool) {
+func parseProcNetIP(hexAddr string) (net.IP, bool) {
 	b, err := hex.DecodeString(hexAddr)
 	if err != nil {
 		return nil, false
 	}
-	want := net.IPv4len
-	if ipv6 {
-		want = net.IPv6len
-	}
-	if len(b) != want {
+	want := len(b)
+	if want != net.IPv4len && want != net.IPv6len {
 		return nil, false
 	}
 	ip := make(net.IP, want)
@@ -73,15 +67,7 @@ func parseProcNetIP(hexAddr string, ipv6 bool) (net.IP, bool) {
 	return ip, true
 }
 
-func parseProcNetTCP(data string, ipv6 bool) ([]int, error) {
-	listeners, err := parseProcNetTCPListeners(data, ipv6)
-	if err != nil {
-		return nil, err
-	}
-	return listenerPorts(listeners), nil
-}
-
-func parseProcNetTCPListeners(data string, ipv6 bool) ([]Listener, error) {
+func parseProcNetTCPListeners(data string) ([]Listener, error) {
 	byPort := map[int]Listener{}
 	scanner := bufio.NewScanner(strings.NewReader(data))
 	first := true
@@ -107,15 +93,12 @@ func parseProcNetTCPListeners(data string, ipv6 bool) ([]Listener, error) {
 		if !ok {
 			continue
 		}
-		host := ConnectHost(hexAddr, ipv6)
+		host := connectHost(hexAddr)
 		if host == "" {
 			continue
 		}
 		p, err := strconv.ParseInt(port, 16, 32)
-		if err != nil || p <= 0 || p > 65535 {
-			continue
-		}
-		if p < minForwardablePort {
+		if err != nil || p < minForwardablePort || p > 65535 {
 			continue
 		}
 		byPort[int(p)] = Listener{Port: int(p), ConnectHost: host}
@@ -124,23 +107,6 @@ func parseProcNetTCPListeners(data string, ipv6 bool) ([]Listener, error) {
 		return nil, err
 	}
 	return listenersFromMap(byPort), nil
-}
-
-// ScanLoopbackListening returns unique sorted loopback/wildcard listen ports.
-func ScanLoopbackListening() ([]int, error) {
-	listeners, err := ScanLoopbackListeners()
-	if err != nil {
-		return nil, err
-	}
-	return listenerPorts(listeners), nil
-}
-
-func listenerPorts(listeners []Listener) []int {
-	out := make([]int, len(listeners))
-	for i, l := range listeners {
-		out[i] = l.Port
-	}
-	return out
 }
 
 func mergeListeners(groups ...[]Listener) []Listener {

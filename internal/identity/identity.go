@@ -36,12 +36,9 @@ type Target struct {
 }
 
 type Connection struct {
-	ClientInstallID string
-	TargetID        string
-	ContextID       string
-	SessionID       string
-	Profile         string
-	Target          Target
+	TargetID  string
+	ContextID string
+	SessionID string
 }
 
 func DefaultInstallPath() string {
@@ -244,12 +241,9 @@ func NewConnection(ctx context.Context, installPath, sshPath string, args []stri
 		return Connection{}, err
 	}
 	return Connection{
-		ClientInstallID: install.ID,
-		TargetID:        targetID,
-		ContextID:       ContextID(install.ID, targetID, profile),
-		SessionID:       sessionID,
-		Profile:         profile,
-		Target:          target,
+		TargetID:  targetID,
+		ContextID: ContextID(install.ID, targetID, profile),
+		SessionID: sessionID,
 	}, nil
 }
 

@@ -106,11 +106,10 @@ func TestDomainForwardUsesTargetIPWhenLocalhostPortIsOccupied(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
-		SocketPath:     shortSocketPath(t),
-		forwarders:     map[string]*forward.Manager{},
-		forwardRecords: map[string]map[int]forwardRecord{},
-		domains:        map[string]*domain.Manager{},
-		Stderr:         io.Discard,
+		SocketPath: shortSocketPath(t),
+		forwarders: map[string]*forward.Manager{},
+		domains:    map[string]*domain.Manager{},
+		Stderr:     io.Discard,
 	}
 	resp := s.handle(ctx, Request{
 		Type:         TypeEnsureTargetPort,
@@ -133,11 +132,10 @@ func TestListPorts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
-		SocketPath:     shortSocketPath(t),
-		forwarders:     map[string]*forward.Manager{},
-		forwardRecords: map[string]map[int]forwardRecord{},
-		domains:        map[string]*domain.Manager{},
-		Stderr:         io.Discard,
+		SocketPath: shortSocketPath(t),
+		forwarders: map[string]*forward.Manager{},
+		domains:    map[string]*domain.Manager{},
+		Stderr:     io.Discard,
 	}
 	remotePort := freeTCPPort(t)
 	ensure := s.handle(ctx, Request{
@@ -166,11 +164,10 @@ func TestListPortsIncludesDomainForDirectTarget(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
-		SocketPath:     shortSocketPath(t),
-		forwarders:     map[string]*forward.Manager{},
-		forwardRecords: map[string]map[int]forwardRecord{},
-		domains:        map[string]*domain.Manager{},
-		Stderr:         io.Discard,
+		SocketPath: shortSocketPath(t),
+		forwarders: map[string]*forward.Manager{},
+		domains:    map[string]*domain.Manager{},
+		Stderr:     io.Discard,
 	}
 	remotePort := freeTCPPort(t)
 	ensure := s.handle(ctx, Request{
@@ -355,8 +352,8 @@ func TestTargetDomainIsReleasedWithoutUnregisteringCollidingTarget(t *testing.T)
 	second.Sessions = 1
 	firstKey := requestKey(baseReq.SSHPath, baseReq.SSHArgs)
 	secondKey := requestKey(collidingReq.SSHPath, collidingReq.SSHArgs)
-	s.sessions["first"] = &sessionRecord{ID: "first", TargetKey: firstKey}
-	s.sessions["second"] = &sessionRecord{ID: "second", TargetKey: secondKey}
+	s.sessions["first"] = &sessionRecord{TargetKey: firstKey}
+	s.sessions["second"] = &sessionRecord{TargetKey: secondKey}
 
 	s.releaseSession("first")
 	if s.targets[secondKey] != second {

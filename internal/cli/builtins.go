@@ -210,12 +210,11 @@ func (r *Runner) runInstallResolver(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	host, port, err := splitHostPortDefault(*dnsAddr, "53")
+	content, err := resolverContent(*dnsAddr)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx install-resolver: %v\n", err)
 		return 2
 	}
-	content := fmt.Sprintf("nameserver %s\nport %s\n", host, port)
 	path := filepath.Join("/etc/resolver", strings.Trim(*suffix, "."))
 	if !*apply {
 		fmt.Fprintf(r.Stdout, "# %s\n%s", path, content)

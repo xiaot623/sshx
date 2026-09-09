@@ -47,7 +47,6 @@ func pathWithinRoot(rel string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-// PathWithin reports whether path is root or a descendant of root.
 func PathWithin(root, path string) (bool, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {

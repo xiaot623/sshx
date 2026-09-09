@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,13 +38,11 @@ if (!platform || !arch) {
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const version = packageJson.version;
-const binaryName = `sshx-${platform}-${arch}${platform === "windows" ? ".exe" : ""}`;
+const binaryName = `sshx-${platform}-${arch}`;
 const cacheRoot =
   process.env.SSHX_CACHE_DIR ||
   process.env.XDG_CACHE_HOME ||
-  (process.platform === "win32"
-    ? join(process.env.LOCALAPPDATA || tmpdir(), "sshx")
-    : join(homedir(), ".cache", "sshx"));
+  join(homedir(), ".cache", "sshx");
 const binaryPath = join(cacheRoot, version, binaryName);
 const refreshOnly =
   process.argv.length === 3 && process.argv[2] === npmRefreshArgument;
@@ -95,7 +93,7 @@ function findNpmIntegrationsToRefresh() {
     const descriptor = readIntegrationDescriptor(profileRoot);
     const isMarked = existsSync(markerPath);
     const isLegacyNpmIntegration =
-      descriptor !== null && pathIsInside(descriptor.driverPath, cacheRoot);
+      descriptor !== null && pathIsInside(descriptor, cacheRoot);
 
     if (!isMarked && !isLegacyNpmIntegration) {
       continue;
@@ -103,7 +101,7 @@ function findNpmIntegrationsToRefresh() {
     if (
       isMarked &&
       descriptor !== null &&
-      samePath(descriptor.driverPath, binaryPath)
+      samePath(descriptor, binaryPath)
     ) {
       continue;
     }
@@ -141,7 +139,7 @@ function readIntegrationDescriptor(profileRoot) {
       readFileSync(join(profileRoot, "integration.json"), "utf8"),
     );
     if (typeof value.driverPath === "string" && value.driverPath.length > 0) {
-      return value;
+      return value.driverPath;
     }
   } catch {
     // A marker without a readable descriptor is repaired by the native installer.
@@ -183,10 +181,6 @@ async function downloadBinary(destination) {
   }
 
   writeFileSync(tmpPath, Buffer.from(await response.arrayBuffer()));
-
-  if (platform !== "windows") {
-    chmodSync(tmpPath, 0o755);
-  }
-
+  chmodSync(tmpPath, 0o755);
   renameSync(tmpPath, destination);
 }

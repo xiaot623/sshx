@@ -114,7 +114,7 @@ func TestServerReturnsClearErrorWithoutClient(t *testing.T) {
 	}()
 	waitForSocket(t, socket)
 
-	_, err := RequestCommand(context.Background(), socket, []string{"uname"}, nil, nil, "")
+	_, err := RequestCommandForContextWithMountOptions(context.Background(), socket, []string{"uname"}, nil, nil, "", "", "", false, false, 0)
 	if !errors.Is(err, ErrNoClient) && (err == nil || !strings.Contains(err.Error(), ErrNoClient.Error())) {
 		t.Fatalf("error = %v, want ErrNoClient", err)
 	}
@@ -148,14 +148,14 @@ func TestServerForwardsCommandToClient(t *testing.T) {
 	var err error
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		result, err = RequestCommand(context.Background(), socket, []string{"sh", "-c", "cat; printf err >&2; exit 7"}, []byte("input"), nil, "")
+		result, err = RequestCommandForContextWithMountOptions(context.Background(), socket, []string{"sh", "-c", "cat; printf err >&2; exit 7"}, []byte("input"), nil, "", "", "", false, false, 0)
 		if err == nil {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	if err != nil {
-		t.Fatalf("RequestCommand: %v", err)
+		t.Fatalf("RequestCommandForContextWithMountOptions: %v", err)
 	}
 	if result.ExitCode != 7 || string(result.Stdout) != "input" || string(result.Stderr) != "err" {
 		t.Fatalf("result = %#v", result)
@@ -189,15 +189,17 @@ func TestClientDeniesCommandByPolicy(t *testing.T) {
 
 	clientErr := make(chan error, 1)
 	go func() {
-		clientErr <- RunClientConnReadyPolicy(ctx, mustDialUnix(t, socket), nil, func(argv []string) bool {
-			return false
+		clientErr <- RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{
+			Allow: func(argv []string) bool {
+				return false
+			},
 		})
 	}()
 
 	var err error
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		_, err = RequestCommand(context.Background(), socket, []string{"sh", "-c", "echo nope"}, nil, nil, "")
+		_, err = RequestCommandForContextWithMountOptions(context.Background(), socket, []string{"sh", "-c", "echo nope"}, nil, nil, "", "", "", false, false, 0)
 		if err != nil && strings.Contains(err.Error(), "command denied") {
 			break
 		}
@@ -426,7 +428,7 @@ func TestIncompatibleRuntimeDoesNotDrainCompatibleServer(t *testing.T) {
 		t.Fatalf("incompatible response = %#v, %v", frame, err)
 	}
 	_ = bad.Close()
-	result, err := RequestCommand(ctx, socket, []string{"sh", "-c", "printf ok"}, nil, nil, "")
+	result, err := RequestCommandForContextWithMountOptions(ctx, socket, []string{"sh", "-c", "printf ok"}, nil, nil, "", "", "", false, false, 0)
 	if err != nil || string(result.Stdout) != "ok" {
 		t.Fatalf("compatible runtime stopped: stdout=%q error=%v", result.Stdout, err)
 	}
@@ -487,7 +489,7 @@ func TestHeartbeatContinuesDuringCommandExecution(t *testing.T) {
 	if err := <-ready; err != nil {
 		t.Fatal(err)
 	}
-	result, err := RequestCommand(ctx, socket, []string{"sh", "-c", "sleep 0.1; printf ok"}, nil, nil, "")
+	result, err := RequestCommandForContextWithMountOptions(ctx, socket, []string{"sh", "-c", "sleep 0.1; printf ok"}, nil, nil, "", "", "", false, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +518,7 @@ func TestCommandTimeoutDoesNotRemoveHealthyBridgeClient(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	timedOut, err := RequestCommandWithTimeout(ctx, socket, []string{"sh", "-c", "sleep 5"}, nil, nil, "", 20*time.Millisecond)
+	timedOut, err := RequestCommandForContextWithMountOptions(ctx, socket, []string{"sh", "-c", "sleep 5"}, nil, nil, "", "", "", false, false, 20*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "timed out after 20ms") {
 		t.Fatalf("timeout error = %v", err)
 	}
@@ -524,7 +526,7 @@ func TestCommandTimeoutDoesNotRemoveHealthyBridgeClient(t *testing.T) {
 		t.Fatalf("exit code = %d", timedOut.ExitCode)
 	}
 
-	result, err := RequestCommand(ctx, socket, []string{"sh", "-c", "printf still-connected"}, nil, nil, "")
+	result, err := RequestCommandForContextWithMountOptions(ctx, socket, []string{"sh", "-c", "printf still-connected"}, nil, nil, "", "", "", false, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

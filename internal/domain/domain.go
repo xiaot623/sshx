@@ -59,10 +59,6 @@ func (m *Manager) DNSAddr() string {
 	return m.dnsConn.LocalAddr().String()
 }
 
-func (m *Manager) NameForTarget(target string) string {
-	return fmt.Sprintf("%s.%s", TargetPrefix(target), m.suffix)
-}
-
 func (m *Manager) Register(name string, ip net.IP) error {
 	ip4 := ip.To4()
 	if ip4 == nil {
@@ -81,8 +77,6 @@ func (m *Manager) Register(name string, ip net.IP) error {
 	return nil
 }
 
-// RegisterTarget registers target under the first available name derived from it.
-// The unsuffixed name is preferred, followed by -1, -2, and so on.
 func (m *Manager) RegisterTarget(target string, ip net.IP) (string, error) {
 	ip4 := ip.To4()
 	if ip4 == nil {
@@ -145,15 +139,16 @@ func (m *Manager) serveDNS(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		name, _, err := parseQuestion(buf[:n])
+		name, qEnd, err := parseQName(buf[:n], 12)
 		if err != nil {
 			continue
 		}
+		if qEnd+4 > n {
+			continue
+		}
+		qtype := binary.BigEndian.Uint16(buf[qEnd : qEnd+2])
 		ip, found := m.lookup(name)
-		resp, err := buildDNSResponse(buf[:n], ip, found)
-		if err != nil {
-			continue
-		}
+		resp := buildDNSResponse(buf[:n], qEnd, qtype, ip, found)
 		_, _ = m.dnsConn.WriteToUDP(resp, addr)
 		select {
 		case <-ctx.Done():
@@ -190,18 +185,7 @@ func TargetPrefix(target string) string {
 	return prefix
 }
 
-func buildDNSResponse(req []byte, ip net.IP, found bool) ([]byte, error) {
-	if len(req) < 12 {
-		return nil, errors.New("short dns request")
-	}
-	_, qEnd, err := parseQName(req, 12)
-	if err != nil {
-		return nil, err
-	}
-	if qEnd+4 > len(req) {
-		return nil, errors.New("short dns question")
-	}
-	qtype := binary.BigEndian.Uint16(req[qEnd : qEnd+2])
+func buildDNSResponse(req []byte, qEnd int, qtype uint16, ip net.IP, found bool) []byte {
 	ip4 := ip.To4()
 	answer := found && ip4 != nil
 	resp := make([]byte, 0, len(req)+32)
@@ -228,18 +212,7 @@ func buildDNSResponse(req []byte, ip net.IP, found bool) ([]byte, error) {
 		resp = binary.BigEndian.AppendUint16(resp, 4)
 		resp = append(resp, ip4...)
 	}
-	return resp, nil
-}
-
-func parseQuestion(msg []byte) (string, uint16, error) {
-	name, qEnd, err := parseQName(msg, 12)
-	if err != nil {
-		return "", 0, err
-	}
-	if qEnd+4 > len(msg) {
-		return "", 0, errors.New("short dns question")
-	}
-	return name, binary.BigEndian.Uint16(msg[qEnd : qEnd+2]), nil
+	return resp
 }
 
 func parseQName(msg []byte, offset int) (string, int, error) {

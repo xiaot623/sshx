@@ -63,6 +63,8 @@ const (
 	DefaultServerStartTimeout = 10 * time.Second
 )
 
+var defaultCapabilities = []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}
+
 type Server struct {
 	SocketPath       string
 	InfoPath         string
@@ -91,7 +93,6 @@ type Server struct {
 	portMisses     map[int]int
 	lastActive     time.Time
 	everHadClient  bool
-	shutdown       chan struct{}
 	shutdownOnce   sync.Once
 	listener       net.Listener
 	cancel         context.CancelFunc
@@ -105,7 +106,6 @@ type clientConn struct {
 	dec          *protocol.Decoder
 	c            net.Conn
 	sessionID    string
-	targetID     string
 	contextID    string
 	capabilities map[string]bool
 	writeMu      sync.Mutex
@@ -131,9 +131,6 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	if s.StartupTimeout <= 0 {
 		s.StartupTimeout = DefaultServerStartTimeout
-	}
-	if s.shutdown == nil {
-		s.shutdown = make(chan struct{})
 	}
 	if s.connections == nil {
 		s.connections = map[net.Conn]struct{}{}
@@ -362,17 +359,12 @@ func safeSessionID(sessionID string) bool {
 		filepath.Base(sessionID) == sessionID && !strings.ContainsAny(sessionID, `/\`)
 }
 
-func fsMountKey(sessionID, mountID string) string {
-	return sessionID + "\x00" + mountID
-}
-
 func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionID string, peer *remotefs.Peer, mountID, mountHierarchy string, options remotefs.MountOptions) (string, error) {
 	if mountID == "" {
 		return "", errors.New("remote fs mountId is required")
 	}
-	key := fsMountKey(sessionID, mountID)
 	s.mu.Lock()
-	if s.fsMounting[sessionID] || s.hasFSMountForSessionLocked(sessionID) {
+	if s.fsMounting[sessionID] || s.fsMounts[sessionID] != nil {
 		s.mu.Unlock()
 		return "", errors.New("remote fs mount already exists")
 	}
@@ -410,7 +402,7 @@ func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionI
 		}
 		return "", errors.New("remote fs session closed while mounting")
 	}
-	s.fsMounts[key] = &lifetimeMount{Mount: mount, cancel: mountCancel}
+	s.fsMounts[sessionID] = &lifetimeMount{Mount: mount, cancel: mountCancel, mountID: mountID}
 	s.lastActive = time.Now()
 	s.mu.Unlock()
 	return path, nil
@@ -418,7 +410,8 @@ func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionI
 
 type lifetimeMount struct {
 	remotefs.Mount
-	cancel context.CancelFunc
+	cancel  context.CancelFunc
+	mountID string
 }
 
 func (m *lifetimeMount) Unmount(ctx context.Context) error {
@@ -430,14 +423,18 @@ func (m *lifetimeMount) Unmount(ctx context.Context) error {
 }
 
 func (s *Server) unmountRemoteFS(ctx context.Context, sessionID, mountID string) error {
-	key := fsMountKey(sessionID, mountID)
 	for {
 		s.mu.Lock()
 		if s.fsMounting[sessionID] {
 			s.mu.Unlock()
 			return syscall.EBUSY
 		}
-		if done := s.fsUnmounting[key]; done != nil {
+		mount, _ := s.fsMounts[sessionID].(*lifetimeMount)
+		if mount == nil || mount.mountID != mountID {
+			s.mu.Unlock()
+			return nil
+		}
+		if done := s.fsUnmounting[sessionID]; done != nil {
 			s.mu.Unlock()
 			select {
 			case <-done:
@@ -446,21 +443,16 @@ func (s *Server) unmountRemoteFS(ctx context.Context, sessionID, mountID string)
 				return ctx.Err()
 			}
 		}
-		mount := s.fsMounts[key]
-		if mount == nil {
-			s.mu.Unlock()
-			return nil
-		}
 		done := make(chan struct{})
-		s.fsUnmounting[key] = done
+		s.fsUnmounting[sessionID] = done
 		s.mu.Unlock()
 
 		err := mount.Unmount(ctx)
 		s.mu.Lock()
 		if err == nil {
-			delete(s.fsMounts, key)
+			delete(s.fsMounts, sessionID)
 		}
-		delete(s.fsUnmounting, key)
+		delete(s.fsUnmounting, sessionID)
 		s.lastActive = time.Now()
 		close(done)
 		s.mu.Unlock()
@@ -469,16 +461,6 @@ func (s *Server) unmountRemoteFS(ctx context.Context, sessionID, mountID string)
 		}
 		return err
 	}
-}
-
-func (s *Server) hasFSMountForSessionLocked(sessionID string) bool {
-	prefix := sessionID + "\x00"
-	for key := range s.fsMounts {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) cleanupStaleMounts() {
@@ -566,8 +548,6 @@ func (s *Server) monitorLeases(ctx context.Context) {
 			now := time.Now()
 			s.mu.Lock()
 			clients := append([]*clientConn(nil), s.clients...)
-			everHad := s.everHadClient
-			lastActive := s.lastActive
 			s.mu.Unlock()
 			for _, client := range clients {
 				client.pendingMu.Lock()
@@ -579,8 +559,8 @@ func (s *Server) monitorLeases(ctx context.Context) {
 			}
 			s.mu.Lock()
 			empty := len(s.clients) == 0
-			lastActive = s.lastActive
-			everHad = s.everHadClient
+			lastActive := s.lastActive
+			everHad := s.everHadClient
 			s.mu.Unlock()
 			shouldDrain := empty && ((everHad && now.Sub(lastActive) >= s.DrainTimeout) || (!everHad && now.Sub(lastActive) >= s.StartupTimeout))
 			if shouldDrain {
@@ -745,19 +725,19 @@ func (s *Server) handleConn(c net.Conn) {
 			return
 		}
 		if len(hello.Capabilities) == 0 {
-			hello.Capabilities = []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}
+			hello.Capabilities = defaultCapabilities
 		}
 		capabilities := make(map[string]bool, len(hello.Capabilities))
 		for _, capability := range hello.Capabilities {
 			capabilities[capability] = true
 		}
-		cc := &clientConn{enc: enc, dec: dec, c: c, sessionID: hello.SessionID, targetID: hello.TargetID, contextID: hello.ContextID, capabilities: capabilities, pending: map[string]chan protocol.Frame{}, lastSeen: time.Now(), done: make(chan struct{})}
+		cc := &clientConn{enc: enc, dec: dec, c: c, sessionID: hello.SessionID, contextID: hello.ContextID, capabilities: capabilities, pending: map[string]chan protocol.Frame{}, lastSeen: time.Now(), done: make(chan struct{})}
 		if !s.addClient(cc) {
 			_ = cc.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolVersion: protocol.Version, AppVersion: s.Version, Error: "sshx server is draining"})
 			cc.close()
 			return
 		}
-		if err := cc.send(protocol.Frame{Type: protocol.TypeCapabilities, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, AppVersion: s.Version, Capabilities: []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}}); err != nil {
+		if err := cc.send(protocol.Frame{Type: protocol.TypeCapabilities, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, AppVersion: s.Version, Capabilities: defaultCapabilities}); err != nil {
 			s.removeClient(cc)
 			return
 		}
@@ -1054,16 +1034,8 @@ func (s *Server) markActive() {
 func (s *Server) pickClient(contextID, sessionID, capability string) *clientConn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if sessionID != "" {
-		for _, client := range s.clients {
-			if client.sessionID == sessionID && (contextID == "" || client.contextID == contextID) && (capability == "" || client.capabilities[capability]) {
-				return client
-			}
-		}
-		return nil
-	}
 	for _, client := range s.clients {
-		if (contextID == "" || client.contextID == contextID) && (capability == "" || client.capabilities[capability]) {
+		if (sessionID == "" || client.sessionID == sessionID) && (contextID == "" || client.contextID == contextID) && (capability == "" || client.capabilities[capability]) {
 			return client
 		}
 	}
@@ -1134,11 +1106,6 @@ func (c *clientConn) close() {
 	c.closeOnce.Do(func() {
 		_ = c.c.Close()
 		close(c.done)
-		c.pendingMu.Lock()
-		for id := range c.pending {
-			delete(c.pending, id)
-		}
-		c.pendingMu.Unlock()
 	})
 }
 
@@ -1147,9 +1114,6 @@ func (s *Server) initiateShutdown() {
 		s.mu.Lock()
 		s.draining = true
 		s.mu.Unlock()
-		if s.shutdown != nil {
-			close(s.shutdown)
-		}
 		if s.cancel != nil {
 			s.cancel()
 		}
@@ -1175,22 +1139,6 @@ func (s *Server) removeConnection(conn net.Conn) {
 	s.mu.Lock()
 	delete(s.connections, conn)
 	s.mu.Unlock()
-}
-
-func RequestCommand(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd string, token ...string) (CommandResult, error) {
-	return RequestCommandForSessionWithTimeout(ctx, socketPath, argv, stdin, env, cwd, "", false, 0, token...)
-}
-
-func RequestCommandWithTimeout(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd string, timeout time.Duration, token ...string) (CommandResult, error) {
-	return RequestCommandForSessionWithTimeout(ctx, socketPath, argv, stdin, env, cwd, "", false, timeout, token...)
-}
-
-func RequestCommandForSessionWithTimeout(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, sessionID string, remoteFS bool, timeout time.Duration, token ...string) (CommandResult, error) {
-	return RequestCommandForSessionWithMountOptions(ctx, socketPath, argv, stdin, env, cwd, sessionID, remoteFS, false, timeout, token...)
-}
-
-func RequestCommandForSessionWithMountOptions(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, sessionID string, remoteFS, readOnly bool, timeout time.Duration, token ...string) (CommandResult, error) {
-	return RequestCommandForContextWithMountOptions(ctx, socketPath, argv, stdin, env, cwd, "", sessionID, remoteFS, readOnly, timeout, token...)
 }
 
 func RequestCommandForContextWithMountOptions(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, contextID, sessionID string, remoteFS, readOnly bool, timeout time.Duration, token ...string) (CommandResult, error) {
@@ -1259,7 +1207,7 @@ func RunClient(ctx context.Context, socketPath string) error {
 	if err != nil {
 		return err
 	}
-	return RunClientConn(ctx, c)
+	return RunClientConnWithOptions(ctx, c, ClientOptions{})
 }
 
 type readWriteCloser struct {
@@ -1277,18 +1225,6 @@ func (r readWriteCloser) Close() error {
 
 func NewReadWriteCloser(reader io.Reader, writer io.Writer, close func() error) io.ReadWriteCloser {
 	return readWriteCloser{Reader: reader, Writer: writer, close: close}
-}
-
-func RunClientConn(ctx context.Context, c io.ReadWriteCloser) error {
-	return RunClientConnReady(ctx, c, nil)
-}
-
-func RunClientConnReady(ctx context.Context, c io.ReadWriteCloser, ready chan<- error) error {
-	return RunClientConnReadyPolicy(ctx, c, ready, nil)
-}
-
-func RunClientConnReadyPolicy(ctx context.Context, c io.ReadWriteCloser, ready chan<- error, allow CommandAllowed, token ...string) error {
-	return RunClientConnWithOptions(ctx, c, ClientOptions{Ready: ready, Allow: allow}, token...)
 }
 
 func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts ClientOptions, token ...string) error {
@@ -1314,7 +1250,7 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 		opts.ContextID = "default"
 	}
 	if len(opts.Capabilities) == 0 {
-		opts.Capabilities = []string{"command.exec.batch-stdin", "heartbeat.v1", "remotefs.fs.v1"}
+		opts.Capabilities = defaultCapabilities
 	}
 	if opts.HeartbeatInterval <= 0 {
 		opts.HeartbeatInterval = DefaultHeartbeatInterval
@@ -1363,6 +1299,10 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 			}
 		}
 	}()
+	execute := opts.Execute
+	if execute == nil {
+		execute = ExecuteLocal
+	}
 	readySignaled := false
 	for {
 		frame, err := dec.Decode()
@@ -1417,16 +1357,12 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 			continue
 		}
 		if opts.Allow != nil && !opts.Allow(frame.Argv) {
-			if err := enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "command denied by sshx policy"}); err != nil {
+			if err := send(protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "command denied by sshx policy"}); err != nil {
 				return err
 			}
 			continue
 		}
 		go func(frame protocol.Frame) {
-			execute := opts.Execute
-			if execute == nil {
-				execute = ExecuteLocal
-			}
 			resp := execute(clientCtx, frame)
 			_ = send(resp)
 		}(frame)

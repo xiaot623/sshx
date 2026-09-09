@@ -33,10 +33,6 @@ func sshCommandArgs(sshArgs []string, remoteCommand string) []string {
 	return args
 }
 
-func sessionSSHArgs(parsed sshcompat.Parsed, remoteHome string) []string {
-	return sessionSSHArgsForBridge(parsed, remoteHome, nil)
-}
-
 func sessionSSHArgsForBridge(parsed sshcompat.Parsed, remoteHome string, session *BridgeSession) []string {
 	envLine := remoteServerEnvScript(remoteHome)
 	workspace := ""
@@ -62,10 +58,6 @@ func sessionSSHArgsWithEnv(parsed sshcompat.Parsed, envLine, workspace string) [
 		return append(args, remoteLoginShellWithEnv(envLine))
 	}
 	return append(args, remoteExecShellWithEnv(envLine, workspace, parsed.RemoteCommand))
-}
-
-func integrationSessionSSHArgs(parsed sshcompat.Parsed, contextID, contextHome string) []string {
-	return integrationSessionSSHArgsWithProxy(parsed, contextID, contextHome, "", false, false)
 }
 
 func integrationSessionSSHArgsWithProxy(parsed sshcompat.Parsed, contextID, contextHome, sessionID string, useProxy, strict bool) []string {
@@ -108,10 +100,6 @@ func hasSSHSubsystemFlag(args []string) bool {
 	return false
 }
 
-func remoteLoginShell(remoteHome string) string {
-	return remoteLoginShellWithEnv(remoteServerEnvScript(remoteHome))
-}
-
 func remoteLoginShellWithEnv(envLine string) string {
 	script := strings.Join([]string{
 		envLine,
@@ -125,10 +113,6 @@ func remoteLoginShellWithEnv(envLine string) string {
 		"esac",
 	}, "\n")
 	return remoteShell(script)
-}
-
-func remoteExecShell(remoteHome string, argv []string) string {
-	return remoteExecShellWithEnv(remoteServerEnvScript(remoteHome), "", argv)
 }
 
 func remoteExecShellWithEnv(envLine, workspace string, argv []string) string {
@@ -159,10 +143,6 @@ func remoteExecShellWithEnv(envLine, workspace string, argv []string) string {
 		quoted = append(quoted, shellQuote(part))
 	}
 	return strings.Join(quoted, " ")
-}
-
-func remoteExecCommandShell(remoteHome string, command string) string {
-	return remoteExecCommandShellWithEnv(remoteServerEnvScript(remoteHome), "", command)
 }
 
 func remoteExecCommandShellWithEnv(envLine, workspace, command string) string {

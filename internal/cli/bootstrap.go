@@ -25,12 +25,10 @@ type serverBootstrapOptions struct {
 }
 
 type remoteProbe struct {
-	OS            string
-	Arch          string
-	BinaryVersion string
-	ServerVersion string
-	RuntimeID     string
-	Running       bool
+	OS        string
+	Arch      string
+	RuntimeID string
+	Running   bool
 }
 
 func (p remoteProbe) AssetName() string {
@@ -150,14 +148,14 @@ func installBootstrappedBinary(ctx context.Context, transport serverBootstrapTra
 
 func parseRemoteProbe(out []byte) (remoteProbe, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(out))
-	lines := make([]string, 0, 6)
+	lines := make([]string, 0, 4)
 	for scanner.Scan() {
 		lines = append(lines, strings.TrimSpace(scanner.Text()))
 	}
 	if err := scanner.Err(); err != nil {
 		return remoteProbe{}, err
 	}
-	for len(lines) < 6 {
+	for len(lines) < 4 {
 		lines = append(lines, "")
 	}
 	osName, err := normalizeRemoteOS(lines[0])
@@ -169,12 +167,10 @@ func parseRemoteProbe(out []byte) (remoteProbe, error) {
 		return remoteProbe{}, err
 	}
 	return remoteProbe{
-		OS:            osName,
-		Arch:          arch,
-		BinaryVersion: lines[2],
-		ServerVersion: lines[3],
-		RuntimeID:     lines[4],
-		Running:       lines[5] == "1",
+		OS:        osName,
+		Arch:      arch,
+		RuntimeID: lines[2],
+		Running:   lines[3] == "1",
 	}, nil
 }
 
@@ -183,15 +179,11 @@ func probeServerScript(remoteHome string) string {
 		remoteServerEnvScript(remoteHome),
 		"os=$(uname -s 2>/dev/null || true)",
 		"arch=$(uname -m 2>/dev/null || true)",
-		"ver=",
-		"if test -x \"$SSHX_SERVER_HOME/sshx\"; then ver=$(\"$SSHX_SERVER_HOME/sshx\" --version 2>/dev/null | awk '{print $2}' || true); fi",
 		"runtime=",
 		"if test -x \"$SSHX_SERVER_HOME/sshx\"; then runtime=$(\"$SSHX_SERVER_HOME/sshx\" runtime-id 2>/dev/null || true); fi",
-		"server_ver=",
-		"if test -f \"$SSHX_SERVER_HOME/server-info\"; then server_ver=$(sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$SSHX_SERVER_HOME/server-info\" | head -n 1 || true); fi",
 		"running=0",
 		"if test -S \"$SSHX_SERVER_HOME/sock\" && test -f \"$SSHX_SERVER_HOME/server-info\"; then running=1; fi",
-		"printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$ver\" \"$server_ver\" \"$runtime\" \"$running\"",
+		"printf '%s\\n%s\\n%s\\n%s\\n' \"$os\" \"$arch\" \"$runtime\" \"$running\"",
 	}, "; ")
 }
 

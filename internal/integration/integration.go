@@ -167,13 +167,13 @@ func Install(ctx context.Context, profile Profile, opts InstallOptions) (Install
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return InstallResult{}, err
 	}
-	if !settingsExisted {
-		original = []byte("{}\n")
-	} else if info, statErr := os.Stat(settingsPath); statErr == nil {
-		settingsMode = info.Mode().Perm()
+	if settingsExisted {
+		if info, statErr := os.Stat(settingsPath); statErr == nil {
+			settingsMode = info.Mode().Perm()
+		}
 	}
 	settingsSource := original
-	if len(bytes.TrimSpace(settingsSource)) == 0 {
+	if !settingsExisted || len(bytes.TrimSpace(settingsSource)) == 0 {
 		settingsSource = []byte("{}\n")
 	}
 	previous, _, err := StringProperty(settingsSource, settingsKey)
@@ -283,9 +283,6 @@ func Install(ctx context.Context, profile Profile, opts InstallOptions) (Install
 		}
 	}()
 	if err := os.Rename(staging, profileRoot); err != nil {
-		return InstallResult{}, err
-	}
-	if err := validateProfile(profileRoot, executable, descriptor); err != nil {
 		return InstallResult{}, err
 	}
 	if err := atomicWrite(settingsPath, patched, settingsMode); err != nil {

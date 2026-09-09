@@ -90,10 +90,10 @@ func (r *Runner) runIntegrationAdapter(ctx context.Context, invocation string, a
 	if controlMaster {
 		controlOptions = []string{"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-S", controlPath}
 	}
-	mainArgs := insertBeforeTarget(mainParsedInput, controlOptions)
+	mainArgs := sshcompat.InsertBeforeTarget(mainParsedInput, controlOptions)
 
 	sidecarParsedInput := sshcompat.Parse(stripAuxiliaryActionOptions(stripControlOptions(parsed.Args)))
-	sidecarArgs := insertBeforeTarget(sidecarParsedInput, []string{"-o", "ControlMaster=no", "-o", "ControlPath=" + controlPath, "-o", "ClearAllForwardings=yes"})
+	sidecarArgs := sshcompat.InsertBeforeTarget(sidecarParsedInput, []string{"-o", "ControlMaster=no", "-o", "ControlPath=" + controlPath, "-o", "ClearAllForwardings=yes"})
 	sidecarBase := baseSSHArgs(sshcompat.Parse(sidecarArgs))
 
 	mainCtx, cancel := context.WithCancel(ctx)
@@ -194,19 +194,17 @@ func (r *Runner) runIntegrationSidecar(
 				<-ctx.Done()
 				return
 			}
-		} else {
-			if err := writeIntegrationProxyState(ctx, transport, contextHome, connection.SessionID, tunnel.environment, nil); err != nil {
-				tunnel.Close()
-				r.logIntegration(descriptor.Profile, fmt.Errorf("write proxy environment: %w", err))
-				if cfg.Strict {
-					<-ctx.Done()
-					return
-				}
-			} else {
-				proxyStateWritten = true
-				proxyTunnelActive = true
-				defer tunnel.Close()
+		} else if err := writeIntegrationProxyState(ctx, transport, contextHome, connection.SessionID, tunnel.environment, nil); err != nil {
+			tunnel.Close()
+			r.logIntegration(descriptor.Profile, fmt.Errorf("write proxy environment: %w", err))
+			if cfg.Strict {
+				<-ctx.Done()
+				return
 			}
+		} else {
+			proxyStateWritten = true
+			proxyTunnelActive = true
+			defer tunnel.Close()
 		}
 	}
 	if !sidecarFeatures.Enabled() {
@@ -324,10 +322,6 @@ func (r *Runner) execAdapterCommand(ctx context.Context, path string, args []str
 		}
 	}
 	return 1
-}
-
-func insertBeforeTarget(parsed sshcompat.Parsed, options []string) []string {
-	return sshcompat.InsertBeforeTarget(parsed, options)
 }
 
 func stripControlOptions(args []string) []string {
@@ -533,27 +527,9 @@ func (r *Runner) logIntegration(profile integration.Profile, err error) {
 	if err == nil {
 		return
 	}
-	home, homeErr := os.UserHomeDir()
-	if homeErr != nil {
-		return
-	}
-	path := filepath.Join(integration.DefaultRoot(home), string(profile), "integration.log")
-	dir := filepath.Dir(path)
-	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
-		return
-	}
-	if chmodErr := os.Chmod(dir, 0o700); chmodErr != nil {
-		return
-	}
-	f, openErr := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if openErr != nil {
-		return
-	}
-	defer f.Close()
-	if chmodErr := f.Chmod(0o600); chmodErr != nil {
-		return
-	}
-	_, _ = fmt.Fprintf(f, "%s %v\n", time.Now().UTC().Format(time.RFC3339Nano), err)
+	w, closeLog := r.integrationLogWriter(profile)
+	defer closeLog()
+	_, _ = fmt.Fprintf(w, "%s %v\n", time.Now().UTC().Format(time.RFC3339Nano), err)
 }
 
 func (r *Runner) integrationLogWriter(profile integration.Profile) (io.Writer, func()) {

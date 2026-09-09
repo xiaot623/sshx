@@ -60,7 +60,7 @@ func TestRootBackendExcludesManagedMountTree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(managed, "recursive"), []byte("hidden"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	backend, err := OpenRootBackendExcluding(root, managed)
+	backend, err := OpenRootBackendWithOptions(root, RootBackendOptions{}, managed)
 	if err != nil {
 		t.Fatal(err)
 	}

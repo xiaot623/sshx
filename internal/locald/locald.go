@@ -84,12 +84,6 @@ type Forwarded struct {
 	RemotePort int    `json:"remotePort"`
 }
 
-type forwardRecord struct {
-	Target   string
-	Domain   string
-	ListenIP string
-}
-
 type targetRecord struct {
 	Target        string
 	Domain        string
@@ -99,9 +93,7 @@ type targetRecord struct {
 }
 
 type sessionRecord struct {
-	ID          string
 	TargetKey   string
-	Version     string
 	SSHPath     string
 	SSHArgs     []string
 	ControlPath string
@@ -116,17 +108,16 @@ type Server struct {
 	StartupTimeout time.Duration
 	HandoffGrace   time.Duration
 
-	mu             sync.Mutex
-	forwarders     map[string]*forward.Manager
-	forwardRecords map[string]map[int]forwardRecord
-	targets        map[string]*targetRecord
-	domains        map[string]*domain.Manager
-	sessions       map[string]*sessionRecord
-	shutdown       chan struct{}
-	shutdownOnce   sync.Once
-	draining       bool
-	connections    map[net.Conn]struct{}
-	connWG         sync.WaitGroup
+	mu           sync.Mutex
+	forwarders   map[string]*forward.Manager
+	targets      map[string]*targetRecord
+	domains      map[string]*domain.Manager
+	sessions     map[string]*sessionRecord
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
+	draining     bool
+	connections  map[net.Conn]struct{}
+	connWG       sync.WaitGroup
 }
 
 func DefaultSocketPath() string {
@@ -161,9 +152,6 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	if s.forwarders == nil {
 		s.forwarders = map[string]*forward.Manager{}
-	}
-	if s.forwardRecords == nil {
-		s.forwardRecords = map[string]map[int]forwardRecord{}
 	}
 	if s.targets == nil {
 		s.targets = map[string]*targetRecord{}
@@ -333,7 +321,7 @@ func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Dec
 		return
 	}
 	key := targetKey(req)
-	session := &sessionRecord{ID: leaseID, TargetKey: key, Version: req.AppVersion, SSHPath: req.SSHPath, SSHArgs: append([]string(nil), defaultSSHArgs(req)...), ControlPath: req.ControlPath, conn: conn}
+	session := &sessionRecord{TargetKey: key, SSHPath: req.SSHPath, SSHArgs: append([]string(nil), defaultSSHArgs(req)...), ControlPath: req.ControlPath, conn: conn}
 	s.mu.Lock()
 	if s.draining {
 		s.mu.Unlock()
@@ -390,18 +378,17 @@ func (s *Server) releaseSession(sessionID string) {
 func (s *Server) releaseSessionWithGrace(sessionID string) {
 	s.mu.Lock()
 	session := s.sessions[sessionID]
-	if session != nil {
-		// Handoff grace preserves the target's domain and forwarding listeners,
-		// but a disconnected session's SSH transport is no longer active.
-		delete(s.sessions, sessionID)
-		if rec := s.targets[session.TargetKey]; rec != nil && rec.Sessions > 0 {
-			rec.Sessions--
-		}
+	if session == nil {
+		s.mu.Unlock()
+		return
 	}
-	targetKey := ""
-	if session != nil {
-		targetKey = session.TargetKey
+	// Handoff grace preserves the target's domain and forwarding listeners,
+	// but a disconnected session's SSH transport is no longer active.
+	delete(s.sessions, sessionID)
+	if rec := s.targets[session.TargetKey]; rec != nil && rec.Sessions > 0 {
+		rec.Sessions--
 	}
+	targetKey := session.TargetKey
 	s.mu.Unlock()
 	go func() {
 		timer := time.NewTimer(s.HandoffGrace)
@@ -420,7 +407,6 @@ func (s *Server) cleanupIdleTarget(key string) {
 	if rec := s.targets[key]; rec != nil && rec.Sessions == 0 {
 		fwd = s.forwarders[key]
 		delete(s.forwarders, key)
-		delete(s.forwardRecords, key)
 		domainName, domainManager = rec.Domain, rec.domainManager
 		delete(s.targets, key)
 	}
@@ -456,7 +442,6 @@ func (s *Server) releaseSessionNow(sessionID string) {
 			if rec.Sessions == 0 {
 				fwd = s.forwarders[session.TargetKey]
 				delete(s.forwarders, session.TargetKey)
-				delete(s.forwardRecords, session.TargetKey)
 				domainName = rec.Domain
 				domainManager = rec.domainManager
 				delete(s.targets, session.TargetKey)
@@ -547,7 +532,6 @@ func (s *Server) ensureTargetPort(ctx context.Context, req Request) Response {
 	if err != nil {
 		return Response{OK: false, Error: err.Error()}
 	}
-	s.rememberForward(targetKey(req), req.RemotePort, rec.Target, rec.Domain, rec.ListenIP)
 	return Response{OK: true, LocalPort: f.LocalPort, Domain: rec.Domain, ListenIP: rec.ListenIP}
 }
 
@@ -559,29 +543,11 @@ func (s *Server) removeTargetPort(req Request) Response {
 	var fwd *forward.Manager
 	s.mu.Lock()
 	fwd = s.forwarders[key]
-	if records := s.forwardRecords[key]; records != nil {
-		delete(records, req.RemotePort)
-		if len(records) == 0 {
-			delete(s.forwardRecords, key)
-		}
-	}
 	s.mu.Unlock()
 	if fwd != nil {
 		fwd.Remove(req.RemotePort)
 	}
 	return Response{OK: true}
-}
-
-func (s *Server) rememberForward(key string, remotePort int, target string, domain string, listenIP string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.forwardRecords == nil {
-		s.forwardRecords = map[string]map[int]forwardRecord{}
-	}
-	if s.forwardRecords[key] == nil {
-		s.forwardRecords[key] = map[int]forwardRecord{}
-	}
-	s.forwardRecords[key][remotePort] = forwardRecord{Target: target, Domain: domain, ListenIP: listenIP}
 }
 
 func (s *Server) ensureTarget(ctx context.Context, req Request) (*targetRecord, error) {
@@ -653,16 +619,16 @@ func (s *Server) forwarder(ctx context.Context, key string) *forward.Manager {
 	if f := s.forwarders[key]; f != nil {
 		return f
 	}
-	f := forward.NewDynamicManager(ctx, func() (string, []string, string, bool) {
+	f := forward.NewDynamicManager(ctx, func() (string, []string, string) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		for _, session := range s.sessions {
 			if session.TargetKey == key {
-				return session.SSHPath, append([]string(nil), session.SSHArgs...), session.ControlPath, true
+				return session.SSHPath, append([]string(nil), session.SSHArgs...), session.ControlPath
 			}
 		}
-		return "", nil, "", false
-	}, s.Stderr)
+		return "", nil, ""
+	})
 	s.forwarders[key] = f
 	return f
 }
@@ -706,15 +672,18 @@ func (s *Server) listPorts() Response {
 	defer s.mu.Unlock()
 	var out []Forwarded
 	for key, fwd := range s.forwarders {
+		rec := s.targets[key]
 		for _, entry := range fwd.List() {
-			record := s.forwardRecords[key][entry.RemotePort]
-			out = append(out, Forwarded{
-				Target:     record.Target,
-				Domain:     record.Domain,
-				ListenIP:   record.ListenIP,
+			item := Forwarded{
+				ListenIP:   entry.ListenIP,
 				LocalPort:  entry.LocalPort,
 				RemotePort: entry.RemotePort,
-			})
+			}
+			if rec != nil {
+				item.Target = rec.Target
+				item.Domain = rec.Domain
+			}
+			out = append(out, item)
 		}
 	}
 	return Response{OK: true, Forwards: out}

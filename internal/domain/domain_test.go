@@ -11,21 +11,10 @@ import (
 	"time"
 )
 
-func TestManagerNameForTarget(t *testing.T) {
-	m := NewManager("xiaot.sshx", "127.0.0.1:0", io.Discard)
-	if got := m.NameForTarget("debian"); got != "debian.xiaot.sshx" {
-		t.Fatalf("NameForTarget(debian) = %q", got)
-	}
-	if got := m.NameForTarget("root@debian:2222"); got != "root-debian-2222.xiaot.sshx" {
-		t.Fatalf("NameForTarget(root@debian:2222) = %q", got)
-	}
-	if got := m.NameForTarget("debian@192.168.1.100"); got != "debian-192-168-1-100.xiaot.sshx" {
-		t.Fatalf("NameForTarget(debian@192.168.1.100) = %q", got)
-	}
-}
-
 func TestTargetPrefix(t *testing.T) {
 	cases := map[string]string{
+		"debian":               "debian",
+		"root@debian:2222":     "root-debian-2222",
 		"debian@192.168.1.100": "debian-192-168-1-100",
 		"root/example.com":     "root-example-com",
 		"[::1]:2222":           "1-2222",

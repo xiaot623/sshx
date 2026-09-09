@@ -40,7 +40,6 @@ func (e proxyEnvironment) script() string {
 type proxyTunnel struct {
 	controlPath string
 	sshArgs     []string
-	spec        string
 	environment proxyEnvironment
 	runner      *Runner
 	closeOnce   sync.Once
@@ -50,9 +49,6 @@ type proxyTunnel struct {
 // when the enhanced session should continue without proxy. Strict mode returns
 // false so the caller can abort.
 func (r *Runner) skipOptionalProxy(target string, err error) bool {
-	if err == nil {
-		return true
-	}
 	if r.strict {
 		return false
 	}
@@ -64,24 +60,20 @@ func (r *Runner) startProxyTunnel(ctx context.Context, sshArgs []string, control
 	if controlPath == "" {
 		return nil, errors.New("proxy requires an OpenSSH control socket")
 	}
-	output, err := r.ExecOutput(ctx, r.SSHPath, sshControlOperationArgs(sshArgs, controlPath, "forward", "R", remoteDynamicSOCKSSpec))
+	output, err := r.ExecOutput(ctx, r.SSHPath, forward.ControlOperationArgs(sshArgs, controlPath, "forward", "R", remoteDynamicSOCKSSpec))
 	if err != nil {
 		return nil, fmt.Errorf("create remote dynamic SOCKS forward: %w", err)
 	}
 	remotePort, err := parseAllocatedPort(output)
 	if err != nil {
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, _ = r.ExecOutput(cancelCtx, r.SSHPath, sshControlOperationArgs(sshArgs, controlPath, "cancel", "R", remoteDynamicSOCKSSpec))
+		_, _ = r.ExecOutput(cancelCtx, r.SSHPath, forward.ControlOperationArgs(sshArgs, controlPath, "cancel", "R", remoteDynamicSOCKSSpec))
 		cancel()
 		return nil, err
 	}
 	tunnel := &proxyTunnel{
 		controlPath: controlPath,
 		sshArgs:     append([]string(nil), sshArgs...),
-		// OpenSSH indexes dynamically allocated remote forwards by their
-		// original listen port (0), not by the allocated port it reports.
-		// The cancel operation must therefore repeat the request verbatim.
-		spec: remoteDynamicSOCKSSpec,
 		environment: proxyEnvironment{
 			URL: "socks5h://127.0.0.1:" + strconv.Itoa(remotePort),
 		},
@@ -97,7 +89,10 @@ func (t *proxyTunnel) Close() {
 	t.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_, _ = t.runner.ExecOutput(ctx, t.runner.SSHPath, sshControlOperationArgs(t.sshArgs, t.controlPath, "cancel", "R", t.spec))
+		// OpenSSH indexes dynamically allocated remote forwards by their
+		// original listen port (0), not by the allocated port it reports.
+		// The cancel operation must therefore repeat the request verbatim.
+		_, _ = t.runner.ExecOutput(ctx, t.runner.SSHPath, forward.ControlOperationArgs(t.sshArgs, t.controlPath, "cancel", "R", remoteDynamicSOCKSSpec))
 	})
 }
 
@@ -115,17 +110,13 @@ func parseAllocatedPort(output []byte) (int, error) {
 	return 0, fmt.Errorf("invalid allocated proxy port %q", strings.TrimSpace(string(output)))
 }
 
-func sshControlOperationArgs(sshArgs []string, controlPath, operation, direction, forwardSpec string) []string {
-	return forward.ControlOperationArgs(sshArgs, controlPath, operation, direction, forwardSpec)
-}
-
 func ownControlMaster(autoForward, useProxy, integrationSidecar bool) bool {
 	return !integrationSidecar && (autoForward || useProxy)
 }
 
 func controlMasterArgs(sshArgs []string, controlPath string) []string {
 	parsed := sshcompat.Parse(forward.CleanSSHArgs(sshArgs))
-	return insertBeforeTarget(parsed, []string{
+	return sshcompat.InsertBeforeTarget(parsed, []string{
 		"-o", "ControlMaster=yes",
 		"-o", "ControlPersist=no",
 		"-S", controlPath,

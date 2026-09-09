@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os/exec"
 	"sync"
@@ -14,8 +13,7 @@ import (
 type Manager struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
-	transport   func() (string, []string, string, bool)
-	stderr      io.Writer
+	transport   func() (string, []string, string)
 	execControl func(context.Context, string, []string) ([]byte, error)
 
 	mu       sync.Mutex
@@ -27,7 +25,6 @@ type Forward struct {
 	RemotePort  int
 	LocalPort   int
 	ListenIP    string
-	RemoteHost  string
 	spec        string
 	sshPath     string
 	sshArgs     []string
@@ -41,19 +38,12 @@ type Entry struct {
 	ListenIP   string
 }
 
-func NewManager(ctx context.Context, sshPath string, sshArgs []string, stderr io.Writer) *Manager {
-	return NewDynamicManager(ctx, func() (string, []string, string, bool) {
-		return sshPath, append([]string(nil), sshArgs...), "", sshPath != ""
-	}, stderr)
-}
-
-func NewDynamicManager(ctx context.Context, transport func() (string, []string, string, bool), stderr io.Writer) *Manager {
+func NewDynamicManager(ctx context.Context, transport func() (string, []string, string)) *Manager {
 	managerCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
 		ctx:         managerCtx,
 		cancel:      cancel,
 		transport:   transport,
-		stderr:      stderr,
 		execControl: execControlOutput,
 		byRemote:    map[int]*Forward{},
 	}
@@ -74,12 +64,11 @@ func (m *Manager) Ensure(remotePort int, listenIP string, remoteHost string) (*F
 	if listenIP == "" {
 		return nil, errors.New("listen IP is required")
 	}
-	remoteHost = NormalizeRemoteHost(remoteHost)
-	sshPath, sshArgs, controlPath, ok := m.transport()
+	sshPath, sshArgs, controlPath := m.transport()
 
 	var f *Forward
 	if controlPath != "" {
-		if !ok || sshPath == "" {
+		if sshPath == "" {
 			return nil, errors.New("ssh control transport is unavailable")
 		}
 		spec := LocalForwardSpec(listenIP, remotePort, remoteHost)
@@ -96,7 +85,6 @@ func (m *Manager) Ensure(remotePort int, listenIP string, remoteHost string) (*F
 			RemotePort:  remotePort,
 			LocalPort:   remotePort,
 			ListenIP:    listenIP,
-			RemoteHost:  remoteHost,
 			spec:        spec,
 			sshPath:     sshPath,
 			sshArgs:     append([]string(nil), sshArgs...),
@@ -107,7 +95,7 @@ func (m *Manager) Ensure(remotePort int, listenIP string, remoteHost string) (*F
 		if err != nil {
 			return nil, err
 		}
-		f = &Forward{RemotePort: remotePort, LocalPort: remotePort, ListenIP: listenIP, RemoteHost: remoteHost, listener: ln}
+		f = &Forward{RemotePort: remotePort, LocalPort: remotePort, ListenIP: listenIP, listener: ln}
 	}
 
 	m.mu.Lock()
@@ -188,11 +176,7 @@ func (m *Manager) abandon(f *Forward) {
 
 func (m *Manager) controlOp(ctx context.Context, sshPath string, sshArgs []string, controlPath, operation, spec string) error {
 	args := ControlOperationArgs(sshArgs, controlPath, operation, "L", spec)
-	execControl := m.execControl
-	if execControl == nil {
-		execControl = execControlOutput
-	}
-	output, err := execControl(ctx, sshPath, args)
+	output, err := m.execControl(ctx, sshPath, args)
 	if err != nil {
 		return controlForwardError(output, err)
 	}

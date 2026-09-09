@@ -34,12 +34,15 @@ func Aliases(path string) ([]string, error) {
 }
 
 func HasAlias(path, target string) (bool, error) {
-	aliases, err := Aliases(path)
-	if err != nil {
+	if path == "" {
+		return false, nil
+	}
+	seenFiles := map[string]bool{}
+	seenAliases := map[string]bool{}
+	if err := collectAliases(path, seenFiles, seenAliases); err != nil {
 		return false, err
 	}
-	i := sort.SearchStrings(aliases, target)
-	return i < len(aliases) && aliases[i] == target, nil
+	return seenAliases[target], nil
 }
 
 func collectAliases(path string, seenFiles map[string]bool, seenAliases map[string]bool) error {

@@ -9,10 +9,6 @@ import (
 	"github.com/xiaot623/sshx/internal/locald"
 )
 
-func domainSuffix() string {
-	return defaultDomainSuffix()
-}
-
 func domainDNSAddr() string {
 	if v := os.Getenv("SSHX_DOMAIN_DNS_ADDR"); v != "" {
 		return v

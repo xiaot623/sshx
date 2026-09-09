@@ -1,7 +1,6 @@
 export type Locale = 'en' | 'zh-cn';
 
 type Feature = {
-  number: string;
   title: string;
   description: string;
   command: string;
@@ -63,6 +62,15 @@ export type Copy = {
   footer: { pitch: string; product: string; resources: string; readme: string; releases: string; architecture: string; copyright: string };
 };
 
+const heroInstall = 'npm install -g @hahahhh/sshx';
+const featureLocalCommand = 'sshx local pbcopy < build.log';
+const featurePortCommand = 'myserver.alex.sshx:3000';
+const featureRemoteFsCommand = 'features.remoteFs: true';
+const featureAliasCommand = 'alias ssh=sshx';
+const stepConnectCommand = 'sshx myserver';
+const stepBuildCommand = 'npm run dev';
+const stepOpenCommand = 'sshx local open http://myserver.alex.sshx:3000';
+
 export const copy: Record<Locale, Copy> = {
   en: {
     meta: {
@@ -75,7 +83,7 @@ export const copy: Record<Locale, Copy> = {
       line1: 'SSH, without',
       line2: 'the distance.',
       description: 'Keep the OpenSSH workflow you already trust. Add a secure command bridge, automatic port forwarding, local domains, and bidirectional workspaces when you need them.',
-      install: 'npm install -g @hahahhh/sshx',
+      install: heroInstall,
       copy: 'Copy install command',
       copied: 'Copied',
       github: 'Explore on GitHub',
@@ -88,10 +96,10 @@ export const copy: Record<Locale, Copy> = {
       title: 'Your remote machine, with local superpowers.',
       description: 'sshx stays out of the way for ordinary SSH sessions and brings the two environments together when your workflow calls for it.',
       items: [
-        { number: '01', title: 'Reach back to local', description: 'Run a command on your Mac or Linux client from inside the remote shell. Stdout, stderr, stdin, and exit codes cross the bridge intact.', command: 'sshx local pbcopy < build.log', span: 'wide' },
-        { number: '02', title: 'Ports appear automatically', description: 'Remote listeners are detected and exposed through a stable local domain—without planning an SSH tunnel first.', command: 'myserver.alex.sshx:3000' },
-        { number: '03', title: 'Workspaces cross the wire', description: 'Opt in to a bidirectional FUSE workspace so remote tools can edit local files and local tools can inspect remote work.', command: 'features.remoteFs: true' },
-        { number: '04', title: 'Still real OpenSSH', description: 'Flags, config, jump hosts, authentication, and connection behavior continue through the OpenSSH you already use.', command: 'alias ssh=sshx', span: 'wide' },
+        { title: 'Reach back to local', description: 'Run a command on your Mac or Linux client from inside the remote shell. Stdout, stderr, stdin, and exit codes cross the bridge intact.', command: featureLocalCommand, span: 'wide' },
+        { title: 'Ports appear automatically', description: 'Remote listeners are detected and exposed through a stable local domain—without planning an SSH tunnel first.', command: featurePortCommand },
+        { title: 'Workspaces cross the wire', description: 'Opt in to a bidirectional FUSE workspace so remote tools can edit local files and local tools can inspect remote work.', command: featureRemoteFsCommand },
+        { title: 'Still real OpenSSH', description: 'Flags, config, jump hosts, authentication, and connection behavior continue through the OpenSSH you already use.', command: featureAliasCommand, span: 'wide' },
       ],
     },
     workflow: {
@@ -103,9 +111,9 @@ export const copy: Record<Locale, Copy> = {
       after: 'With sshx',
       afterItems: ['Connect with the same SSH host', 'Discover listeners as they start', 'Use a memorable local domain', 'Call local tools from the remote shell'],
       steps: [
-        { label: 'CONNECT', title: 'Use your existing host', description: 'No new inventory or connection format. sshx delegates resolution and transport to OpenSSH.', command: 'sshx myserver' },
-        { label: 'BUILD', title: 'Start the remote process', description: 'sshx notices loopback and wildcard listeners while your development session stays interactive.', command: 'npm run dev' },
-        { label: 'OPEN', title: 'Finish on your local machine', description: 'Open the forwarded app—or invoke any allowed local command—without leaving the remote shell.', command: 'sshx local open http://myserver.alex.sshx:3000' },
+        { label: 'CONNECT', title: 'Use your existing host', description: 'No new inventory or connection format. sshx delegates resolution and transport to OpenSSH.', command: stepConnectCommand },
+        { label: 'BUILD', title: 'Start the remote process', description: 'sshx notices loopback and wildcard listeners while your development session stays interactive.', command: stepBuildCommand },
+        { label: 'OPEN', title: 'Finish on your local machine', description: 'Open the forwarded app—or invoke any allowed local command—without leaving the remote shell.', command: stepOpenCommand },
       ],
     },
     integrations: {
@@ -143,7 +151,7 @@ export const copy: Record<Locale, Copy> = {
       line1: '远程，',
       line2: '不再遥远。',
       description: '保留你熟悉且信任的 OpenSSH 工作流，在需要时获得安全命令桥、自动端口转发、本地域名与双向工作区。',
-      install: 'npm install -g @hahahhh/sshx',
+      install: heroInstall,
       copy: '复制安装命令',
       copied: '已复制',
       github: '在 GitHub 上查看',
@@ -156,10 +164,10 @@ export const copy: Record<Locale, Copy> = {
       title: '让远程机器拥有本地能力。',
       description: '普通 SSH 会话中，sshx 保持安静；需要跨越两台机器时，它把远程运行时与本地桌面连接起来。',
       items: [
-        { number: '01', title: '从远程调用本地', description: '在远程 Shell 内执行 Mac 或 Linux 客户端命令，stdout、stderr、stdin 与退出码完整传递。', command: 'sshx local pbcopy < build.log', span: 'wide' },
-        { number: '02', title: '端口自动出现', description: '自动发现远程监听端口，并通过稳定的本地域名访问，无需提前规划 SSH 隧道。', command: 'myserver.alex.sshx:3000' },
-        { number: '03', title: '工作区跨越网络', description: '按需启用双向 FUSE 工作区，让远程工具编辑本地文件，本地工具也能访问远程内容。', command: 'features.remoteFs: true' },
-        { number: '04', title: '依然是原生 OpenSSH', description: '参数、配置、跳板机、认证和连接行为全部交给你原本使用的 OpenSSH。', command: 'alias ssh=sshx', span: 'wide' },
+        { title: '从远程调用本地', description: '在远程 Shell 内执行 Mac 或 Linux 客户端命令，stdout、stderr、stdin 与退出码完整传递。', command: featureLocalCommand, span: 'wide' },
+        { title: '端口自动出现', description: '自动发现远程监听端口，并通过稳定的本地域名访问，无需提前规划 SSH 隧道。', command: featurePortCommand },
+        { title: '工作区跨越网络', description: '按需启用双向 FUSE 工作区，让远程工具编辑本地文件，本地工具也能访问远程内容。', command: featureRemoteFsCommand },
+        { title: '依然是原生 OpenSSH', description: '参数、配置、跳板机、认证和连接行为全部交给你原本使用的 OpenSSH。', command: featureAliasCommand, span: 'wide' },
       ],
     },
     workflow: {
@@ -171,9 +179,9 @@ export const copy: Record<Locale, Copy> = {
       after: '使用 sshx',
       afterItems: ['继续使用原有 SSH Host', '服务启动时自动发现端口', '通过易记的本地域名访问', '在远程直接调用本地工具'],
       steps: [
-        { label: '连接', title: '继续使用原有 Host', description: '无需维护新资产或改变连接格式，解析和传输仍由 OpenSSH 完成。', command: 'sshx myserver' },
-        { label: '运行', title: '启动远程开发服务', description: '开发会话保持交互时，sshx 自动发现回环与通配监听端口。', command: 'npm run dev' },
-        { label: '打开', title: '在本地完成最后一步', description: '无需离开远程 Shell，即可打开转发后的应用或执行任意允许的本地命令。', command: 'sshx local open http://myserver.alex.sshx:3000' },
+        { label: '连接', title: '继续使用原有 Host', description: '无需维护新资产或改变连接格式，解析和传输仍由 OpenSSH 完成。', command: stepConnectCommand },
+        { label: '运行', title: '启动远程开发服务', description: '开发会话保持交互时，sshx 自动发现回环与通配监听端口。', command: stepBuildCommand },
+        { label: '打开', title: '在本地完成最后一步', description: '无需离开远程 Shell，即可打开转发后的应用或执行任意允许的本地命令。', command: stepOpenCommand },
       ],
     },
     integrations: {

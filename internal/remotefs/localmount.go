@@ -7,18 +7,12 @@ import (
 	"syscall"
 )
 
-// SetupMountPoint prepares a local directory for a FUSE mount. It resolves
-// hierarchy below base, best-effort unmounts a stale mount at that path,
-// writes the .mount-path marker on base, and returns the FUSE path.
 func SetupMountPoint(base, hierarchy string) (string, error) {
-	path, err := MountPathBelow(base, hierarchy)
-	if err != nil {
-		return "", err
-	}
 	clean, err := CleanMountPath(hierarchy)
 	if err != nil {
 		return "", err
 	}
+	path := filepath.Join(base, filepath.FromSlash(clean))
 	_ = syscall.Unmount(path, 0)
 	if err := os.RemoveAll(path); err != nil {
 		return "", err

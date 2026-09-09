@@ -48,9 +48,6 @@ func Parse(args []string) Parsed {
 			break
 		}
 		if optionsWithRequiredValue[arg] && i+1 < len(out.Args) {
-			if arg == "-Q" {
-				out.InfoMode = true
-			}
 			i++
 			continue
 		}
@@ -62,7 +59,7 @@ func Parse(args []string) Parsed {
 }
 
 func isInfoMode(arg string) bool {
-	return arg == "-V" || arg == "-G" || arg == "-Q" || strings.HasPrefix(arg, "-Q")
+	return arg == "-V" || arg == "-G" || strings.HasPrefix(arg, "-Q")
 }
 
 func consumesAttachedValue(arg string) bool {

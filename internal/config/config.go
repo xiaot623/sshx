@@ -42,9 +42,11 @@ func EnsureDefault(path string) error {
 	if path == "" {
 		return nil
 	}
-	if _, err := os.Stat(path); err == nil {
+	_, err := os.Stat(path)
+	if err == nil {
 		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -69,9 +71,6 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// applyFeatureEnvOverrides lets COMMANDBRIDGE / AUTOFORWARD / REMOTEFS /
-// SSHX_USE_PROXY=1|0
-// override the corresponding features from the config file.
 func applyFeatureEnvOverrides(cfg *Config) {
 	overrides := []struct {
 		env string

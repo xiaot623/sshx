@@ -229,9 +229,9 @@ func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		result, err := RequestCommandForSessionWithMountOptions(
+		result, err := RequestCommandForContextWithMountOptions(
 			ctx, socket, []string{"read-remote"}, nil, nil, remoteRoot,
-			"session-1", true, true, time.Second, "secret",
+			"", "session-1", true, true, time.Second, "secret",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -273,9 +273,9 @@ func TestRequesterOffersClientMountOnceThenForwardsCommand(t *testing.T) {
 	waitForRemoteFSPeer(t, server, "session-1")
 	remoteRoot := t.TempDir()
 	for range 2 {
-		result, err := RequestCommandForSessionWithMountOptions(
+		result, err := RequestCommandForContextWithMountOptions(
 			ctx, socket, []string{"true"}, nil, nil, remoteRoot,
-			"session-1", true, true, time.Second, "secret",
+			"", "session-1", true, true, time.Second, "secret",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -305,9 +305,9 @@ func TestRequesterDoesNotForwardCommandWhenClientMountFails(t *testing.T) {
 		},
 	})
 	waitForRemoteFSPeer(t, server, "session-1")
-	_, err := RequestCommandForSessionWithMountOptions(
+	_, err := RequestCommandForContextWithMountOptions(
 		ctx, socket, []string{"true"}, nil, nil, t.TempDir(),
-		"session-1", true, true, time.Second, "secret",
+		"", "session-1", true, true, time.Second, "secret",
 	)
 	if err == nil {
 		t.Fatal("expected mount.create failure to stop command.exec")
@@ -336,7 +336,7 @@ func TestRequesterRoutesToExactSessionWithMultipleClients(t *testing.T) {
 	}
 	startClient("session-1")
 	startClient("session-2")
-	result, err := RequestCommandForSessionWithTimeout(ctx, socket, []string{"which-session"}, nil, nil, "", "session-2", false, time.Second, "secret")
+	result, err := RequestCommandForContextWithMountOptions(ctx, socket, []string{"which-session"}, nil, nil, "", "", "session-2", false, false, time.Second, "secret")
 	if err != nil {
 		t.Fatal(err)
 	}

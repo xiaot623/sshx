@@ -42,7 +42,6 @@ type fuseNode struct {
 
 type fuseFile struct {
 	state  *fuseState
-	path   string
 	handle uint64
 	once   sync.Once
 }
@@ -215,7 +214,7 @@ func (n *fuseNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if err != nil {
 		return nil, 0, errnoOf(err)
 	}
-	return &fuseFile{state: n.state, path: n.relPath(), handle: handle}, 0, 0
+	return &fuseFile{state: n.state, handle: handle}, 0, 0
 }
 
 func (n *fuseNode) Create(ctx context.Context, name string, flags, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
@@ -230,7 +229,7 @@ func (n *fuseNode) Create(ctx context.Context, name string, flags, mode uint32, 
 		return nil, nil, 0, errnoOf(err)
 	}
 	fillEntry(out, attr, n.state.options)
-	return n.child(attr), &fuseFile{state: n.state, path: path, handle: handle}, 0, 0
+	return n.child(attr), &fuseFile{state: n.state, handle: handle}, 0, 0
 }
 
 func portableOpenFlags(flags uint32) (OpenFlags, error) {

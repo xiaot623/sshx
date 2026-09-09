@@ -13,14 +13,14 @@ import (
 	"time"
 )
 
-func (r *Runner) execSSH(ctx context.Context, args []string) int {
-	return r.execSSHWithTimeout(ctx, args, 0)
+func (r *Runner) execSSHWithTimeout(ctx context.Context, args []string, timeout time.Duration) int {
+	return r.execWithTimeout(ctx, r.SSHPath, args, timeout, "exec ssh")
 }
 
-func (r *Runner) execSSHWithTimeout(ctx context.Context, args []string, timeout time.Duration) int {
+func (r *Runner) execWithTimeout(ctx context.Context, path string, args []string, timeout time.Duration, prefix string) int {
 	commandCtx, cancel := withCommandTimeout(ctx, timeout)
 	defer cancel()
-	if err := r.Exec(commandCtx, r.SSHPath, args); err != nil {
+	if err := r.Exec(commandCtx, path, args); err != nil {
 		if timeout > 0 && errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
 			fmt.Fprintf(r.Stderr, "sshx: command timed out after %s\n", timeout)
 			return 124
@@ -29,7 +29,7 @@ func (r *Runner) execSSHWithTimeout(ctx context.Context, args []string, timeout 
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(r.Stderr, "sshx: exec ssh: %v\n", err)
+		fmt.Fprintf(r.Stderr, "sshx: %s: %v\n", prefix, err)
 		return 1
 	}
 	return 0

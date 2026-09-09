@@ -167,7 +167,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			SSHPath:      r.SSHPath,
 			Target:       target,
 			SSHArgs:      append([]string(nil), localSSHArgs...),
-			DomainSuffix: domainSuffix(),
+			DomainSuffix: defaultDomainSuffix(),
 			DNSAddr:      domainDNSAddr(),
 			LeaseID:      sessionID,
 			TargetID:     connection.TargetID,
@@ -249,7 +249,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 					LeaseID:      sessionID,
 					TargetID:     connection.TargetID,
 					ControlPath:  controlPath,
-					DomainSuffix: domainSuffix(),
+					DomainSuffix: defaultDomainSuffix(),
 					DNSAddr:      domainDNSAddr(),
 				})
 				if err != nil {

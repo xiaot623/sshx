@@ -17,7 +17,7 @@ type PeerOptions struct {
 }
 
 type Peer struct {
-	conn      ReadWriteCloser
+	conn      io.ReadWriteCloser
 	sessionID string
 	opts      PeerOptions
 
@@ -46,7 +46,7 @@ type Peer struct {
 	err       error
 }
 
-func Connect(ctx context.Context, conn ReadWriteCloser, sessionID, token string, opts PeerOptions) (*Peer, error) {
+func Connect(ctx context.Context, conn io.ReadWriteCloser, sessionID, token string, opts PeerOptions) (*Peer, error) {
 	if sessionID == "" {
 		return nil, errors.New("remote fs sessionId is required")
 	}
@@ -73,7 +73,7 @@ func Connect(ctx context.Context, conn ReadWriteCloser, sessionID, token string,
 	return startPeer(ctx, conn, sessionID, opts, 1), nil
 }
 
-func Accept(ctx context.Context, conn ReadWriteCloser, validate func(sessionID, token string) error, opts PeerOptions) (*Peer, error) {
+func Accept(ctx context.Context, conn io.ReadWriteCloser, validate func(sessionID, token string) error, opts PeerOptions) (*Peer, error) {
 	hello, err := readWireFrame(conn)
 	if err != nil {
 		_ = conn.Close()
@@ -103,7 +103,7 @@ func Accept(ctx context.Context, conn ReadWriteCloser, validate func(sessionID, 
 	return startPeer(ctx, conn, hello.SessionID, opts, 0), nil
 }
 
-func startPeer(ctx context.Context, conn ReadWriteCloser, sessionID string, opts PeerOptions, requestIDBase uint64) *Peer {
+func startPeer(ctx context.Context, conn io.ReadWriteCloser, sessionID string, opts PeerOptions, requestIDBase uint64) *Peer {
 	p := &Peer{
 		conn:      conn,
 		sessionID: sessionID,
@@ -170,14 +170,6 @@ func (p *Peer) UnregisterBackend(mountID string) error {
 		return nil
 	}
 	return backend.CloseBackend()
-}
-
-func (p *Peer) CreateMount(ctx context.Context, mountID string) (string, error) {
-	return p.CreateMountAt(ctx, mountID, "workspace")
-}
-
-func (p *Peer) CreateMountAt(ctx context.Context, mountID, mountPath string) (string, error) {
-	return p.CreateMountAtWithOptions(ctx, mountID, mountPath, MountOptions{})
 }
 
 func (p *Peer) CreateMountAtWithOptions(ctx context.Context, mountID, mountPath string, options MountOptions) (string, error) {
@@ -404,7 +396,7 @@ func (p *Peer) handleRequest(ctx context.Context, request wireFrame) wireFrame {
 		}
 		return wireFrame{Handle: handle, Attr: attr}
 	case "close":
-		return errorFrameOrEmpty(backend.Close(ctx, request.Handle))
+		return errorFrame(backend.Close(ctx, request.Handle))
 	case "read":
 		data, err := backend.Read(ctx, request.Handle, request.Offset, request.Size)
 		if err != nil {
@@ -418,16 +410,16 @@ func (p *Peer) handleRequest(ctx context.Context, request wireFrame) wireFrame {
 		}
 		return wireFrame{Size: size}
 	case "fsync":
-		return errorFrameOrEmpty(backend.Fsync(ctx, request.Handle))
+		return errorFrame(backend.Fsync(ctx, request.Handle))
 	case "mkdir":
 		attr, err := backend.Mkdir(ctx, request.Path, request.Mode)
 		return attrFrame(attr, err)
 	case "unlink":
-		return errorFrameOrEmpty(backend.Unlink(ctx, request.Path))
+		return errorFrame(backend.Unlink(ctx, request.Path))
 	case "rmdir":
-		return errorFrameOrEmpty(backend.Rmdir(ctx, request.Path))
+		return errorFrame(backend.Rmdir(ctx, request.Path))
 	case "rename":
-		return errorFrameOrEmpty(backend.Rename(ctx, request.Path, request.Path2))
+		return errorFrame(backend.Rename(ctx, request.Path, request.Path2))
 	case "link":
 		attr, err := backend.Link(ctx, request.Path, request.Path2)
 		return attrFrame(attr, err)
@@ -459,13 +451,6 @@ func attrFrame(attr Attr, err error) wireFrame {
 		return errorFrame(err)
 	}
 	return wireFrame{Attr: attr}
-}
-
-func errorFrameOrEmpty(err error) wireFrame {
-	if err == nil {
-		return wireFrame{}
-	}
-	return errorFrame(err)
 }
 
 func errorFrame(err error) wireFrame {
@@ -547,8 +532,6 @@ func errorFromCode(code ErrorCode) error {
 		return syscall.EINTR
 	case ErrorTimedOut:
 		return syscall.ETIMEDOUT
-	case ErrorIO, ErrorNone:
-		return syscall.EIO
 	default:
 		return syscall.EIO
 	}

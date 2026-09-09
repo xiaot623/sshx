@@ -3,7 +3,6 @@ package forward
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"strings"
 	"testing"
@@ -13,9 +12,9 @@ func TestEnsureListensWithoutControlPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	called := false
-	m := NewDynamicManager(ctx, func() (string, []string, string, bool) {
-		return "ssh", []string{"host"}, "", true
-	}, io.Discard)
+	m := NewDynamicManager(ctx, func() (string, []string, string) {
+		return "ssh", []string{"host"}, ""
+	})
 	m.execControl = func(context.Context, string, []string) ([]byte, error) {
 		called = true
 		return nil, nil
@@ -49,9 +48,9 @@ func TestEnsureUsesControlForwardWhenControlPathSet(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var ops [][]string
-	m := NewDynamicManager(ctx, func() (string, []string, string, bool) {
-		return "ssh", []string{"-t", "-L", "1:localhost:1", "-p", "2222", "host"}, "/tmp/master", true
-	}, io.Discard)
+	m := NewDynamicManager(ctx, func() (string, []string, string) {
+		return "ssh", []string{"-t", "-L", "1:localhost:1", "-p", "2222", "host"}, "/tmp/master"
+	})
 	m.execControl = func(_ context.Context, sshPath string, args []string) ([]byte, error) {
 		if sshPath != "ssh" {
 			t.Fatalf("sshPath = %q", sshPath)
@@ -111,9 +110,9 @@ func TestEnsureUsesControlForwardWhenControlPathSet(t *testing.T) {
 func TestEnsureControlForwardErrorIsReturned(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := NewDynamicManager(ctx, func() (string, []string, string, bool) {
-		return "ssh", []string{"host"}, "/tmp/master", true
-	}, io.Discard)
+	m := NewDynamicManager(ctx, func() (string, []string, string) {
+		return "ssh", []string{"host"}, "/tmp/master"
+	})
 	m.execControl = func(context.Context, string, []string) ([]byte, error) {
 		return []byte("bind: address already in use\n"), errors.New("exit status 1")
 	}
@@ -130,9 +129,9 @@ func TestEnsureSamePortDoesNotCancelExistingControlForward(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var ops []string
-	m := NewDynamicManager(ctx, func() (string, []string, string, bool) {
-		return "ssh", []string{"host"}, "/tmp/master", true
-	}, io.Discard)
+	m := NewDynamicManager(ctx, func() (string, []string, string) {
+		return "ssh", []string{"host"}, "/tmp/master"
+	})
 	m.execControl = func(_ context.Context, _ string, args []string) ([]byte, error) {
 		ops = append(ops, strings.Join(args, " "))
 		return nil, nil
@@ -156,9 +155,9 @@ func TestEnsureIPv6RemoteHostSpec(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var got string
-	m := NewDynamicManager(ctx, func() (string, []string, string, bool) {
-		return "ssh", []string{"host"}, "/tmp/master", true
-	}, io.Discard)
+	m := NewDynamicManager(ctx, func() (string, []string, string) {
+		return "ssh", []string{"host"}, "/tmp/master"
+	})
 	m.execControl = func(_ context.Context, _ string, args []string) ([]byte, error) {
 		got = strings.Join(args, " ")
 		return nil, nil

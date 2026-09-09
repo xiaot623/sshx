@@ -28,7 +28,7 @@ type execCall struct {
 }
 
 func sameVersionRemoteProbe() []byte {
-	return []byte("Linux\nx86_64\n" + version.Version + "\n" + version.Version + "\n" + identity.RuntimeID + "\n1\n")
+	return []byte("Linux\nx86_64\n" + identity.RuntimeID + "\n1\n")
 }
 
 func isolateHome(t *testing.T) {
@@ -186,7 +186,7 @@ func TestRemoteRuntimeSocketPathFitsLinuxLimit(t *testing.T) {
 
 func TestSessionSSHArgsInjectsRemoteHomeForInteractiveShell(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"debian"})
-	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	got := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/test-id", nil)
 	if len(got) != 3 {
 		t.Fatalf("args = %#v", got)
 	}
@@ -203,7 +203,7 @@ func TestSessionSSHArgsInjectsRemoteHomeForInteractiveShell(t *testing.T) {
 
 func TestSessionSSHArgsDoesNotWrapSessionlessSSH(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"-N", "debian"})
-	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	got := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/test-id", nil)
 	if !reflect.DeepEqual(got, []string{"-N", "debian"}) {
 		t.Fatalf("args = %#v", got)
 	}
@@ -211,7 +211,7 @@ func TestSessionSSHArgsDoesNotWrapSessionlessSSH(t *testing.T) {
 
 func TestSessionSSHArgsRunsSingleRemoteCommandThroughShell(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"debian", "echo ok; sshx local uname -s"})
-	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	got := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/test-id", nil)
 	if len(got) != 2 || got[0] != "debian" {
 		t.Fatalf("args = %#v", got)
 	}
@@ -320,7 +320,7 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\naarch64\n1.2.3-rc.0\n1.2.3-rc.0\n\n1\n"), nil
+		return []byte("Linux\naarch64\n\n1\n"), nil
 	}
 	r.DownloadBinary = func(_ context.Context, targetVersion, assetName string) (string, error) {
 		downloadedVersion = targetVersion
@@ -370,7 +370,7 @@ func TestEnsureRemoteServerKeepsCompatibleRuntimeAcrossAppVersions(t *testing.T)
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\nx86_64\n1.2.3\n\n" + identity.RuntimeID + "\n1\n"), nil
+		return []byte("Linux\nx86_64\n" + identity.RuntimeID + "\n1\n"), nil
 	}
 	r.DownloadBinary = func(context.Context, string, string) (string, error) {
 		t.Fatal("binary should not be downloaded when installed binary already matches")

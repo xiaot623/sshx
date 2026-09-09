@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/xiaot623/sshx/internal/forward"
 )
 
 func TestParseAllocatedProxyPort(t *testing.T) {
@@ -34,7 +36,7 @@ func TestProxyControlOperationDoesNotRepeatUserForwards(t *testing.T) {
 		"-p", "2222",
 		"host",
 	}
-	got := strings.Join(sshControlOperationArgs(args, "/tmp/sshx-master", "forward", "R", "127.0.0.1:0"), " ")
+	got := strings.Join(forward.ControlOperationArgs(args, "/tmp/sshx-master", "forward", "R", "127.0.0.1:0"), " ")
 	for _, forbidden := range []string{"-D 1081", "-L 8080", "9000:localhost:90", "9100:localhost:91", "/tmp/old", "ClearAllForwardings=yes", "ExitOnForwardFailure=no", "127.0.0.1:0:"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("control operation retained %q: %s", forbidden, got)
@@ -49,7 +51,7 @@ func TestProxyControlOperationDoesNotRepeatUserForwards(t *testing.T) {
 
 func TestControlOperationArgsLocalForwardUsesDashL(t *testing.T) {
 	args := []string{"-t", "-L", "8080:localhost:80", "-p", "2222", "host"}
-	got := strings.Join(sshControlOperationArgs(args, "/tmp/sshx-master", "forward", "L", "127.64.0.1:8080:127.0.0.1:8080"), " ")
+	got := strings.Join(forward.ControlOperationArgs(args, "/tmp/sshx-master", "forward", "L", "127.64.0.1:8080:127.0.0.1:8080"), " ")
 	for _, required := range []string{"-S /tmp/sshx-master", "-O forward", "-L 127.64.0.1:8080:127.0.0.1:8080", "-p 2222", "host"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("local control operation lost %q: %s", required, got)
