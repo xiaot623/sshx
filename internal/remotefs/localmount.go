@@ -28,7 +28,12 @@ func SetupMountPoint(base, hierarchy string) (string, error) {
 
 // MountLocal sets up a mount point under base and mounts backend there.
 // ctx is the mount lifetime: cancel it only when the mount should go away.
-func MountLocal(ctx context.Context, driver MountDriver, base, hierarchy string, backend Backend, options MountOptions) (Mount, error) {
+func MountLocal(
+	ctx context.Context,
+	driver MountDriver,
+	base, hierarchy string,
+	backend Backend,
+	options MountOptions) (Mount, error) {
 	path, err := SetupMountPoint(base, hierarchy)
 	if err != nil {
 		return nil, err

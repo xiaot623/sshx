@@ -27,7 +27,11 @@ commands:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward || !cfg.Features.RemoteFS || !cfg.Features.Proxy {
+	if !cfg.Strict ||
+		!cfg.Features.CommandBridge ||
+		!cfg.Features.AutoForward ||
+		!cfg.Features.RemoteFS ||
+		!cfg.Features.Proxy {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 	if !cfg.Commands.Allows([]string{"uname", "-a"}) {
@@ -64,7 +68,11 @@ func TestEnsureDefaultWritesEmbeddedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward || cfg.Features.RemoteFS || cfg.Features.Proxy {
+	if cfg.Strict ||
+		!cfg.Features.CommandBridge ||
+		!cfg.Features.AutoForward ||
+		cfg.Features.RemoteFS ||
+		cfg.Features.Proxy {
 		t.Fatalf("unexpected default config: %#v", cfg)
 	}
 }

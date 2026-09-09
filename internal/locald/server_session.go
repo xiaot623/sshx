@@ -14,7 +14,11 @@ import (
 func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Decoder, enc *json.Encoder, req Request) {
 	leaseID := requestLeaseID(req)
 	if leaseID == "" {
-		_ = enc.Encode(Response{OK: false, Error: "leaseId is required", Version: s.Version, ProtocolVersion: protocol.Version})
+		_ = enc.Encode(Response{
+			OK:              false,
+			Error:           "leaseId is required",
+			Version:         s.Version,
+			ProtocolVersion: protocol.Version})
 		return
 	}
 	if !requestCompatible(req) {
@@ -27,7 +31,11 @@ func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Dec
 	draining := s.draining
 	s.mu.Unlock()
 	if draining {
-		_ = enc.Encode(Response{OK: false, Error: "local daemon is draining", Version: s.Version, ProtocolVersion: protocol.Version})
+		_ = enc.Encode(Response{
+			OK:              false,
+			Error:           "local daemon is draining",
+			Version:         s.Version,
+			ProtocolVersion: protocol.Version})
 		return
 	}
 	rec, err := s.ensureTarget(ctx, req)
@@ -36,16 +44,29 @@ func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Dec
 		return
 	}
 	key := targetKey(req)
-	session := &sessionRecord{TargetKey: key, SSHPath: req.SSHPath, SSHArgs: append([]string(nil), defaultSSHArgs(req)...), ControlPath: req.ControlPath, conn: conn}
+	session := &sessionRecord{
+		TargetKey:   key,
+		SSHPath:     req.SSHPath,
+		SSHArgs:     append([]string(nil), defaultSSHArgs(req)...),
+		ControlPath: req.ControlPath,
+		conn:        conn}
 	s.mu.Lock()
 	if s.draining {
 		s.mu.Unlock()
-		_ = enc.Encode(Response{OK: false, Error: "local daemon is draining", Version: s.Version, ProtocolVersion: protocol.Version})
+		_ = enc.Encode(Response{
+			OK:              false,
+			Error:           "local daemon is draining",
+			Version:         s.Version,
+			ProtocolVersion: protocol.Version})
 		return
 	}
 	if _, exists := s.sessions[leaseID]; exists {
 		s.mu.Unlock()
-		_ = enc.Encode(Response{OK: false, Error: "session already exists", Version: s.Version, ProtocolVersion: protocol.Version})
+		_ = enc.Encode(Response{
+			OK:              false,
+			Error:           "session already exists",
+			Version:         s.Version,
+			ProtocolVersion: protocol.Version})
 		return
 	}
 	s.sessions[leaseID] = session
@@ -65,7 +86,11 @@ func (s *Server) handleSession(ctx context.Context, conn net.Conn, dec *json.Dec
 			return
 		}
 		if heartbeat.Type != TypeHeartbeat || requestLeaseID(heartbeat) != leaseID {
-			_ = enc.Encode(Response{OK: false, Error: "invalid session heartbeat", Version: s.Version, ProtocolVersion: protocol.Version})
+			_ = enc.Encode(Response{
+				OK:              false,
+				Error:           "invalid session heartbeat",
+				Version:         s.Version,
+				ProtocolVersion: protocol.Version})
 			return
 		}
 		if !requestCompatible(heartbeat) {

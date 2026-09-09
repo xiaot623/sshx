@@ -21,12 +21,25 @@ func TestControlOperationArgsLocalForward(t *testing.T) {
 	}
 	spec := LocalForwardSpec("127.64.0.1", 8080, "127.0.0.1")
 	got := strings.Join(ControlOperationArgs(args, "/tmp/sshx-master", "forward", "L", spec), " ")
-	for _, forbidden := range []string{"-t", "-D 1081", "-L 8080", "9000:localhost:90", "9100:localhost:91", "/tmp/old", "ClearAllForwardings=yes", "ExitOnForwardFailure=no"} {
+	for _, forbidden := range []string{
+		"-t",
+		"-D 1081",
+		"-L 8080",
+		"9000:localhost:90",
+		"9100:localhost:91",
+		"/tmp/old",
+		"ClearAllForwardings=yes",
+		"ExitOnForwardFailure=no"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("control operation retained %q: %s", forbidden, got)
 		}
 	}
-	for _, required := range []string{"-S /tmp/sshx-master", "-O forward", "-L 127.64.0.1:8080:127.0.0.1:8080", "-p 2222", "host"} {
+	for _, required := range []string{
+		"-S /tmp/sshx-master",
+		"-O forward",
+		"-L 127.64.0.1:8080:127.0.0.1:8080",
+		"-p 2222",
+		"host"} {
 		if !strings.Contains(got, required) {
 			t.Fatalf("control operation lost %q: %s", required, got)
 		}
@@ -61,7 +74,9 @@ func TestNormalizeRemoteHost(t *testing.T) {
 }
 
 func TestCleanSSHArgsStripsUserForwardsAndTTY(t *testing.T) {
-	got := strings.Join(CleanSSHArgs([]string{"-tt", "-L", "80:localhost:80", "-R", "90:localhost:90", "-D", "1080", "-p", "22", "host"}), " ")
+	got := strings.Join(
+		CleanSSHArgs([]string{"-tt", "-L", "80:localhost:80", "-R", "90:localhost:90", "-D", "1080", "-p", "22", "host"}),
+		" ")
 	if got != "-p 22 host" {
 		t.Fatalf("cleaned = %q", got)
 	}

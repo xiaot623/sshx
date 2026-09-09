@@ -257,7 +257,11 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 	if (req.Type == TypeEnsureTargetPort || req.Type == TypeRemoveTargetPort) && !s.hasSession(requestLeaseID(req)) {
-		_ = enc.Encode(Response{OK: false, Error: "active session lease is required", Version: s.Version, ProtocolVersion: protocol.Version})
+		_ = enc.Encode(Response{
+			OK:              false,
+			Error:           "active session lease is required",
+			Version:         s.Version,
+			ProtocolVersion: protocol.Version})
 		return
 	}
 	resp := s.handle(ctx, req)
@@ -375,12 +379,21 @@ func requestLeaseID(req Request) string {
 }
 
 func requestCompatible(req Request) bool {
-	frame := protocol.Frame{ProtocolVersion: req.ProtocolVersion, ProtocolMin: req.ProtocolMin, ProtocolMax: req.ProtocolMax}
+	frame := protocol.Frame{
+		ProtocolVersion: req.ProtocolVersion,
+		ProtocolMin:     req.ProtocolMin,
+		ProtocolMax:     req.ProtocolMax}
 	return protocol.FrameCompatible(frame) && req.RuntimeID == identity.LocalRuntimeID
 }
 
 func protocolResponse(version string, ok bool) Response {
-	return Response{OK: ok, Version: version, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.LocalRuntimeID}
+	return Response{
+		OK:              ok,
+		Version:         version,
+		ProtocolVersion: protocol.Version,
+		ProtocolMin:     protocol.MinVersion,
+		ProtocolMax:     protocol.MaxVersion,
+		RuntimeID:       identity.LocalRuntimeID}
 }
 
 func ClientRequest(ctx context.Context, socketPath string, req Request) (Response, error) {

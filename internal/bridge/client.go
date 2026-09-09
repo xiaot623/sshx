@@ -44,7 +44,16 @@ type ClientOptions struct {
 	HeartbeatTimeout  time.Duration
 }
 
-func RequestCommandForContextWithMountOptions(ctx context.Context, socketPath string, argv []string, stdin []byte, env map[string]string, cwd, contextID, sessionID string, remoteFS, readOnly bool, timeout time.Duration, token ...string) (CommandResult, error) {
+func RequestCommandForContextWithMountOptions(
+	ctx context.Context,
+	socketPath string,
+	argv []string,
+	stdin []byte,
+	env map[string]string,
+	cwd, contextID, sessionID string,
+	remoteFS, readOnly bool,
+	timeout time.Duration,
+	token ...string) (CommandResult, error) {
 	if len(argv) == 0 {
 		return CommandResult{ExitCode: 2}, errors.New("local command is required")
 	}
@@ -56,7 +65,16 @@ func RequestCommandForContextWithMountOptions(ctx context.Context, socketPath st
 	defer c.Close()
 	enc := protocol.NewEncoder(c)
 	dec := protocol.NewDecoder(c)
-	if err := enc.Encode(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, Role: protocol.RoleRequester, ContextID: contextID, SessionID: sessionID, Token: firstToken(token)}); err != nil {
+	if err := enc.Encode(protocol.Frame{
+		Type:            protocol.TypeHello,
+		ProtocolVersion: protocol.Version,
+		ProtocolMin:     protocol.MinVersion,
+		ProtocolMax:     protocol.MaxVersion,
+		RuntimeID:       identity.RuntimeID,
+		Role:            protocol.RoleRequester,
+		ContextID:       contextID,
+		SessionID:       sessionID,
+		Token:           firstToken(token)}); err != nil {
 		return CommandResult{ExitCode: 1}, err
 	}
 	id, idErr := identity.UUID()
@@ -173,7 +191,19 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 		defer writeMu.Unlock()
 		return enc.Encode(frame)
 	}
-	if err := send(protocol.Frame{Type: protocol.TypeHello, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: opts.RuntimeID, AppVersion: opts.AppVersion, TargetID: opts.TargetID, ContextID: opts.ContextID, SessionID: opts.SessionID, Capabilities: opts.Capabilities, Role: protocol.RoleClient, Token: firstToken(token)}); err != nil {
+	if err := send(protocol.Frame{
+		Type:            protocol.TypeHello,
+		ProtocolVersion: protocol.Version,
+		ProtocolMin:     protocol.MinVersion,
+		ProtocolMax:     protocol.MaxVersion,
+		RuntimeID:       opts.RuntimeID,
+		AppVersion:      opts.AppVersion,
+		TargetID:        opts.TargetID,
+		ContextID:       opts.ContextID,
+		SessionID:       opts.SessionID,
+		Capabilities:    opts.Capabilities,
+		Role:            protocol.RoleClient,
+		Token:           firstToken(token)}); err != nil {
 		signalReady(opts.Ready, err)
 		return err
 	}
@@ -195,7 +225,16 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 					return
 				}
 				sequence++
-				if err := send(protocol.Frame{Type: protocol.TypeHeartbeat, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: opts.RuntimeID, AppVersion: opts.AppVersion, ContextID: opts.ContextID, SessionID: opts.SessionID, Sequence: sequence}); err != nil {
+				if err := send(protocol.Frame{
+					Type:            protocol.TypeHeartbeat,
+					ProtocolVersion: protocol.Version,
+					ProtocolMin:     protocol.MinVersion,
+					ProtocolMax:     protocol.MaxVersion,
+					RuntimeID:       opts.RuntimeID,
+					AppVersion:      opts.AppVersion,
+					ContextID:       opts.ContextID,
+					SessionID:       opts.SessionID,
+					Sequence:        sequence}); err != nil {
 					_ = c.Close()
 					return
 				}
@@ -260,7 +299,10 @@ func RunClientConnWithOptions(ctx context.Context, c io.ReadWriteCloser, opts Cl
 			continue
 		}
 		if opts.Allow != nil && !opts.Allow(frame.Argv) {
-			if err := send(protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "command denied by sshx policy"}); err != nil {
+			if err := send(protocol.Frame{
+				Type:  protocol.TypeCommandError,
+				ID:    frame.ID,
+				Error: "command denied by sshx policy"}); err != nil {
 				return err
 			}
 			continue

@@ -21,7 +21,8 @@ func ControlOperationArgs(sshArgs []string, controlPath, operation, direction, f
 }
 
 func LocalForwardSpec(listenIP string, port int, remoteHost string) string {
-	return net.JoinHostPort(listenIP, strconv.Itoa(port)) + ":" + net.JoinHostPort(NormalizeRemoteHost(remoteHost), strconv.Itoa(port))
+	return net.JoinHostPort(listenIP, strconv.Itoa(port)) + ":" +
+		net.JoinHostPort(NormalizeRemoteHost(remoteHost), strconv.Itoa(port))
 }
 
 func NormalizeRemoteHost(host string) string {

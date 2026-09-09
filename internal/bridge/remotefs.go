@@ -85,7 +85,11 @@ func (s *Server) handleFSConn(ctx context.Context, conn net.Conn) {
 		sessionID = candidate
 		return nil
 	}, remotefs.PeerOptions{
-		OnMount: func(mountCtx context.Context, peer *remotefs.Peer, mountID, mountPath string, options remotefs.MountOptions) (string, error) {
+		OnMount: func(
+			mountCtx context.Context,
+			peer *remotefs.Peer,
+			mountID, mountPath string,
+			options remotefs.MountOptions) (string, error) {
 			return s.mountRemoteFS(mountCtx, ctx, sessionID, peer, mountID, mountPath, options)
 		},
 		OnUnmount: func(unmountCtx context.Context, mountID string) error {
@@ -130,7 +134,12 @@ func safeSessionID(sessionID string) bool {
 		filepath.Base(sessionID) == sessionID && !strings.ContainsAny(sessionID, `/\`)
 }
 
-func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionID string, peer *remotefs.Peer, mountID, mountHierarchy string, options remotefs.MountOptions) (string, error) {
+func (s *Server) mountRemoteFS(
+	requestCtx, lifetimeCtx context.Context,
+	sessionID string,
+	peer *remotefs.Peer,
+	mountID, mountHierarchy string,
+	options remotefs.MountOptions) (string, error) {
 	if mountID == "" {
 		return "", errors.New("remote fs mountId is required")
 	}
@@ -146,7 +155,13 @@ func (s *Server) mountRemoteFS(requestCtx, lifetimeCtx context.Context, sessionI
 	// the mount.create handler and is released explicitly by the peer lifecycle.
 	mountCtx, mountCancel := context.WithCancel(lifetimeCtx)
 	stopRequestCancel := context.AfterFunc(requestCtx, mountCancel)
-	mount, err := remotefs.MountLocal(mountCtx, s.MountDriver, sessionPath, mountHierarchy, peer.RemoteBackend(mountID), options)
+	mount, err := remotefs.MountLocal(
+		mountCtx,
+		s.MountDriver,
+		sessionPath,
+		mountHierarchy,
+		peer.RemoteBackend(mountID),
+		options)
 	stopRequestCancel()
 	if err != nil {
 		mountCancel()
@@ -331,7 +346,10 @@ func (s *Server) ensureExportBackend(sessionID, mountID, rootPath string, peer *
 		s.mu.Unlock()
 	}
 	// Exclude the session mount tree so reverse mounts cannot recurse into a home export.
-	backend, err := remotefs.OpenRootBackendWithOptions(rootPath, remotefs.RootBackendOptions{DisableDelete: true}, s.MountRoot)
+	backend, err := remotefs.OpenRootBackendWithOptions(
+		rootPath,
+		remotefs.RootBackendOptions{DisableDelete: true},
+		s.MountRoot)
 	if err != nil {
 		finish()
 		return fmt.Errorf("open remote workspace: %w", err)

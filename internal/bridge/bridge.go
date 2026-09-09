@@ -254,7 +254,9 @@ func (s *Server) monitorLeases(ctx context.Context) {
 			lastActive := s.lastActive
 			everHad := s.everHadClient
 			s.mu.Unlock()
-			shouldDrain := empty && ((everHad && now.Sub(lastActive) >= s.DrainTimeout) || (!everHad && now.Sub(lastActive) >= s.StartupTimeout))
+			shouldDrain := empty &&
+				((everHad && now.Sub(lastActive) >= s.DrainTimeout) ||
+					(!everHad && now.Sub(lastActive) >= s.StartupTimeout))
 			if shouldDrain {
 				s.mu.Lock()
 				shouldDrain = len(s.clients) == 0
@@ -290,7 +292,13 @@ func (s *Server) handleConn(c net.Conn) {
 		return
 	}
 	if !protocol.FrameCompatible(hello) || hello.RuntimeID != identity.RuntimeID {
-		_ = enc.Encode(protocol.Frame{Type: protocol.TypeServerDrain, AppVersion: s.Version, RuntimeID: identity.RuntimeID, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, Error: "sshx runtime protocol is incompatible"})
+		_ = enc.Encode(protocol.Frame{
+			Type:        protocol.TypeServerDrain,
+			AppVersion:  s.Version,
+			RuntimeID:   identity.RuntimeID,
+			ProtocolMin: protocol.MinVersion,
+			ProtocolMax: protocol.MaxVersion,
+			Error:       "sshx runtime protocol is incompatible"})
 		_ = c.Close()
 		return
 	}
@@ -313,13 +321,33 @@ func (s *Server) handleConn(c net.Conn) {
 		for _, capability := range hello.Capabilities {
 			capabilities[capability] = true
 		}
-		cc := &clientConn{enc: enc, dec: dec, c: c, sessionID: hello.SessionID, contextID: hello.ContextID, capabilities: capabilities, pending: map[string]chan protocol.Frame{}, lastSeen: time.Now(), done: make(chan struct{})}
+		cc := &clientConn{
+			enc:          enc,
+			dec:          dec,
+			c:            c,
+			sessionID:    hello.SessionID,
+			contextID:    hello.ContextID,
+			capabilities: capabilities,
+			pending:      map[string]chan protocol.Frame{},
+			lastSeen:     time.Now(),
+			done:         make(chan struct{})}
 		if !s.addClient(cc) {
-			_ = cc.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolVersion: protocol.Version, AppVersion: s.Version, Error: "sshx server is draining"})
+			_ = cc.send(protocol.Frame{
+				Type:            protocol.TypeServerDrain,
+				ProtocolVersion: protocol.Version,
+				AppVersion:      s.Version,
+				Error:           "sshx server is draining"})
 			cc.close()
 			return
 		}
-		if err := cc.send(protocol.Frame{Type: protocol.TypeCapabilities, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, AppVersion: s.Version, Capabilities: defaultCapabilities}); err != nil {
+		if err := cc.send(protocol.Frame{
+			Type:            protocol.TypeCapabilities,
+			ProtocolVersion: protocol.Version,
+			ProtocolMin:     protocol.MinVersion,
+			ProtocolMax:     protocol.MaxVersion,
+			RuntimeID:       identity.RuntimeID,
+			AppVersion:      s.Version,
+			Capabilities:    defaultCapabilities}); err != nil {
 			s.removeClient(cc)
 			return
 		}
@@ -333,7 +361,11 @@ func (s *Server) handleConn(c net.Conn) {
 	}
 }
 
-func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protocol.Encoder, requesterContextID, requesterSessionID string) {
+func (s *Server) handleRequester(
+	c net.Conn,
+	dec *protocol.Decoder,
+	enc *protocol.Encoder,
+	requesterContextID, requesterSessionID string) {
 	defer c.Close()
 	s.markActive()
 	req, err := dec.Decode()
@@ -345,20 +377,32 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 		return
 	}
 	if requesterSessionID != "" && req.SessionID != requesterSessionID {
-		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requester sessionId does not match command sessionId"})
+		_ = enc.Encode(protocol.Frame{
+			Type:  protocol.TypeCommandError,
+			ID:    req.ID,
+			Error: "requester sessionId does not match command sessionId"})
 		return
 	}
 	if requesterContextID != "" && req.ContextID != requesterContextID {
-		_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requester contextId does not match command contextId"})
+		_ = enc.Encode(protocol.Frame{
+			Type:  protocol.TypeCommandError,
+			ID:    req.ID,
+			Error: "requester contextId does not match command contextId"})
 		return
 	}
 	if req.RemoteFS {
 		if req.Cwd == "" {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "remote fs requires sessionId and cwd"})
+			_ = enc.Encode(protocol.Frame{
+				Type:  protocol.TypeCommandError,
+				ID:    req.ID,
+				Error: "remote fs requires sessionId and cwd"})
 			return
 		}
 		if req.RequestID == "" || req.RequestID != req.ID {
-			_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: req.ID, Error: "requestId is required and must match command id"})
+			_ = enc.Encode(protocol.Frame{
+				Type:  protocol.TypeCommandError,
+				ID:    req.ID,
+				Error: "requestId is required and must match command id"})
 			return
 		}
 	}
@@ -384,12 +428,18 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 			fsPeer := s.fsPeers[attempt.SessionID]
 			s.mu.Unlock()
 			if fsPeer == nil {
-				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: "remote fs data session is unavailable"})
+				_ = enc.Encode(protocol.Frame{
+					Type:  protocol.TypeCommandError,
+					ID:    attempt.ID,
+					Error: "remote fs data session is unavailable"})
 				return
 			}
 			layout, err := remotefs.CurrentExportLayout(attempt.Cwd)
 			if err != nil {
-				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: fmt.Sprintf("resolve remote home mount: %v", err)})
+				_ = enc.Encode(protocol.Frame{
+					Type:  protocol.TypeCommandError,
+					ID:    attempt.ID,
+					Error: fmt.Sprintf("resolve remote home mount: %v", err)})
 				return
 			}
 			mountID := exportMountID(layout.RootPath, layout.MountPath)
@@ -397,7 +447,12 @@ func (s *Server) handleRequester(c net.Conn, dec *protocol.Decoder, enc *protoco
 				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: err.Error()})
 				return
 			}
-			if err := s.ensureClientMount(attempt.SessionID, mountID, layout.MountPath, fsPeer, attempt.MountReadOnly); err != nil {
+			if err := s.ensureClientMount(
+				attempt.SessionID,
+				mountID,
+				layout.MountPath,
+				fsPeer,
+				attempt.MountReadOnly); err != nil {
 				_ = enc.Encode(protocol.Frame{Type: protocol.TypeCommandError, ID: attempt.ID, Error: err.Error()})
 				return
 			}
@@ -485,7 +540,9 @@ func (s *Server) pickClient(contextID, sessionID, capability string) *clientConn
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, client := range s.clients {
-		if (sessionID == "" || client.sessionID == sessionID) && (contextID == "" || client.contextID == contextID) && (capability == "" || client.capabilities[capability]) {
+		if (sessionID == "" || client.sessionID == sessionID) &&
+			(contextID == "" || client.contextID == contextID) &&
+			(capability == "" || client.capabilities[capability]) {
 			return client
 		}
 	}
@@ -529,13 +586,27 @@ func (c *clientConn) readLoop(s *Server) {
 		switch frame.Type {
 		case protocol.TypeHeartbeat:
 			if !protocol.FrameCompatible(frame) || frame.RuntimeID != identity.RuntimeID {
-				_ = c.send(protocol.Frame{Type: protocol.TypeServerDrain, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, AppVersion: s.Version, Error: "sshx runtime protocol is incompatible"})
+				_ = c.send(protocol.Frame{
+					Type:        protocol.TypeServerDrain,
+					ProtocolMin: protocol.MinVersion,
+					ProtocolMax: protocol.MaxVersion,
+					RuntimeID:   identity.RuntimeID,
+					AppVersion:  s.Version,
+					Error:       "sshx runtime protocol is incompatible"})
 				return
 			}
 			c.pendingMu.Lock()
 			c.lastSeen = time.Now()
 			c.pendingMu.Unlock()
-			if err := c.send(protocol.Frame{Type: protocol.TypeHeartbeatAck, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, RuntimeID: identity.RuntimeID, AppVersion: s.Version, SessionID: frame.SessionID, Sequence: frame.Sequence}); err != nil {
+			if err := c.send(protocol.Frame{
+				Type:            protocol.TypeHeartbeatAck,
+				ProtocolVersion: protocol.Version,
+				ProtocolMin:     protocol.MinVersion,
+				ProtocolMax:     protocol.MaxVersion,
+				RuntimeID:       identity.RuntimeID,
+				AppVersion:      s.Version,
+				SessionID:       frame.SessionID,
+				Sequence:        frame.Sequence}); err != nil {
 				return
 			}
 		case protocol.TypeCommandResult, protocol.TypeCommandError:

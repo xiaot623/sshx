@@ -33,7 +33,10 @@ func OpenRootBackend(path string) (*RootBackend, error) {
 	return OpenRootBackendWithOptions(path, RootBackendOptions{})
 }
 
-func OpenRootBackendWithOptions(path string, options RootBackendOptions, excludedPaths ...string) (*RootBackend, error) {
+func OpenRootBackendWithOptions(
+	path string,
+	options RootBackendOptions,
+	excludedPaths ...string) (*RootBackend, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err

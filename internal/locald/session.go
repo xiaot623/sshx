@@ -23,7 +23,11 @@ type Session struct {
 	ListenIP string
 }
 
-func OpenSession(ctx context.Context, socketPath string, req Request, heartbeatInterval time.Duration) (*Session, error) {
+func OpenSession(
+	ctx context.Context,
+	socketPath string,
+	req Request,
+	heartbeatInterval time.Duration) (*Session, error) {
 	leaseID := requestLeaseID(req)
 	if leaseID == "" {
 		return nil, errors.New("leaseId is required")
@@ -67,7 +71,12 @@ func OpenSession(ctx context.Context, socketPath string, req Request, heartbeatI
 	return s, nil
 }
 
-func (s *Session) heartbeatLoop(ctx context.Context, enc *json.Encoder, dec *json.Decoder, req Request, interval time.Duration) {
+func (s *Session) heartbeatLoop(
+	ctx context.Context,
+	enc *json.Encoder,
+	dec *json.Decoder,
+	req Request,
+	interval time.Duration) {
 	defer close(s.done)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -79,14 +88,26 @@ func (s *Session) heartbeatLoop(ctx context.Context, enc *json.Encoder, dec *jso
 			return
 		case <-ticker.C:
 			sequence++
-			heartbeat := Request{Type: TypeHeartbeat, LeaseID: req.LeaseID, AppVersion: req.AppVersion, RuntimeID: identity.LocalRuntimeID, ProtocolVersion: protocol.Version, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, Sequence: sequence}
+			heartbeat := Request{
+				Type:            TypeHeartbeat,
+				LeaseID:         req.LeaseID,
+				AppVersion:      req.AppVersion,
+				RuntimeID:       identity.LocalRuntimeID,
+				ProtocolVersion: protocol.Version,
+				ProtocolMin:     protocol.MinVersion,
+				ProtocolMax:     protocol.MaxVersion,
+				Sequence:        sequence}
 			if err := enc.Encode(heartbeat); err != nil {
 				_ = s.conn.Close()
 				return
 			}
 			_ = s.conn.SetReadDeadline(time.Now().Add(DefaultLeaseTimeout))
 			var resp Response
-			if err := dec.Decode(&resp); err != nil || !resp.OK || resp.Type != TypeHeartbeatAck || resp.Sequence != sequence || !responseCompatible(resp) {
+			if err := dec.Decode(&resp); err != nil ||
+				!resp.OK ||
+				resp.Type != TypeHeartbeatAck ||
+				resp.Sequence != sequence ||
+				!responseCompatible(resp) {
 				_ = s.conn.Close()
 				return
 			}
@@ -96,7 +117,10 @@ func (s *Session) heartbeatLoop(ctx context.Context, enc *json.Encoder, dec *jso
 }
 
 func responseCompatible(resp Response) bool {
-	frame := protocol.Frame{ProtocolVersion: resp.ProtocolVersion, ProtocolMin: resp.ProtocolMin, ProtocolMax: resp.ProtocolMax}
+	frame := protocol.Frame{
+		ProtocolVersion: resp.ProtocolVersion,
+		ProtocolMin:     resp.ProtocolMin,
+		ProtocolMax:     resp.ProtocolMax}
 	return protocol.FrameCompatible(frame) && resp.RuntimeID == identity.LocalRuntimeID
 }
 

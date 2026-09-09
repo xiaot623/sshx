@@ -176,7 +176,11 @@ func (n *fuseNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrO
 	return 0
 }
 
-func (n *fuseNode) Setattr(ctx context.Context, file fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+func (n *fuseNode) Setattr(
+	ctx context.Context,
+	file fs.FileHandle,
+	in *fuse.SetAttrIn,
+	out *fuse.AttrOut) syscall.Errno {
 	var change SetAttr
 	if mode, ok := in.GetMode(); ok {
 		change.Mode = &mode
@@ -217,7 +221,11 @@ func (n *fuseNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	return &fuseFile{state: n.state, handle: handle}, 0, 0
 }
 
-func (n *fuseNode) Create(ctx context.Context, name string, flags, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+func (n *fuseNode) Create(
+	ctx context.Context,
+	name string,
+	flags, mode uint32,
+	out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	path := filepath.Join(n.relPath(), name)
 	openFlags, err := portableOpenFlags(flags)
 	if err != nil {
@@ -291,7 +299,12 @@ func (n *fuseNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	return errnoOf(n.state.backend.Rmdir(ctx, filepath.Join(n.relPath(), name)))
 }
 
-func (n *fuseNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+func (n *fuseNode) Rename(
+	ctx context.Context,
+	name string,
+	newParent fs.InodeEmbedder,
+	newName string,
+	flags uint32) syscall.Errno {
 	if flags != 0 {
 		return syscall.ENOTSUP
 	}
@@ -306,7 +319,11 @@ func (n *fuseNode) Rename(ctx context.Context, name string, newParent fs.InodeEm
 	))
 }
 
-func (n *fuseNode) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (n *fuseNode) Link(
+	ctx context.Context,
+	target fs.InodeEmbedder,
+	name string,
+	out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	oldNode, ok := target.(*fuseNode)
 	if !ok {
 		return nil, syscall.EXDEV

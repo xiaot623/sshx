@@ -174,7 +174,13 @@ func (m *Manager) abandon(f *Forward) {
 	f.listener = nil
 }
 
-func (m *Manager) controlOp(ctx context.Context, sshPath string, sshArgs []string, controlPath, operation, spec string) error {
+func (m *Manager) controlOp(
+	ctx context.Context,
+	sshPath string,
+	sshArgs []string,
+	controlPath,
+	operation,
+	spec string) error {
 	args := ControlOperationArgs(sshArgs, controlPath, operation, "L", spec)
 	output, err := m.execControl(ctx, sshPath, args)
 	if err != nil {

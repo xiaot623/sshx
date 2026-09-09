@@ -49,7 +49,11 @@ func Connect(ctx context.Context, conn io.ReadWriteCloser, sessionID, token stri
 	if sessionID == "" {
 		return nil, errors.New("remote fs sessionId is required")
 	}
-	if err := writeWireFrame(conn, wireFrame{Type: frameHello, Version: ProtocolVersion, SessionID: sessionID, Token: token}); err != nil {
+	if err := writeWireFrame(conn, wireFrame{
+		Type: frameHello,
+		Version: ProtocolVersion,
+		SessionID: sessionID,
+		Token: token}); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -72,7 +76,11 @@ func Connect(ctx context.Context, conn io.ReadWriteCloser, sessionID, token stri
 	return startPeer(ctx, conn, sessionID, opts, 1), nil
 }
 
-func Accept(ctx context.Context, conn io.ReadWriteCloser, validate func(sessionID, token string) error, opts PeerOptions) (*Peer, error) {
+func Accept(
+	ctx context.Context,
+	conn io.ReadWriteCloser,
+	validate func(sessionID, token string) error,
+	opts PeerOptions) (*Peer, error) {
 	hello, err := readWireFrame(conn)
 	if err != nil {
 		_ = conn.Close()
@@ -84,7 +92,10 @@ func Accept(ctx context.Context, conn io.ReadWriteCloser, validate func(sessionI
 		return nil, errors.New("invalid remote fs hello")
 	}
 	if hello.Version != ProtocolVersion {
-		_ = writeWireFrame(conn, wireFrame{Type: frameResponse, Version: ProtocolVersion, Error: "remote fs protocol version changed"})
+		_ = writeWireFrame(conn, wireFrame{
+			Type: frameResponse,
+			Version: ProtocolVersion,
+			Error: "remote fs protocol version changed"})
 		_ = conn.Close()
 		return nil, errors.New("remote fs protocol version changed")
 	}
@@ -95,14 +106,22 @@ func Accept(ctx context.Context, conn io.ReadWriteCloser, validate func(sessionI
 			return nil, err
 		}
 	}
-	if err := writeWireFrame(conn, wireFrame{Type: frameHelloOK, Version: ProtocolVersion, SessionID: hello.SessionID}); err != nil {
+	if err := writeWireFrame(conn, wireFrame{
+		Type: frameHelloOK,
+		Version: ProtocolVersion,
+		SessionID: hello.SessionID}); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
 	return startPeer(ctx, conn, hello.SessionID, opts, 0), nil
 }
 
-func startPeer(ctx context.Context, conn io.ReadWriteCloser, sessionID string, opts PeerOptions, requestIDBase uint64) *Peer {
+func startPeer(
+	ctx context.Context,
+	conn io.ReadWriteCloser,
+	sessionID string,
+	opts PeerOptions,
+	requestIDBase uint64) *Peer {
 	p := &Peer{
 		conn:      conn,
 		sessionID: sessionID,
@@ -171,8 +190,15 @@ func (p *Peer) UnregisterBackend(mountID string) error {
 	return backend.CloseBackend()
 }
 
-func (p *Peer) CreateMountAtWithOptions(ctx context.Context, mountID, mountPath string, options MountOptions) (string, error) {
-	response, err := p.request(ctx, wireFrame{MountID: mountID, MountPath: mountPath, ReadOnly: options.ReadOnly, Op: "mount.create"})
+func (p *Peer) CreateMountAtWithOptions(
+	ctx context.Context,
+	mountID, mountPath string,
+	options MountOptions) (string, error) {
+	response, err := p.request(ctx, wireFrame{
+		MountID: mountID,
+		MountPath: mountPath,
+		ReadOnly: options.ReadOnly,
+		Op: "mount.create"})
 	if err != nil {
 		return "", err
 	}
@@ -309,7 +335,11 @@ func (p *Peer) readLoop(ctx context.Context) {
 					p.sendResponse(response)
 				}(frame)
 			default:
-				p.sendResponse(wireFrame{Type: frameResponse, ID: frame.ID, ErrorCode: ErrorBusy, Error: "too many remote fs requests"})
+				p.sendResponse(wireFrame{
+					Type: frameResponse,
+					ID: frame.ID,
+					ErrorCode: ErrorBusy,
+					Error: "too many remote fs requests"})
 			}
 		default:
 			p.close(fmt.Errorf("unexpected remote fs frame %q", frame.Type))

@@ -226,7 +226,11 @@ func RuntimeHomeID(targetID string) string {
 	return digest("runtime-home", targetID, RuntimeID)
 }
 
-func NewConnection(ctx context.Context, installPath, sshPath string, args []string, profile string) (Connection, error) {
+func NewConnection(
+	ctx context.Context,
+	installPath, sshPath string,
+	args []string,
+	profile string) (Connection, error) {
 	install, err := EnsureInstall(installPath)
 	if err != nil {
 		return Connection{}, err
