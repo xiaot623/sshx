@@ -87,7 +87,7 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 		connection.ContextID = identity.ContextID("direct", connection.TargetID, "cli")
 	}
 	if connection.SessionID == "" {
-		connection.SessionID, err = generateUUID()
+		connection.SessionID, err = identity.UUID()
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +187,13 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			}
 		}()
 	}
-	muxSession := sshmux.New(controlProxy.conn)
+	muxSession, err := sshmux.NewClient(controlProxy.conn)
+	if err != nil {
+		cancel()
+		closeLifecycle()
+		controlProxy.stop()
+		return nil, err
+	}
 	readyCh := make(chan error, 1)
 	errCh := make(chan error, 1)
 	var fsMu sync.RWMutex

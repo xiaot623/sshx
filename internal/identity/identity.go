@@ -2,7 +2,6 @@ package identity
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,11 +14,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
 	ContextABI     = "context-v1"
-	RuntimeID      = "bridge-v1.mux-v1.remotefs-v3"
+	RuntimeID      = "bridge-v1.mux-v2.remotefs-v3"
 	LocalRuntimeID = "locald-v1.forward-v1"
 )
 
@@ -100,7 +101,7 @@ func readInstall(path string) (Install, error) {
 	if err := json.Unmarshal(b, &install); err != nil {
 		return Install{}, fmt.Errorf("decode client install identity: %w", err)
 	}
-	if !validUUID(install.ID) {
+	if err := uuid.Validate(install.ID); err != nil {
 		return Install{}, errors.New("client install identity is invalid")
 	}
 	return install, nil
@@ -252,14 +253,11 @@ func NewConnection(
 }
 
 func UUID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	id, err := uuid.NewRandom()
+	if err != nil {
 		return "", err
 	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	s := hex.EncodeToString(b[:])
-	return s[0:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:32], nil
+	return id.String(), nil
 }
 
 func digest(parts ...string) string {
@@ -269,24 +267,6 @@ func digest(parts ...string) string {
 		_, _ = h.Write([]byte(part))
 	}
 	return hex.EncodeToString(h.Sum(nil))[:32]
-}
-
-func validUUID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for i, r := range value {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if r != '-' {
-				return false
-			}
-			continue
-		}
-		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
-			return false
-		}
-	}
-	return true
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
