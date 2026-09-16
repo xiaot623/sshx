@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -182,9 +181,13 @@ func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target 
 }
 
 func (r *Runner) startDockerBridge(ctx context.Context, container string, remoteHome string) (func(), error) {
-	token, err := r.fetchDockerToken(ctx, container, remoteHome)
-	if err != nil {
-		return nil, err
+	token := r.remoteToken
+	var err error
+	if token == "" {
+		token, err = r.fetchDockerToken(ctx, container, remoteHome)
+		if err != nil {
+			return nil, err
+		}
 	}
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(
@@ -257,15 +260,11 @@ func (r *Runner) startDockerBridge(ctx context.Context, container string, remote
 }
 
 func (r *Runner) fetchDockerToken(ctx context.Context, container string, remoteHome string) (string, error) {
-	b, err := r.ExecOutput(ctx, r.DockerPath, dockerInternalExecArgs(container, dockerShell(remoteServerEnvScript(remoteHome)+"; cat \"$SSHX_SERVER_HOME/server-info\"")...))
+	b, err := r.ExecOutput(ctx, r.DockerPath, dockerInternalExecArgs(container, dockerShell(readServerInfoScript(remoteHome))...))
 	if err != nil {
 		return "", err
 	}
-	var info bridge.ServerInfo
-	if err := json.Unmarshal(b, &info); err != nil {
-		return "", err
-	}
-	return info.Token, nil
+	return parseServerInfoToken(b)
 }
 
 func (r *Runner) execDockerWithTimeout(ctx context.Context, args []string, timeout time.Duration) int {

@@ -251,15 +251,16 @@ func (s *Server) monitorLeases(ctx context.Context) {
 			}
 			s.mu.Lock()
 			empty := len(s.clients) == 0
+			occupied := len(s.connections) > 0
 			lastActive := s.lastActive
 			everHad := s.everHadClient
 			s.mu.Unlock()
-			shouldDrain := empty &&
+			shouldDrain := empty && !occupied &&
 				((everHad && now.Sub(lastActive) >= s.DrainTimeout) ||
 					(!everHad && now.Sub(lastActive) >= s.StartupTimeout))
 			if shouldDrain {
 				s.mu.Lock()
-				shouldDrain = len(s.clients) == 0
+				shouldDrain = len(s.clients) == 0 && len(s.connections) == 0
 				if shouldDrain {
 					s.draining = true
 				}

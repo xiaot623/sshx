@@ -31,9 +31,37 @@ func sameVersionRemoteProbe() []byte {
 	return []byte("Linux\nx86_64\n" + identity.RuntimeID + "\n1\n")
 }
 
+func testTokenJSON() []byte {
+	return []byte("{\"token\":\"test-token\"}\n")
+}
+
+func testRemoteOutput(_ context.Context, _ string, args []string) ([]byte, error) {
+	if strings.Contains(strings.Join(args, " "), "uname -s") {
+		return sameVersionRemoteProbe(), nil
+	}
+	return testTokenJSON(), nil
+}
+
 func isolateHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+}
+
+func requireControlSlave(t *testing.T, args []string) {
+	t.Helper()
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "ControlMaster=no") || !strings.Contains(joined, "-S ") {
+		t.Fatalf("missing control slave options: %s", joined)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestLocalIsReservedWithoutBridgeSocket(t *testing.T) {
@@ -201,6 +229,17 @@ func TestSessionSSHArgsInjectsRemoteHomeForInteractiveShell(t *testing.T) {
 	}
 }
 
+func TestSessionSSHArgsInjectsControlPath(t *testing.T) {
+	parsed := sshcompat.Parse([]string{"-p", "2222", "debian"})
+	got := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/test-id", &BridgeSession{ControlPath: "/tmp/sshx-master"})
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"ControlMaster=no", "-S /tmp/sshx-master", "-p 2222", "debian"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %#v", got)
+		}
+	}
+}
+
 func TestSessionSSHArgsDoesNotWrapSessionlessSSH(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"-N", "debian"})
 	got := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/test-id", nil)
@@ -319,8 +358,12 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	var uploaded []byte
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
-	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\naarch64\n\n1\n"), nil
+	r.ExecOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "uname -s") {
+			return []byte("Linux\naarch64\n\n1\n"), nil
+		}
+		return testTokenJSON(), nil
 	}
 	r.DownloadBinary = func(_ context.Context, targetVersion, assetName string) (string, error) {
 		downloadedVersion = targetVersion
@@ -350,15 +393,11 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	if string(uploaded) != "binary-data" {
 		t.Fatalf("uploaded = %q", uploaded)
 	}
-	if len(execCalls) != 3 {
+	if len(execCalls) != 1 {
 		t.Fatalf("exec calls = %#v", execCalls)
 	}
 	if !strings.Contains(strings.Join(execCalls[0].args, " "), "kill") {
 		t.Fatalf("stop args = %#v", execCalls[0].args)
-	}
-	if !strings.Contains(strings.Join(execCalls[1].args, " "), "SSHX_SERVER_HOME") ||
-		!strings.Contains(strings.Join(execCalls[1].args, " "), ".sshx_server/runtimes/"+identity.RuntimeHomeID("client-remote")) {
-		t.Fatalf("start args = %#v", execCalls[1].args)
 	}
 }
 
@@ -369,9 +408,7 @@ func TestEnsureRemoteServerKeepsCompatibleRuntimeAcrossAppVersions(t *testing.T)
 
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
-	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\nx86_64\n" + identity.RuntimeID + "\n1\n"), nil
-	}
+	r.ExecOutput = testRemoteOutput
 	r.DownloadBinary = func(context.Context, string, string) (string, error) {
 		t.Fatal("binary should not be downloaded when installed binary already matches")
 		return "", nil
@@ -394,6 +431,48 @@ func TestStopServerScriptHasValidShellSyntax(t *testing.T) {
 	cmd := exec.Command("sh", "-n", "-c", stopServerScript(remoteServerHome("client-remote")))
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("shell syntax: %v: %s", err, output)
+	}
+}
+
+func TestStartAndReadServerInfoScriptHasValidShellSyntax(t *testing.T) {
+	script := startAndReadServerInfoScript(remoteServerHome("client-remote"), serverBootstrapOptions{})
+	if output, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("shell syntax: %v: %s", err, output)
+	}
+	if !strings.Contains(script, "server-info") || !strings.Contains(script, "nohup") {
+		t.Fatalf("start script = %q", script)
+	}
+}
+
+func TestEnsureRemoteServerAllowsSlowTransport(t *testing.T) {
+	old := version.Version
+	version.Version = "1.2.3"
+	t.Cleanup(func() { version.Version = old })
+
+	delay := 6 * time.Second
+	var outputCalls int
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		time.Sleep(delay)
+		outputCalls++
+		if outputCalls == 1 {
+			return []byte("Linux\nx86_64\n" + identity.RuntimeID + "\n0\n"), nil
+		}
+		return testTokenJSON(), nil
+	}
+	r.Exec = func(context.Context, string, []string) error {
+		t.Fatal("start should not use a separate exec after probe")
+		return nil
+	}
+	start := time.Now()
+	if err := r.ensureRemoteServer(context.Background(), []string{"remote"}, config.Features{CommandBridge: true}, remoteServerHome("client-remote")); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < 12*time.Second {
+		t.Fatal("expected slow probe and start output calls")
+	}
+	if r.remoteToken != "test-token" {
+		t.Fatalf("token = %q", r.remoteToken)
 	}
 }
 
@@ -608,9 +687,7 @@ features:
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
 	r.EnsureResolver = func(context.Context) error { return nil }
-	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return sameVersionRemoteProbe(), nil
-	}
+	r.ExecOutput = testRemoteOutput
 	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
 		bridgeStarted = true
 		return &BridgeSession{SessionID: "test", stop: func() {}}, nil
@@ -643,9 +720,7 @@ features:
 	var delegated []string
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
-	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return sameVersionRemoteProbe(), nil
-	}
+	r.ExecOutput = testRemoteOutput
 	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
 		bridgeStarted = true
 		return &BridgeSession{
@@ -686,9 +761,7 @@ features:
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
 	r.ConfigPath = configPath
 	r.EnsureResolver = func(context.Context) error { return nil }
-	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return sameVersionRemoteProbe(), nil
-	}
+	r.ExecOutput = testRemoteOutput
 	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
 		return &BridgeSession{SessionID: "test", stop: func() {}}, nil
 	}
@@ -724,8 +797,11 @@ features:
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
 	r.ExecOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
-		probeArgs = append([]string(nil), args...)
-		return sameVersionRemoteProbe(), nil
+		if strings.Contains(strings.Join(args, " "), "uname -s") {
+			probeArgs = append([]string(nil), args...)
+			return sameVersionRemoteProbe(), nil
+		}
+		return testTokenJSON(), nil
 	}
 	r.StartBridge = func(_ context.Context, _ string, sshArgs []string, remoteHome string) (*BridgeSession, error) {
 		bridgeArgs = append([]string(nil), sshArgs...)
@@ -742,30 +818,31 @@ features:
 	if code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	wantBase := []string{"-p", "2222", "-J", "jump", "remote"}
-	if !reflect.DeepEqual(bridgeArgs, wantBase) {
-		t.Fatalf("bridge args = %#v, want %#v", bridgeArgs, wantBase)
+	requireControlSlave(t, bridgeArgs)
+	for _, want := range []string{"-p 2222", "-J jump", "remote"} {
+		if !strings.Contains(strings.Join(bridgeArgs, " "), want) {
+			t.Fatalf("bridge args = %#v", bridgeArgs)
+		}
 	}
 	if len(calls) != 1 {
 		t.Fatalf("calls = %#v", calls)
 	}
-	wantInternal := []string{"-n", "-p", "2222", "-J", "jump", "-T", "remote"}
-	if !reflect.DeepEqual(probeArgs[:len(wantInternal)], wantInternal) {
+	requireControlSlave(t, probeArgs)
+	joinedProbe := strings.Join(probeArgs, " ")
+	for _, want := range []string{"-n", "-p 2222", "-J jump", "-T", "remote"} {
+		if !strings.Contains(joinedProbe, want) {
+			t.Fatalf("internal ssh args = %#v", probeArgs)
+		}
+	}
+	if !strings.HasPrefix(probeArgs[len(probeArgs)-1], "sh -lc ") {
 		t.Fatalf("internal ssh args = %#v", probeArgs)
 	}
-	if len(probeArgs) != len(wantInternal)+1 || !strings.HasPrefix(probeArgs[len(probeArgs)-1], "sh -lc ") {
-		t.Fatalf("internal ssh args = %#v", probeArgs)
-	}
-	if !reflect.DeepEqual(calls[0].args[:len(wantBase)], wantBase) {
-		t.Fatalf("delegated ssh args = %#v", calls[0].args)
-	}
-	if len(calls[0].args) != len(wantBase)+1 ||
-		!strings.Contains(calls[0].args[len(calls[0].args)-1], "SSHX_SERVER_HOME") ||
-		!strings.Contains(calls[0].args[len(calls[0].args)-1], "bash)") ||
-		!strings.Contains(calls[0].args[len(calls[0].args)-1], "zsh)") ||
-		!strings.Contains(calls[0].args[len(calls[0].args)-1], "-ic") ||
-		!strings.Contains(calls[0].args[len(calls[0].args)-1], "uname") {
-		t.Fatalf("delegated ssh args = %#v", calls[0].args)
+	requireControlSlave(t, calls[0].args)
+	delegated := strings.Join(calls[0].args, " ")
+	for _, want := range []string{"-p 2222", "-J jump", "remote", "SSHX_SERVER_HOME", "bash)", "zsh)", "-ic", "uname"} {
+		if !strings.Contains(delegated, want) {
+			t.Fatalf("delegated ssh args = %#v", calls[0].args)
+		}
 	}
 }
 
@@ -783,8 +860,11 @@ features:
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ConfigPath = configPath
 	r.ExecOutput = func(_ context.Context, _ string, args []string) ([]byte, error) {
-		probeArgs = append([]string(nil), args...)
-		return sameVersionRemoteProbe(), nil
+		if strings.Contains(strings.Join(args, " "), "uname -s") {
+			probeArgs = append([]string(nil), args...)
+			return sameVersionRemoteProbe(), nil
+		}
+		return testTokenJSON(), nil
 	}
 	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
 		return &BridgeSession{SessionID: "test", stop: func() {}}, nil
@@ -803,12 +883,13 @@ features:
 	if strings.Contains(strings.Join(probeArgs, " "), "local uname") {
 		t.Fatalf("internal ssh args included quoted remote command: %#v", probeArgs)
 	}
-	if !reflect.DeepEqual(calls[0].args[:1], []string{"remote"}) {
+	requireControlSlave(t, calls[0].args)
+	if !containsArg(calls[0].args, "remote") {
 		t.Fatalf("delegated ssh args = %#v", calls[0].args)
 	}
-	if len(calls[0].args) != 2 ||
-		!strings.Contains(calls[0].args[1], "SSHX_SERVER_HOME") ||
-		!strings.Contains(calls[0].args[1], "custom-wrapper local uname -s") {
+	command := calls[0].args[len(calls[0].args)-1]
+	if !strings.Contains(command, "SSHX_SERVER_HOME") ||
+		!strings.Contains(command, "custom-wrapper local uname -s") {
 		t.Fatalf("delegated ssh args = %#v", calls[0].args)
 	}
 }
@@ -1192,4 +1273,39 @@ func itoa(v int) string {
 		v /= 10
 	}
 	return string(b[i:])
+}
+
+func TestDialUnixRetryWaitsForSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sock")
+	errCh := make(chan error, 1)
+	var conn net.Conn
+	go func() {
+		var err error
+		conn, err = dialUnixRetry(context.Background(), nil, path, time.Second)
+		errCh <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			_ = c.Close()
+		}
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+		if conn != nil {
+			_ = conn.Close()
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dial did not succeed after socket appeared")
+	}
 }

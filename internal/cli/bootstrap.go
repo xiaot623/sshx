@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"strings"
-	"time"
 
+	"github.com/xiaot623/sshx/internal/bridge"
 	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/identity"
 )
@@ -36,10 +38,15 @@ func (p remoteProbe) AssetName() string {
 }
 
 func (r *Runner) ensureRemoteServer(ctx context.Context, sshArgs []string, features config.Features, remoteHome string) error {
-	return r.ensureBootstrappedServer(ctx, remoteHome, sshServerTransport{r: r, sshArgs: sshArgs}, serverBootstrapOptions{
+	token, err := r.ensureBootstrappedServer(ctx, remoteHome, sshServerTransport{r: r, sshArgs: sshArgs}, serverBootstrapOptions{
 		Enabled:         features.Enabled(),
 		DisablePortScan: !features.AutoForward,
 	})
+	if err != nil {
+		return err
+	}
+	r.remoteToken = token
+	return nil
 }
 
 func (r *Runner) ensureRemoteContextLauncher(ctx context.Context, sshArgs []string, connection identity.Connection, remoteHome string, remoteFS bool) error {
@@ -86,47 +93,67 @@ func (r *Runner) ensureRemoteContextLauncher(ctx context.Context, sshArgs []stri
 }
 
 func (r *Runner) ensureDockerServer(ctx context.Context, container string, features config.Features, remoteHome string) error {
-	return r.ensureBootstrappedServer(ctx, remoteHome, dockerServerTransport{r: r, container: container}, serverBootstrapOptions{
+	token, err := r.ensureBootstrappedServer(ctx, remoteHome, dockerServerTransport{r: r, container: container}, serverBootstrapOptions{
 		Enabled:         features.CommandBridge,
 		DisablePortScan: true,
 	})
+	if err != nil {
+		return err
+	}
+	r.remoteToken = token
+	return nil
 }
 
-func (r *Runner) ensureBootstrappedServer(ctx context.Context, remoteHome string, transport serverBootstrapTransport, opts serverBootstrapOptions) error {
+func (r *Runner) ensureBootstrappedServer(ctx context.Context, remoteHome string, transport serverBootstrapTransport, opts serverBootstrapOptions) (string, error) {
 	if !opts.Enabled {
-		return nil
+		return "", nil
 	}
 	targetVersion := clientVersion()
 	probe, err := probeBootstrappedServer(ctx, transport, remoteHome)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if probe.Running && probe.RuntimeID == identity.RuntimeID {
-		return nil
+		return readBootstrappedToken(ctx, transport, remoteHome)
 	}
 	if probe.Running {
-		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		if err := transport.ExecScript(stopCtx, stopServerScript(remoteHome)); err != nil {
-			cancel()
-			return err
+		if err := transport.ExecScript(ctx, stopServerScript(remoteHome)); err != nil {
+			return "", err
 		}
-		cancel()
 	}
 	if probe.RuntimeID != identity.RuntimeID {
 		localBinary, err := r.DownloadBinary(ctx, targetVersion, probe.AssetName())
 		if err != nil {
-			return err
+			return "", err
 		}
 		if err := installBootstrappedBinary(ctx, transport, localBinary, remoteHome); err != nil {
-			return err
+			return "", err
 		}
 	}
-	startCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := transport.ExecScript(startCtx, startServerScript(remoteHome, opts)); err != nil {
-		return err
+	out, err := transport.OutputScript(ctx, startAndReadServerInfoScript(remoteHome, opts))
+	if err != nil {
+		return "", err
 	}
-	return transport.ExecScript(startCtx, verifyServerScript(remoteHome))
+	return parseServerInfoToken(out)
+}
+
+func readBootstrappedToken(ctx context.Context, transport serverBootstrapTransport, remoteHome string) (string, error) {
+	out, err := transport.OutputScript(ctx, readServerInfoScript(remoteHome))
+	if err != nil {
+		return "", err
+	}
+	return parseServerInfoToken(out)
+}
+
+func parseServerInfoToken(out []byte) (string, error) {
+	var info bridge.ServerInfo
+	if err := json.Unmarshal(out, &info); err != nil {
+		return "", err
+	}
+	if info.Token == "" {
+		return "", errors.New("remote server-info is missing a token")
+	}
+	return info.Token, nil
 }
 
 func probeBootstrappedServer(ctx context.Context, transport serverBootstrapTransport, remoteHome string) (remoteProbe, error) {
@@ -232,11 +259,14 @@ func stopServerScript(remoteHome string) string {
 	}, "; ")
 }
 
-func verifyServerScript(remoteHome string) string {
-	return strings.Join([]string{
-		remoteServerEnvScript(remoteHome),
+func startAndReadServerInfoScript(remoteHome string, opts serverBootstrapOptions) string {
+	return startServerScript(remoteHome, opts) + "\n" + strings.Join([]string{
 		"i=0",
-		"while [ $i -lt 20 ]; do test -S \"$SSHX_SERVER_HOME/sock\" && test -f \"$SSHX_SERVER_HOME/server-info\" && exit 0; i=$((i+1)); sleep 0.1; done",
+		"while [ $i -lt 20 ]; do if test -S \"$SSHX_SERVER_HOME/sock\" && test -f \"$SSHX_SERVER_HOME/server-info\"; then cat \"$SSHX_SERVER_HOME/server-info\"; exit 0; fi; i=$((i+1)); sleep 0.1; done",
 		"exit 1",
 	}, "; ")
+}
+
+func readServerInfoScript(remoteHome string) string {
+	return remoteServerEnvScript(remoteHome) + "; cat \"$SSHX_SERVER_HOME/server-info\""
 }

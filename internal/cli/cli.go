@@ -16,16 +16,17 @@ import (
 )
 
 type BridgeSession struct {
-	SessionID string
-	ContextID string
-	RemoteFS  bool
-	MountRoot string
-	Workspace string
-	ReadOnly  bool
-	ProxyURL  string
-	Done      <-chan struct{}
-	stop      func()
-	stopOnce  sync.Once
+	SessionID   string
+	ContextID   string
+	RemoteFS    bool
+	MountRoot   string
+	Workspace   string
+	ReadOnly    bool
+	ProxyURL    string
+	ControlPath string
+	Done        <-chan struct{}
+	stop        func()
+	stopOnce    sync.Once
 }
 
 func (s *BridgeSession) Stop() {
@@ -59,19 +60,20 @@ type Runner struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
-	InvocationPath  string
-	SSHPath         string
-	DockerPath      string
-	SSHConfigPath   string
-	ConfigPath      string
-	Exec            func(context.Context, string, []string) error
-	ExecInput       func(context.Context, string, []string, io.Reader) error
-	ExecOutput      func(context.Context, string, []string) ([]byte, error)
-	ExecCombined    func(context.Context, string, []string) ([]byte, error)
-	DownloadBinary  func(context.Context, string, string) (string, error)
-	StartBridge     func(context.Context, string, []string, string) (*BridgeSession, error)
-	EnsureResolver  func(context.Context) error
-	ResolveIdentity func(context.Context, string, []string, string) (identity.Connection, error)
+	InvocationPath     string
+	SSHPath            string
+	DockerPath         string
+	SSHConfigPath      string
+	ConfigPath         string
+	Exec               func(context.Context, string, []string) error
+	ExecInput          func(context.Context, string, []string, io.Reader) error
+	ExecOutput         func(context.Context, string, []string) ([]byte, error)
+	ExecCombined       func(context.Context, string, []string) ([]byte, error)
+	DownloadBinary     func(context.Context, string, string) (string, error)
+	StartBridge        func(context.Context, string, []string, string) (*BridgeSession, error)
+	StartControlMaster func(context.Context, []string, string) (func(), error)
+	EnsureResolver     func(context.Context) error
+	ResolveIdentity    func(context.Context, string, []string, string) (identity.Connection, error)
 
 	commandPolicy      config.CommandPolicy
 	commandBridge      bool
@@ -81,6 +83,8 @@ type Runner struct {
 	strict             bool
 	integrationSidecar bool
 	connection         identity.Connection
+	controlPath        string
+	remoteToken        string
 }
 
 func NewRunner(stdin io.Reader, stdout io.Writer, stderr io.Writer) *Runner {
@@ -225,6 +229,33 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			fmt.Fprintf(r.Stderr, "sshx: resolver setup skipped: %v\n", err)
 		}
 	}
+	if ownControlMaster(features.Enabled(), r.integrationSidecar) {
+		controlDir, controlPath, err := newControlPath(connection.SessionID)
+		if err != nil {
+			if cfg.Strict || features.RemoteFS {
+				fmt.Fprintf(r.Stderr, "sshx: control master unavailable for %s: %v\n", parsed.Target, err)
+				return 1
+			}
+			fmt.Fprintf(r.Stderr, "sshx: control master skipped: %v\n", err)
+		} else {
+			stopMaster, err := r.startControlMaster(ctx, sshArgs, controlPath)
+			if err != nil {
+				_ = os.RemoveAll(controlDir)
+				if cfg.Strict || features.RemoteFS {
+					fmt.Fprintf(r.Stderr, "sshx: control master unavailable for %s: %v\n", parsed.Target, err)
+					return 1
+				}
+				fmt.Fprintf(r.Stderr, "sshx: control master skipped: %v\n", err)
+			} else {
+				defer func() {
+					stopMaster()
+					_ = os.RemoveAll(controlDir)
+				}()
+				r.controlPath = controlPath
+				sshArgs = controlSlaveArgs(sshArgs, controlPath)
+			}
+		}
+	}
 	if err := r.ensureRemoteServer(ctx, sshArgs, features, remoteHome); err != nil {
 		if cfg.Strict || features.RemoteFS {
 			fmt.Fprintf(r.Stderr, "sshx: remote server unavailable for %s: %v\n", parsed.Target, err)
@@ -248,6 +279,9 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 		}
 		defer bridgeSession.Stop()
+		if bridgeSession.ControlPath == "" {
+			bridgeSession.ControlPath = r.controlPath
+		}
 		commandCtx, cancel := bridgeSession.CommandContext(ctx)
 		defer cancel()
 		return r.execSSHWithTimeout(commandCtx, sessionSSHArgsForBridge(parsed, remoteHome, bridgeSession), timeout)

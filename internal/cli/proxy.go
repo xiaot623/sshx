@@ -110,8 +110,8 @@ func parseAllocatedPort(output []byte) (int, error) {
 	return 0, fmt.Errorf("invalid allocated proxy port %q", strings.TrimSpace(string(output)))
 }
 
-func ownControlMaster(autoForward, useProxy, integrationSidecar bool) bool {
-	return !integrationSidecar && (autoForward || useProxy)
+func ownControlMaster(enhanced, integrationSidecar bool) bool {
+	return enhanced && !integrationSidecar
 }
 
 func controlMasterArgs(sshArgs []string, controlPath string) []string {
@@ -124,10 +124,36 @@ func controlMasterArgs(sshArgs []string, controlPath string) []string {
 	})
 }
 
+func controlMasterListenArgs(sshArgs []string, controlPath string) []string {
+	return sshcompat.InsertBeforeTarget(sshcompat.Parse(controlMasterArgs(sshArgs, controlPath)), []string{"-N"})
+}
+
+func controlSlaveArgs(sshArgs []string, controlPath string) []string {
+	parsed := sshcompat.Parse(forward.CleanSSHArgs(sshArgs))
+	return sshcompat.InsertBeforeTarget(parsed, []string{
+		"-o", "ControlMaster=no",
+		"-S", controlPath,
+		"-o", "ClearAllForwardings=yes",
+	})
+}
+
+func withControlSlave(args []string, controlPath string) []string {
+	if controlPath == "" {
+		return args
+	}
+	return sshcompat.InsertBeforeTarget(sshcompat.Parse(args), []string{
+		"-o", "ControlMaster=no",
+		"-S", controlPath,
+	})
+}
+
+func controlExitArgs(sshArgs []string, controlPath string) []string {
+	parsed := sshcompat.Parse(forward.CleanSSHArgs(sshArgs))
+	return sshcompat.InsertBeforeTarget(parsed, []string{"-S", controlPath, "-O", "exit"})
+}
+
 func waitForControlPath(ctx context.Context, path string) bool {
-	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	return waitForPath(waitCtx, path)
+	return waitForPath(ctx, path)
 }
 
 func integrationProxyEnvPath(contextHome, sessionID string) string {
