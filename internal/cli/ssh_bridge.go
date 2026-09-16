@@ -2,10 +2,10 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,9 +74,13 @@ func (p *sshProxy) stop() {
 }
 
 func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs []string, remoteHome string) (*BridgeSession, error) {
-	token, err := r.fetchRemoteToken(ctx, sshArgs, remoteHome)
-	if err != nil {
-		return nil, err
+	token := r.remoteToken
+	var err error
+	if token == "" {
+		token, err = r.fetchRemoteToken(ctx, sshArgs, remoteHome)
+		if err != nil {
+			return nil, err
+		}
 	}
 	localDaemonSocket := defaultLocalDaemonSocketPath()
 	connection := r.connection
@@ -95,23 +99,11 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	sessionID := connection.SessionID
 	bridgeSSHArgs := append([]string(nil), sshArgs...)
 	localSSHArgs := forward.CleanSSHArgs(sshArgs)
-	controlDir := ""
 	controlPath := sshControlPath(bridgeSSHArgs)
-	bridgeStarted := false
-	wantProxy := r.useProxy && !r.integrationSidecar
-	ownMaster := ownControlMaster(r.autoForward, r.useProxy, r.integrationSidecar)
-	if ownMaster {
-		controlDir, controlPath, err = newControlPath(sessionID)
-		if err != nil {
-			return nil, err
-		}
-		defer func() {
-			if controlDir != "" && !bridgeStarted {
-				_ = os.RemoveAll(controlDir)
-			}
-		}()
-		bridgeSSHArgs = controlMasterArgs(bridgeSSHArgs, controlPath)
+	if controlPath == "" {
+		controlPath = r.controlPath
 	}
+	wantProxy := r.useProxy && !r.integrationSidecar
 	if r.autoForward {
 		if err := r.ensureLocalDaemon(ctx, localDaemonSocket); err != nil {
 			return nil, err
@@ -139,27 +131,15 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 	}
 	var autoForwardStopped atomic.Bool
 	autoForward := r.autoForward
-	if ownMaster && !waitForControlPath(bridgeCtx, controlPath) {
-		err = errors.New("timed out waiting for control socket")
-		if wantProxy && !r.skipOptionalProxy(target, err) {
+	if wantProxy && controlPath == "" {
+		err = errors.New("proxy requires an OpenSSH control socket")
+		if !r.skipOptionalProxy(target, err) {
 			cancel()
 			closeLifecycle()
 			controlProxy.stop()
 			return nil, err
 		}
 		wantProxy = false
-		if autoForward {
-			fmt.Fprintf(r.Stderr, "sshx: auto-forward skipped for %s: %v\n", target, err)
-			autoForwardStopped.Store(true)
-			autoForward = false
-			controlPath = ""
-			if r.strict {
-				cancel()
-				closeLifecycle()
-				controlProxy.stop()
-				return nil, err
-			}
-		}
 	}
 	if autoForward {
 		localSession, err = locald.OpenSession(ctx, localDaemonSocket, locald.Request{
@@ -417,20 +397,16 @@ func (r *Runner) defaultStartBridge(ctx context.Context, target string, sshArgs 
 			_ = muxSession.Close()
 			closeLifecycle()
 			controlProxy.stop()
-			if controlDir != "" {
-				_ = os.RemoveAll(controlDir)
-			}
 			select {
 			case <-errCh:
 			default:
 			}
 		})
 	}
-	session := &BridgeSession{SessionID: sessionID, ContextID: connection.ContextID, RemoteFS: r.remoteFS, MountRoot: mountRoot, Workspace: workspace, ReadOnly: readOnly, Done: bridgeCtx.Done(), stop: stop}
+	session := &BridgeSession{SessionID: sessionID, ContextID: connection.ContextID, RemoteFS: r.remoteFS, MountRoot: mountRoot, Workspace: workspace, ReadOnly: readOnly, ControlPath: controlPath, Done: bridgeCtx.Done(), stop: stop}
 	if tunnel != nil {
 		session.ProxyURL = tunnel.environment.URL
 	}
-	bridgeStarted = true
 	return session, nil
 }
 
@@ -454,16 +430,72 @@ func sshControlPath(args []string) string {
 }
 
 func (r *Runner) fetchRemoteToken(ctx context.Context, sshArgs []string, remoteHome string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(remoteServerEnvScript(remoteHome)+"; cat \"$SSHX_SERVER_HOME/server-info\""))...)
+	cmd := exec.CommandContext(ctx, r.SSHPath, internalSSHArgs(sshArgs, remoteShell(readServerInfoScript(remoteHome)))...)
 	b, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
-	var info bridge.ServerInfo
-	if err := json.Unmarshal(b, &info); err != nil {
-		return "", err
+	return parseServerInfoToken(b)
+}
+
+func (r *Runner) startControlMaster(ctx context.Context, sshArgs []string, controlPath string) (func(), error) {
+	if r.StartControlMaster != nil {
+		stop, err := r.StartControlMaster(ctx, sshArgs, controlPath)
+		if err != nil {
+			return nil, err
+		}
+		if !waitForControlPath(ctx, controlPath) {
+			if stop != nil {
+				stop()
+			}
+			return nil, errors.New("OpenSSH control master did not become ready")
+		}
+		return stop, nil
 	}
-	return info.Token, nil
+	if r.execIsOverridden() {
+		return listenPlaceholderControlPath(controlPath)
+	}
+	args := controlMasterListenArgs(sshArgs, controlPath)
+	cmd := exec.Command(r.SSHPath, args...)
+	cmd.Stderr = r.Stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	if !waitForControlPath(ctx, controlPath) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, errors.New("OpenSSH control master did not become ready")
+	}
+	return func() {
+		exitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = r.Exec(exitCtx, r.SSHPath, controlExitArgs(sshArgs, controlPath))
+		_ = cmd.Wait()
+	}, nil
+}
+
+func (r *Runner) execIsOverridden() bool {
+	return fmt.Sprintf("%p", r.Exec) != fmt.Sprintf("%p", defaultExec)
+}
+
+func listenPlaceholderControlPath(controlPath string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(controlPath), 0o700); err != nil {
+		return nil, err
+	}
+	ln, err := net.Listen("unix", controlPath)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return func() { _ = ln.Close() }, nil
 }
 
 func (r *Runner) ensureLocalDaemon(ctx context.Context, socketPath string) error {

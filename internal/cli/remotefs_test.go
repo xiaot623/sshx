@@ -258,9 +258,7 @@ features:
 	stderr := &bytes.Buffer{}
 	runner := NewRunner(strings.NewReader(""), &bytes.Buffer{}, stderr)
 	runner.ConfigPath = configPath
-	runner.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return sameVersionRemoteProbe(), nil
-	}
+	runner.ExecOutput = testRemoteOutput
 	runner.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
 		return nil, errors.New("FUSE unavailable")
 	}

@@ -40,7 +40,11 @@ func sessionSSHArgsForBridge(parsed sshcompat.Parsed, remoteHome string, session
 		envLine = remoteBridgeEnvScript(remoteHome, session)
 		workspace = session.Workspace
 	}
-	return sessionSSHArgsWithEnv(parsed, envLine, workspace)
+	args := sessionSSHArgsWithEnv(parsed, envLine, workspace)
+	if session != nil {
+		args = withControlSlave(args, session.ControlPath)
+	}
+	return args
 }
 
 func sessionSSHArgsWithEnv(parsed sshcompat.Parsed, envLine, workspace string) []string {

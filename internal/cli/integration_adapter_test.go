@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaot623/sshx/internal/config"
 	"github.com/xiaot623/sshx/internal/identity"
 	"github.com/xiaot623/sshx/internal/integration"
 	"github.com/xiaot623/sshx/internal/sshcompat"
@@ -295,5 +297,67 @@ func TestAdapterReturnsWhenOpenSSHExitsWithoutReadingBootstrap(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("adapter remained blocked on gated bootstrap stdin after OpenSSH exited")
+	}
+}
+
+func TestIntegrationSidecarWaitsForControlSocket(t *testing.T) {
+	isolateHome(t)
+	controlDir, err := os.MkdirTemp("/tmp", "sshx-sidecar-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(controlDir) })
+	controlPath := filepath.Join(controlDir, "m")
+	probed := filepath.Join(t.TempDir(), "probed")
+
+	fakeSSH := filepath.Join(t.TempDir(), "ssh")
+	script := "#!/bin/sh\nprintf '%s\\n' probed > " + shellQuote(probed) + "\nexit 1\n"
+	if err := os.WriteFile(fakeSSH, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	cfg := config.Config{Features: config.Features{CommandBridge: true}}
+	connection := identity.Connection{
+		TargetID:  "target",
+		ContextID: "context",
+		SessionID: "12345678-1234-4234-8234-123456789abc",
+	}
+	descriptor := integration.Descriptor{SSHPath: fakeSSH, Profile: integration.VSCode}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.runIntegrationSidecar(ctx, descriptor, cfg, connection, "host", []string{"host"}, remoteServerHome("target"), controlPath)
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	if _, err := os.Stat(probed); err == nil {
+		t.Fatal("sidecar probed before the control socket existed")
+	}
+
+	ln, err := net.Listen("unix", controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(probed); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sidecar did not probe after the control socket appeared")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sidecar did not return")
 	}
 }

@@ -276,6 +276,32 @@ func TestServerExitsAfterIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestServerStaysUpWhileUnixConnectionIsOpen(t *testing.T) {
+	ctx := context.Background()
+	socket := shortSocketPath(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (&Server{SocketPath: socket, StartupTimeout: 40 * time.Millisecond}).Serve(ctx)
+	}()
+	waitForSocket(t, socket)
+	conn := mustDialUnix(t, socket)
+	select {
+	case err := <-errCh:
+		_ = conn.Close()
+		t.Fatalf("server exited while a unix connection was open: %v", err)
+	case <-time.After(120 * time.Millisecond):
+	}
+	_ = conn.Close()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not exit after the unix connection closed")
+	}
+}
+
 func TestPortScanDiffDebouncesGonePorts(t *testing.T) {
 	s := &Server{}
 	observed, gone := s.applyPortScan([]int{8080})

@@ -166,13 +166,13 @@ func (r *Runner) runMuxProxy(ctx context.Context, args []string) int {
 		return 2
 	}
 	var dialer net.Dialer
-	control, err := dialer.DialContext(ctx, "unix", *controlPath)
+	control, err := dialUnixRetry(ctx, &dialer, *controlPath, 2*time.Second)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx mux-proxy: control socket: %v\n", err)
 		return 1
 	}
 	defer control.Close()
-	fsConn, err := dialer.DialContext(ctx, "unix", *fsPath)
+	fsConn, err := dialUnixRetry(ctx, &dialer, *fsPath, 2*time.Second)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "sshx mux-proxy: filesystem socket: %v\n", err)
 		return 1
@@ -184,6 +184,32 @@ func (r *Runner) runMuxProxy(ctx context.Context, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func dialUnixRetry(ctx context.Context, dialer *net.Dialer, path string, timeout time.Duration) (net.Conn, error) {
+	if dialer == nil {
+		dialer = &net.Dialer{}
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		conn, err := dialer.DialContext(ctx, "unix", path)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		if timeout > 0 && time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func (r *Runner) runLocalDaemon(ctx context.Context, args []string) int {

@@ -64,19 +64,40 @@ func TestControlOperationArgsLocalForwardUsesDashL(t *testing.T) {
 	}
 }
 
-func TestOwnControlMasterForAutoForwardWithoutProxy(t *testing.T) {
+func TestOwnControlMasterForEnhancedSession(t *testing.T) {
 	for _, tc := range []struct {
-		autoForward, useProxy, sidecar, want bool
+		enhanced, sidecar, want bool
 	}{
-		{true, false, false, true},
-		{false, true, false, true},
-		{true, true, false, true},
-		{true, false, true, false},
-		{false, true, true, false},
-		{false, false, false, false},
+		{true, false, true},
+		{false, false, false},
+		{true, true, false},
+		{false, true, false},
 	} {
-		if got := ownControlMaster(tc.autoForward, tc.useProxy, tc.sidecar); got != tc.want {
-			t.Fatalf("ownControlMaster(autoForward=%v, proxy=%v, sidecar=%v) = %v, want %v", tc.autoForward, tc.useProxy, tc.sidecar, got, tc.want)
+		if got := ownControlMaster(tc.enhanced, tc.sidecar); got != tc.want {
+			t.Fatalf("ownControlMaster(enhanced=%v, sidecar=%v) = %v, want %v", tc.enhanced, tc.sidecar, got, tc.want)
+		}
+	}
+}
+
+func TestControlSlaveArgsReuseExistingMaster(t *testing.T) {
+	got := strings.Join(controlSlaveArgs([]string{"-t", "-L", "8080:localhost:80", "-p", "2222", "host"}, "/tmp/sshx-master"), " ")
+	for _, required := range []string{"ControlMaster=no", "-S /tmp/sshx-master", "ClearAllForwardings=yes", "-p 2222", "host"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("control slave args lost %q: %s", required, got)
+		}
+	}
+	for _, forbidden := range []string{"-t", "-L 8080:localhost:80", "ControlMaster=yes"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("control slave args retained %q: %s", forbidden, got)
+		}
+	}
+}
+
+func TestControlMasterListenArgsDoNotExecuteRemoteCommand(t *testing.T) {
+	got := strings.Join(controlMasterListenArgs([]string{"-t", "-p", "2222", "host"}, "/tmp/sshx-master"), " ")
+	for _, required := range []string{"ControlMaster=yes", "ControlPersist=no", "-S /tmp/sshx-master", "-N", "-p 2222", "host"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("control master listen args lost %q: %s", required, got)
 		}
 	}
 }
