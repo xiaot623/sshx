@@ -1,11 +1,12 @@
 package sshconfig
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/kevinburke/ssh_config"
 )
 
 func DefaultPath() string {
@@ -34,12 +35,15 @@ func Aliases(path string) ([]string, error) {
 }
 
 func HasAlias(path, target string) (bool, error) {
-	aliases, err := Aliases(path)
-	if err != nil {
+	if path == "" {
+		return false, nil
+	}
+	seenFiles := map[string]bool{}
+	seenAliases := map[string]bool{}
+	if err := collectAliases(path, seenFiles, seenAliases); err != nil {
 		return false, err
 	}
-	i := sort.SearchStrings(aliases, target)
-	return i < len(aliases) && aliases[i] == target, nil
+	return seenAliases[target], nil
 }
 
 func collectAliases(path string, seenFiles map[string]bool, seenAliases map[string]bool) error {
@@ -80,22 +84,30 @@ func collectAliasesFile(path string, seenFiles map[string]bool, seenAliases map[
 	}
 	defer f.Close()
 
+	cfg, err := ssh_config.Decode(f)
+	if err != nil {
+		return err
+	}
+
 	baseDir := filepath.Dir(clean)
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(stripComment(scanner.Text()))
-		if len(fields) < 2 {
-			continue
-		}
-		switch strings.ToLower(fields[0]) {
-		case "host":
-			for _, field := range fields[1:] {
-				if isConcreteHostAlias(field) {
-					seenAliases[field] = true
+	for _, host := range cfg.Hosts {
+		if isHostDirective(host) {
+			for _, pat := range host.Patterns {
+				if pat == nil {
+					continue
+				}
+				alias := pat.String()
+				if isConcreteHostAlias(alias) {
+					seenAliases[alias] = true
 				}
 			}
-		case "include":
-			for _, include := range fields[1:] {
+		}
+		for _, node := range host.Nodes {
+			inc, ok := node.(*ssh_config.Include)
+			if !ok {
+				continue
+			}
+			for _, include := range includeDirectives(inc) {
 				include = expandHome(include)
 				if !filepath.IsAbs(include) {
 					include = filepath.Join(baseDir, include)
@@ -106,42 +118,32 @@ func collectAliasesFile(path string, seenFiles map[string]bool, seenAliases map[
 			}
 		}
 	}
-	return scanner.Err()
+	return nil
 }
 
-func stripComment(line string) string {
-	var b strings.Builder
-	var quote rune
-	escaped := false
-	for _, r := range line {
-		if escaped {
-			b.WriteRune(r)
-			escaped = false
-			continue
-		}
-		if r == '\\' {
-			b.WriteRune(r)
-			escaped = true
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
-			b.WriteRune(r)
-			continue
-		}
-		if r == '\'' || r == '"' {
-			quote = r
-			b.WriteRune(r)
-			continue
-		}
-		if r == '#' {
-			break
-		}
-		b.WriteRune(r)
+func isHostDirective(h *ssh_config.Host) bool {
+	line, _, _ := strings.Cut(strings.TrimSpace(h.String()), "\n")
+	key, _, _ := strings.Cut(strings.ToLower(strings.ReplaceAll(line, "=", " ")), " ")
+	return key == "host"
+}
+
+func includeDirectives(inc *ssh_config.Include) []string {
+	line := inc.String()
+	if inc.Comment != "" {
+		line, _, _ = strings.Cut(line, "#")
 	}
-	return b.String()
+	line = strings.TrimSpace(line)
+	lower := strings.ToLower(line)
+	switch {
+	case strings.HasPrefix(lower, "include="):
+		line = line[len("include="):]
+	case strings.HasPrefix(lower, "include"):
+		line = strings.TrimSpace(line[len("include"):])
+		line = strings.TrimPrefix(line, "=")
+	default:
+		return nil
+	}
+	return strings.Fields(line)
 }
 
 func isConcreteHostAlias(s string) bool {

@@ -4,27 +4,22 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const platformByNode = new Map([
-  ["darwin", "darwin"],
-  ["linux", "linux"],
-]);
-
 const archByNode = new Map([
   ["arm64", "arm64"],
   ["x64", "amd64"],
 ]);
 
-const platform = platformByNode.get(process.platform);
 const arch = archByNode.get(process.arch);
 
-if (!platform || !arch) {
+if (!["darwin", "linux"].includes(process.platform) || !arch) {
   console.error(`Unsupported platform ${process.platform}/${process.arch}`);
   process.exit(1);
 }
 
+const platform = process.platform;
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const outDir = join(root, "dist", "native");
-const binary = `sshx-${platform}-${arch}${platform === "windows" ? ".exe" : ""}`;
+const binary = `sshx-${platform}-${arch}`;
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const version = packageJson.version;
 

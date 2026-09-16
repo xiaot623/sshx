@@ -15,17 +15,6 @@ import (
 	"github.com/xiaot623/sshx/internal/version"
 )
 
-func generateUUID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	s := hex.EncodeToString(b[:])
-	return s[0:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:32], nil
-}
-
 func remoteServerHome(id string) string {
 	return "$HOME/.sshx_server/runtimes/" + identity.RuntimeHomeID(id)
 }
@@ -65,6 +54,9 @@ func remoteBridgeEnvScript(remoteHome string, session *BridgeSession) string {
 			script += "; SSHX_MOUNT_ROOT=" + shellQuote(session.MountRoot)
 		}
 		script += "; export SSHX_WORKSPACE SSHX_MOUNT_ROOT"
+	}
+	if session.ProxyURL != "" {
+		script += "; " + (proxyEnvironment{URL: session.ProxyURL}).script()
 	}
 	return script
 }

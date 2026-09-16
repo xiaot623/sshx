@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -17,7 +16,7 @@ type PeerOptions struct {
 }
 
 type Peer struct {
-	conn      ReadWriteCloser
+	conn      io.ReadWriteCloser
 	sessionID string
 	opts      PeerOptions
 
@@ -46,11 +45,15 @@ type Peer struct {
 	err       error
 }
 
-func Connect(ctx context.Context, conn ReadWriteCloser, sessionID, token string, opts PeerOptions) (*Peer, error) {
+func Connect(ctx context.Context, conn io.ReadWriteCloser, sessionID, token string, opts PeerOptions) (*Peer, error) {
 	if sessionID == "" {
 		return nil, errors.New("remote fs sessionId is required")
 	}
-	if err := writeWireFrame(conn, wireFrame{Type: frameHello, Version: ProtocolVersion, SessionID: sessionID, Token: token}); err != nil {
+	if err := writeWireFrame(conn, wireFrame{
+		Type: frameHello,
+		Version: ProtocolVersion,
+		SessionID: sessionID,
+		Token: token}); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -73,7 +76,11 @@ func Connect(ctx context.Context, conn ReadWriteCloser, sessionID, token string,
 	return startPeer(ctx, conn, sessionID, opts, 1), nil
 }
 
-func Accept(ctx context.Context, conn ReadWriteCloser, validate func(sessionID, token string) error, opts PeerOptions) (*Peer, error) {
+func Accept(
+	ctx context.Context,
+	conn io.ReadWriteCloser,
+	validate func(sessionID, token string) error,
+	opts PeerOptions) (*Peer, error) {
 	hello, err := readWireFrame(conn)
 	if err != nil {
 		_ = conn.Close()
@@ -85,7 +92,10 @@ func Accept(ctx context.Context, conn ReadWriteCloser, validate func(sessionID, 
 		return nil, errors.New("invalid remote fs hello")
 	}
 	if hello.Version != ProtocolVersion {
-		_ = writeWireFrame(conn, wireFrame{Type: frameResponse, Version: ProtocolVersion, Error: "remote fs protocol version changed"})
+		_ = writeWireFrame(conn, wireFrame{
+			Type: frameResponse,
+			Version: ProtocolVersion,
+			Error: "remote fs protocol version changed"})
 		_ = conn.Close()
 		return nil, errors.New("remote fs protocol version changed")
 	}
@@ -96,14 +106,22 @@ func Accept(ctx context.Context, conn ReadWriteCloser, validate func(sessionID, 
 			return nil, err
 		}
 	}
-	if err := writeWireFrame(conn, wireFrame{Type: frameHelloOK, Version: ProtocolVersion, SessionID: hello.SessionID}); err != nil {
+	if err := writeWireFrame(conn, wireFrame{
+		Type: frameHelloOK,
+		Version: ProtocolVersion,
+		SessionID: hello.SessionID}); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
 	return startPeer(ctx, conn, hello.SessionID, opts, 0), nil
 }
 
-func startPeer(ctx context.Context, conn ReadWriteCloser, sessionID string, opts PeerOptions, requestIDBase uint64) *Peer {
+func startPeer(
+	ctx context.Context,
+	conn io.ReadWriteCloser,
+	sessionID string,
+	opts PeerOptions,
+	requestIDBase uint64) *Peer {
 	p := &Peer{
 		conn:      conn,
 		sessionID: sessionID,
@@ -172,16 +190,15 @@ func (p *Peer) UnregisterBackend(mountID string) error {
 	return backend.CloseBackend()
 }
 
-func (p *Peer) CreateMount(ctx context.Context, mountID string) (string, error) {
-	return p.CreateMountAt(ctx, mountID, "workspace")
-}
-
-func (p *Peer) CreateMountAt(ctx context.Context, mountID, mountPath string) (string, error) {
-	return p.CreateMountAtWithOptions(ctx, mountID, mountPath, MountOptions{})
-}
-
-func (p *Peer) CreateMountAtWithOptions(ctx context.Context, mountID, mountPath string, options MountOptions) (string, error) {
-	response, err := p.request(ctx, wireFrame{MountID: mountID, MountPath: mountPath, ReadOnly: options.ReadOnly, Op: "mount.create"})
+func (p *Peer) CreateMountAtWithOptions(
+	ctx context.Context,
+	mountID, mountPath string,
+	options MountOptions) (string, error) {
+	response, err := p.request(ctx, wireFrame{
+		MountID: mountID,
+		MountPath: mountPath,
+		ReadOnly: options.ReadOnly,
+		Op: "mount.create"})
 	if err != nil {
 		return "", err
 	}
@@ -318,7 +335,11 @@ func (p *Peer) readLoop(ctx context.Context) {
 					p.sendResponse(response)
 				}(frame)
 			default:
-				p.sendResponse(wireFrame{Type: frameResponse, ID: frame.ID, ErrorCode: ErrorBusy, Error: "too many remote fs requests"})
+				p.sendResponse(wireFrame{
+					Type: frameResponse,
+					ID: frame.ID,
+					ErrorCode: ErrorBusy,
+					Error: "too many remote fs requests"})
 			}
 		default:
 			p.close(fmt.Errorf("unexpected remote fs frame %q", frame.Type))
@@ -404,7 +425,7 @@ func (p *Peer) handleRequest(ctx context.Context, request wireFrame) wireFrame {
 		}
 		return wireFrame{Handle: handle, Attr: attr}
 	case "close":
-		return errorFrameOrEmpty(backend.Close(ctx, request.Handle))
+		return errorFrame(backend.Close(ctx, request.Handle))
 	case "read":
 		data, err := backend.Read(ctx, request.Handle, request.Offset, request.Size)
 		if err != nil {
@@ -418,16 +439,16 @@ func (p *Peer) handleRequest(ctx context.Context, request wireFrame) wireFrame {
 		}
 		return wireFrame{Size: size}
 	case "fsync":
-		return errorFrameOrEmpty(backend.Fsync(ctx, request.Handle))
+		return errorFrame(backend.Fsync(ctx, request.Handle))
 	case "mkdir":
 		attr, err := backend.Mkdir(ctx, request.Path, request.Mode)
 		return attrFrame(attr, err)
 	case "unlink":
-		return errorFrameOrEmpty(backend.Unlink(ctx, request.Path))
+		return errorFrame(backend.Unlink(ctx, request.Path))
 	case "rmdir":
-		return errorFrameOrEmpty(backend.Rmdir(ctx, request.Path))
+		return errorFrame(backend.Rmdir(ctx, request.Path))
 	case "rename":
-		return errorFrameOrEmpty(backend.Rename(ctx, request.Path, request.Path2))
+		return errorFrame(backend.Rename(ctx, request.Path, request.Path2))
 	case "link":
 		attr, err := backend.Link(ctx, request.Path, request.Path2)
 		return attrFrame(attr, err)
@@ -451,136 +472,6 @@ func (p *Peer) handleRequest(ctx context.Context, request wireFrame) wireFrame {
 		return wireFrame{StatFS: stat}
 	default:
 		return errorFrame(syscall.ENOSYS)
-	}
-}
-
-func attrFrame(attr Attr, err error) wireFrame {
-	if err != nil {
-		return errorFrame(err)
-	}
-	return wireFrame{Attr: attr}
-}
-
-func errorFrameOrEmpty(err error) wireFrame {
-	if err == nil {
-		return wireFrame{}
-	}
-	return errorFrame(err)
-}
-
-func errorFrame(err error) wireFrame {
-	if err == nil {
-		return wireFrame{}
-	}
-	return wireFrame{ErrorCode: errorCodeOf(err), Error: err.Error()}
-}
-
-func errorCodeOf(err error) ErrorCode {
-	errno := errnoOf(err)
-	switch errno {
-	case 0:
-		return ErrorNone
-	case syscall.EPERM:
-		return ErrorNotPermitted
-	case syscall.EACCES:
-		return ErrorPermission
-	case syscall.ENOENT:
-		return ErrorNotFound
-	case syscall.EEXIST:
-		return ErrorExists
-	case syscall.EBADF:
-		return ErrorBadHandle
-	case syscall.EISDIR:
-		return ErrorIsDir
-	case syscall.ENOTDIR:
-		return ErrorNotDir
-	case syscall.EXDEV:
-		return ErrorCrossDev
-	case syscall.EBUSY:
-		return ErrorBusy
-	case syscall.E2BIG:
-		return ErrorTooLarge
-	case syscall.ENOTSUP:
-		return ErrorUnsupported
-	case syscall.ENOSYS:
-		return ErrorNotImplemented
-	case syscall.EINVAL:
-		return ErrorInvalid
-	case syscall.EINTR:
-		return ErrorInterrupted
-	case syscall.ETIMEDOUT:
-		return ErrorTimedOut
-	default:
-		return ErrorIO
-	}
-}
-
-func errorFromCode(code ErrorCode) error {
-	switch code {
-	case ErrorNotPermitted:
-		return syscall.EPERM
-	case ErrorPermission:
-		return syscall.EACCES
-	case ErrorNotFound:
-		return syscall.ENOENT
-	case ErrorExists:
-		return syscall.EEXIST
-	case ErrorBadHandle:
-		return syscall.EBADF
-	case ErrorIsDir:
-		return syscall.EISDIR
-	case ErrorNotDir:
-		return syscall.ENOTDIR
-	case ErrorCrossDev:
-		return syscall.EXDEV
-	case ErrorBusy:
-		return syscall.EBUSY
-	case ErrorTooLarge:
-		return syscall.E2BIG
-	case ErrorUnsupported:
-		return syscall.ENOTSUP
-	case ErrorNotImplemented:
-		return syscall.ENOSYS
-	case ErrorInvalid:
-		return syscall.EINVAL
-	case ErrorInterrupted:
-		return syscall.EINTR
-	case ErrorTimedOut:
-		return syscall.ETIMEDOUT
-	case ErrorIO, ErrorNone:
-		return syscall.EIO
-	default:
-		return syscall.EIO
-	}
-}
-
-func errnoOf(err error) syscall.Errno {
-	if err == nil {
-		return 0
-	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		return errno
-	}
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
-		if errors.As(pathErr.Err, &errno) {
-			return errno
-		}
-	}
-	switch {
-	case errors.Is(err, context.Canceled):
-		return syscall.EINTR
-	case errors.Is(err, context.DeadlineExceeded):
-		return syscall.ETIMEDOUT
-	case errors.Is(err, os.ErrNotExist):
-		return syscall.ENOENT
-	case errors.Is(err, os.ErrPermission):
-		return syscall.EACCES
-	case errors.Is(err, os.ErrExist):
-		return syscall.EEXIST
-	default:
-		return syscall.EIO
 	}
 }
 
@@ -626,95 +517,3 @@ func (p *Peer) close(err error) {
 		}
 	})
 }
-
-type remoteBackend struct {
-	peer    *Peer
-	mountID string
-}
-
-func (b *remoteBackend) call(ctx context.Context, frame wireFrame) (wireFrame, error) {
-	frame.MountID = b.mountID
-	return b.peer.request(ctx, frame)
-}
-
-func (b *remoteBackend) Lookup(ctx context.Context, path string) (Attr, error) {
-	response, err := b.call(ctx, wireFrame{Op: "lookup", Path: path})
-	return response.Attr, err
-}
-
-func (b *remoteBackend) ReadDir(ctx context.Context, path string) ([]DirEntry, error) {
-	response, err := b.call(ctx, wireFrame{Op: "readdir", Path: path})
-	return response.Entries, err
-}
-
-func (b *remoteBackend) Open(ctx context.Context, path string, flags OpenFlags, mode uint32) (uint64, Attr, error) {
-	response, err := b.call(ctx, wireFrame{Op: "open", Path: path, OpenFlags: flags, Mode: mode})
-	return response.Handle, response.Attr, err
-}
-
-func (b *remoteBackend) Close(ctx context.Context, handle uint64) error {
-	_, err := b.call(ctx, wireFrame{Op: "close", Handle: handle})
-	return err
-}
-
-func (b *remoteBackend) Read(ctx context.Context, handle uint64, offset int64, size uint32) ([]byte, error) {
-	response, err := b.call(ctx, wireFrame{Op: "read", Handle: handle, Offset: offset, Size: size})
-	return response.Data, err
-}
-
-func (b *remoteBackend) Write(ctx context.Context, handle uint64, offset int64, data []byte) (uint32, error) {
-	response, err := b.call(ctx, wireFrame{Op: "write", Handle: handle, Offset: offset, Data: data})
-	return response.Size, err
-}
-
-func (b *remoteBackend) Fsync(ctx context.Context, handle uint64) error {
-	_, err := b.call(ctx, wireFrame{Op: "fsync", Handle: handle})
-	return err
-}
-
-func (b *remoteBackend) Mkdir(ctx context.Context, path string, mode uint32) (Attr, error) {
-	response, err := b.call(ctx, wireFrame{Op: "mkdir", Path: path, Mode: mode})
-	return response.Attr, err
-}
-
-func (b *remoteBackend) Unlink(ctx context.Context, path string) error {
-	_, err := b.call(ctx, wireFrame{Op: "unlink", Path: path})
-	return err
-}
-
-func (b *remoteBackend) Rmdir(ctx context.Context, path string) error {
-	_, err := b.call(ctx, wireFrame{Op: "rmdir", Path: path})
-	return err
-}
-
-func (b *remoteBackend) Rename(ctx context.Context, oldPath, newPath string) error {
-	_, err := b.call(ctx, wireFrame{Op: "rename", Path: oldPath, Path2: newPath})
-	return err
-}
-
-func (b *remoteBackend) Link(ctx context.Context, oldPath, newPath string) (Attr, error) {
-	response, err := b.call(ctx, wireFrame{Op: "link", Path: oldPath, Path2: newPath})
-	return response.Attr, err
-}
-
-func (b *remoteBackend) Symlink(ctx context.Context, target, path string) (Attr, error) {
-	response, err := b.call(ctx, wireFrame{Op: "symlink", Target: target, Path: path})
-	return response.Attr, err
-}
-
-func (b *remoteBackend) Readlink(ctx context.Context, path string) (string, error) {
-	response, err := b.call(ctx, wireFrame{Op: "readlink", Path: path})
-	return response.Target, err
-}
-
-func (b *remoteBackend) Setattr(ctx context.Context, path string, handle uint64, change SetAttr) (Attr, error) {
-	response, err := b.call(ctx, wireFrame{Op: "setattr", Path: path, Handle: handle, Change: change})
-	return response.Attr, err
-}
-
-func (b *remoteBackend) StatFS(ctx context.Context) (StatFS, error) {
-	response, err := b.call(ctx, wireFrame{Op: "statfs"})
-	return response.StatFS, err
-}
-
-func (b *remoteBackend) CloseBackend() error { return nil }

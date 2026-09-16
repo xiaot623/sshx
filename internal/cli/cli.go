@@ -22,6 +22,7 @@ type BridgeSession struct {
 	MountRoot string
 	Workspace string
 	ReadOnly  bool
+	ProxyURL  string
 	Done      <-chan struct{}
 	stop      func()
 	stopOnce  sync.Once
@@ -76,6 +77,8 @@ type Runner struct {
 	commandBridge      bool
 	autoForward        bool
 	remoteFS           bool
+	useProxy           bool
+	strict             bool
 	integrationSidecar bool
 	connection         identity.Connection
 }
@@ -211,6 +214,8 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	r.commandBridge = features.CommandBridge
 	r.autoForward = features.AutoForward
 	r.remoteFS = features.RemoteFS
+	r.useProxy = features.Proxy
+	r.strict = cfg.Strict
 	if features.AutoForward {
 		if err := r.EnsureResolver(ctx); err != nil {
 			if cfg.Strict {
@@ -220,31 +225,32 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 			fmt.Fprintf(r.Stderr, "sshx: resolver setup skipped: %v\n", err)
 		}
 	}
-	remoteReady := false
 	if err := r.ensureRemoteServer(ctx, sshArgs, features, remoteHome); err != nil {
 		if cfg.Strict || features.RemoteFS {
 			fmt.Fprintf(r.Stderr, "sshx: remote server unavailable for %s: %v\n", parsed.Target, err)
 			return 1
 		}
-	} else if features.CommandBridge || features.AutoForward || features.RemoteFS {
+		if features.Proxy {
+			fmt.Fprintf(r.Stderr, "sshx: proxy skipped for %s: %v\n", parsed.Target, err)
+		}
+		return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
+	}
+	if features.CommandBridge || features.AutoForward || features.RemoteFS || features.Proxy {
 		bridgeSession, err := r.StartBridge(ctx, parsed.Target, sshArgs, remoteHome)
 		if err != nil {
 			if cfg.Strict || features.RemoteFS {
-				fmt.Fprintf(r.Stderr, "sshx: command bridge unavailable for %s: %v\n", parsed.Target, err)
+				fmt.Fprintf(r.Stderr, "sshx: enhanced session unavailable for %s: %v\n", parsed.Target, err)
 				return 1
 			}
-		} else {
-			remoteReady = true
-			defer bridgeSession.Stop()
-			commandCtx, cancel := bridgeSession.CommandContext(ctx)
-			defer cancel()
-			return r.execSSHWithTimeout(commandCtx, sessionSSHArgsForBridge(parsed, remoteHome, bridgeSession), timeout)
+			if features.Proxy {
+				fmt.Fprintf(r.Stderr, "sshx: proxy skipped for %s: %v\n", parsed.Target, err)
+			}
+			return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
 		}
-	} else {
-		remoteReady = true
+		defer bridgeSession.Stop()
+		commandCtx, cancel := bridgeSession.CommandContext(ctx)
+		defer cancel()
+		return r.execSSHWithTimeout(commandCtx, sessionSSHArgsForBridge(parsed, remoteHome, bridgeSession), timeout)
 	}
-	if remoteReady {
-		return r.execSSHWithTimeout(ctx, sessionSSHArgs(parsed, remoteHome), timeout)
-	}
-	return r.execSSHWithTimeout(ctx, parsed.Args, timeout)
+	return r.execSSHWithTimeout(ctx, sessionSSHArgsForBridge(parsed, remoteHome, nil), timeout)
 }

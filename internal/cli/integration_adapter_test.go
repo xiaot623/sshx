@@ -19,7 +19,7 @@ import (
 
 func TestIntegrationSessionWrapsEveryRemoteCommand(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"-T", "-D", "4123", "host", "bash", "-s"})
-	got := integrationSessionSSHArgs(parsed, "context-id", "$HOME/.sshx/context")
+	got := integrationSessionSSHArgsWithProxy(parsed, "context-id", "$HOME/.sshx/context", "", false, false)
 	// Keep the forwarding options and target byte-for-byte before replacing the remote command.
 	if len(got) != 5 || strings.Join(got[:4], " ") != "-T -D 4123 host" {
 		t.Fatalf("connection args = %#v", got)
@@ -43,7 +43,7 @@ func TestIntegrationSessionLeavesNonShellActionsUntouched(t *testing.T) {
 		{"-s", "host", "sftp"},
 	} {
 		parsed := sshcompat.Parse(args)
-		got := integrationSessionSSHArgs(parsed, "context-id", "$HOME/.sshx/context")
+		got := integrationSessionSSHArgsWithProxy(parsed, "context-id", "$HOME/.sshx/context", "", false, false)
 		if strings.Join(got, " ") != strings.Join(args, " ") {
 			t.Fatalf("args = %q, want %q", strings.Join(got, " "), strings.Join(args, " "))
 		}
@@ -64,7 +64,7 @@ func TestIntegrationRecognizesOpenSSHControlOperations(t *testing.T) {
 func TestIntegrationSessionWrapperExportsContext(t *testing.T) {
 	home := t.TempDir()
 	parsed := sshcompat.Parse([]string{"host", `printf '%s' "$SSHX_CONTEXT_ID|$PATH"`})
-	got := integrationSessionSSHArgs(parsed, "context-id", "$HOME/.sshx/context")
+	got := integrationSessionSSHArgsWithProxy(parsed, "context-id", "$HOME/.sshx/context", "", false, false)
 	cmd := exec.Command("/bin/sh", "-c", got[len(got)-1])
 	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "SHELL=/bin/sh"}
 	out, err := cmd.CombinedOutput()
@@ -77,6 +77,32 @@ func TestIntegrationSessionWrapperExportsContext(t *testing.T) {
 	}
 }
 
+func TestIntegrationSessionLoadsProxyEnvironment(t *testing.T) {
+	home := t.TempDir()
+	contextHome := "$HOME/.sshx/context"
+	proxyDir := filepath.Join(home, ".sshx", "context", "proxy")
+	if err := os.MkdirAll(proxyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := (proxyEnvironment{
+		URL: "socks5h://127.0.0.1:43123",
+	}).script()
+	if err := os.WriteFile(filepath.Join(proxyDir, "session-id.env"), []byte(env+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parsed := sshcompat.Parse([]string{"host", `printf '%s' "$HTTP_PROXY|$ALL_PROXY"`})
+	got := integrationSessionSSHArgsWithProxy(parsed, "context-id", contextHome, "session-id", true, true)
+	cmd := exec.Command("/bin/sh", "-c", got[len(got)-1])
+	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "SHELL=/bin/sh"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper failed: %v\n%s", err, out)
+	}
+	if string(out) != "socks5h://127.0.0.1:43123|socks5h://127.0.0.1:43123" {
+		t.Fatalf("proxy environment = %q", out)
+	}
+}
+
 func TestIntegrationSessionWrapsDefaultLoginShell(t *testing.T) {
 	for _, tc := range []struct {
 		args       []string
@@ -85,7 +111,7 @@ func TestIntegrationSessionWrapsDefaultLoginShell(t *testing.T) {
 		{[]string{"host"}, "-t host"},
 		{[]string{"-T", "host"}, "-T host"},
 	} {
-		got := integrationSessionSSHArgs(sshcompat.Parse(tc.args), "context-id", "$HOME/.sshx/context")
+		got := integrationSessionSSHArgsWithProxy(sshcompat.Parse(tc.args), "context-id", "$HOME/.sshx/context", "", false, false)
 		if len(got) < 2 || strings.Join(got[:len(got)-1], " ") != tc.wantPrefix || !strings.Contains(got[len(got)-1], `exec "$shell" -l`) {
 			t.Fatalf("wrapped args = %#v", got)
 		}
@@ -101,7 +127,7 @@ func TestInsertBeforeTarget(t *testing.T) {
 		{[]string{"-T", "--", "host", "bash"}, "-T -S /tmp/master -- host bash"},
 	} {
 		parsed := sshcompat.Parse(tc.args)
-		got := insertBeforeTarget(parsed, []string{"-S", "/tmp/master"})
+		got := sshcompat.InsertBeforeTarget(parsed, []string{"-S", "/tmp/master"})
 		if strings.Join(got, " ") != tc.want {
 			t.Fatalf("args = %q, want %q", strings.Join(got, " "), tc.want)
 		}
@@ -118,7 +144,7 @@ func TestStripControlOptions(t *testing.T) {
 func TestSidecarReusesMasterWithoutRepeatingActionForwards(t *testing.T) {
 	original := []string{"-T", "-D", "4123", "-L/tmp/code.sock:localhost:22", "-R", "8080:localhost:80", "-p", "2222", "host", "bash"}
 	mainInput := sshcompat.Parse(stripControlOptions(original))
-	mainArgs := insertBeforeTarget(mainInput, []string{"-o", "ControlMaster=yes", "-S", "/tmp/master"})
+	mainArgs := sshcompat.InsertBeforeTarget(mainInput, []string{"-o", "ControlMaster=yes", "-S", "/tmp/master"})
 	mainJoined := strings.Join(mainArgs, " ")
 	for _, preserved := range []string{"-D 4123", "-L/tmp/code.sock:localhost:22", "-R 8080:localhost:80"} {
 		if !strings.Contains(mainJoined, preserved) {
@@ -126,7 +152,7 @@ func TestSidecarReusesMasterWithoutRepeatingActionForwards(t *testing.T) {
 		}
 	}
 	sidecarInput := sshcompat.Parse(stripAuxiliaryActionOptions(mainInput.Args))
-	sidecarArgs := insertBeforeTarget(sidecarInput, []string{"-o", "ControlMaster=no", "-o", "ControlPath=/tmp/master", "-o", "ClearAllForwardings=yes"})
+	sidecarArgs := sshcompat.InsertBeforeTarget(sidecarInput, []string{"-o", "ControlMaster=no", "-o", "ControlPath=/tmp/master", "-o", "ClearAllForwardings=yes"})
 	sidecarJoined := strings.Join(sidecarArgs, " ")
 	for _, forbidden := range []string{"-D", "4123", "-L", "code.sock", "-R", "8080:localhost:80", "ControlMaster=yes"} {
 		if strings.Contains(sidecarJoined, forbidden) {

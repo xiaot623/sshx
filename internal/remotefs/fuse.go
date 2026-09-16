@@ -42,7 +42,6 @@ type fuseNode struct {
 
 type fuseFile struct {
 	state  *fuseState
-	path   string
 	handle uint64
 	once   sync.Once
 }
@@ -177,7 +176,11 @@ func (n *fuseNode) Getattr(ctx context.Context, _ fs.FileHandle, out *fuse.AttrO
 	return 0
 }
 
-func (n *fuseNode) Setattr(ctx context.Context, file fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+func (n *fuseNode) Setattr(
+	ctx context.Context,
+	file fs.FileHandle,
+	in *fuse.SetAttrIn,
+	out *fuse.AttrOut) syscall.Errno {
 	var change SetAttr
 	if mode, ok := in.GetMode(); ok {
 		change.Mode = &mode
@@ -215,10 +218,14 @@ func (n *fuseNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if err != nil {
 		return nil, 0, errnoOf(err)
 	}
-	return &fuseFile{state: n.state, path: n.relPath(), handle: handle}, fuse.FOPEN_DIRECT_IO, 0
+	return &fuseFile{state: n.state, handle: handle}, 0, 0
 }
 
-func (n *fuseNode) Create(ctx context.Context, name string, flags, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+func (n *fuseNode) Create(
+	ctx context.Context,
+	name string,
+	flags, mode uint32,
+	out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	path := filepath.Join(n.relPath(), name)
 	openFlags, err := portableOpenFlags(flags)
 	if err != nil {
@@ -230,7 +237,7 @@ func (n *fuseNode) Create(ctx context.Context, name string, flags, mode uint32, 
 		return nil, nil, 0, errnoOf(err)
 	}
 	fillEntry(out, attr, n.state.options)
-	return n.child(attr), &fuseFile{state: n.state, path: path, handle: handle}, fuse.FOPEN_DIRECT_IO, 0
+	return n.child(attr), &fuseFile{state: n.state, handle: handle}, 0, 0
 }
 
 func portableOpenFlags(flags uint32) (OpenFlags, error) {
@@ -292,7 +299,12 @@ func (n *fuseNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	return errnoOf(n.state.backend.Rmdir(ctx, filepath.Join(n.relPath(), name)))
 }
 
-func (n *fuseNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+func (n *fuseNode) Rename(
+	ctx context.Context,
+	name string,
+	newParent fs.InodeEmbedder,
+	newName string,
+	flags uint32) syscall.Errno {
 	if flags != 0 {
 		return syscall.ENOTSUP
 	}
@@ -307,7 +319,11 @@ func (n *fuseNode) Rename(ctx context.Context, name string, newParent fs.InodeEm
 	))
 }
 
-func (n *fuseNode) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (n *fuseNode) Link(
+	ctx context.Context,
+	target fs.InodeEmbedder,
+	name string,
+	out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	oldNode, ok := target.(*fuseNode)
 	if !ok {
 		return nil, syscall.EXDEV
@@ -378,7 +394,9 @@ func (f *fuseFile) Write(ctx context.Context, data []byte, off int64) (uint32, s
 }
 
 func (f *fuseFile) Flush(ctx context.Context) syscall.Errno {
-	return errnoOf(f.state.backend.Fsync(ctx, f.handle))
+	// Flush is close(2), not fsync(2). A remote fsync on every close is too
+	// expensive; explicit fsync still goes through Fsync.
+	return 0
 }
 
 func (f *fuseFile) Fsync(ctx context.Context, _ uint32) syscall.Errno {

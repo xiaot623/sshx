@@ -106,11 +106,10 @@ func TestDomainForwardUsesTargetIPWhenLocalhostPortIsOccupied(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
-		SocketPath:     shortSocketPath(t),
-		forwarders:     map[string]*forward.Manager{},
-		forwardRecords: map[string]map[int]forwardRecord{},
-		domains:        map[string]*domain.Manager{},
-		Stderr:         io.Discard,
+		SocketPath: shortSocketPath(t),
+		forwarders: map[string]*forward.Manager{},
+		domains:    map[string]*domain.Manager{},
+		Stderr:     io.Discard,
 	}
 	resp := s.handle(ctx, Request{
 		Type:         TypeEnsureTargetPort,
@@ -133,11 +132,10 @@ func TestListPorts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
-		SocketPath:     shortSocketPath(t),
-		forwarders:     map[string]*forward.Manager{},
-		forwardRecords: map[string]map[int]forwardRecord{},
-		domains:        map[string]*domain.Manager{},
-		Stderr:         io.Discard,
+		SocketPath: shortSocketPath(t),
+		forwarders: map[string]*forward.Manager{},
+		domains:    map[string]*domain.Manager{},
+		Stderr:     io.Discard,
 	}
 	remotePort := freeTCPPort(t)
 	ensure := s.handle(ctx, Request{
@@ -156,7 +154,10 @@ func TestListPorts(t *testing.T) {
 		t.Fatalf("list response = %#v", resp)
 	}
 	got := resp.Forwards[0]
-	if got.Target != "debian" || got.RemotePort != remotePort || got.LocalPort != remotePort || got.ListenIP != "127.64.0.1" {
+	if got.Target != "debian" ||
+		got.RemotePort != remotePort ||
+		got.LocalPort != remotePort ||
+		got.ListenIP != "127.64.0.1" {
 		t.Fatalf("forward = %#v", got)
 	}
 }
@@ -166,11 +167,10 @@ func TestListPortsIncludesDomainForDirectTarget(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &Server{
-		SocketPath:     shortSocketPath(t),
-		forwarders:     map[string]*forward.Manager{},
-		forwardRecords: map[string]map[int]forwardRecord{},
-		domains:        map[string]*domain.Manager{},
-		Stderr:         io.Discard,
+		SocketPath: shortSocketPath(t),
+		forwarders: map[string]*forward.Manager{},
+		domains:    map[string]*domain.Manager{},
+		Stderr:     io.Discard,
 	}
 	remotePort := freeTCPPort(t)
 	ensure := s.handle(ctx, Request{
@@ -355,8 +355,8 @@ func TestTargetDomainIsReleasedWithoutUnregisteringCollidingTarget(t *testing.T)
 	second.Sessions = 1
 	firstKey := requestKey(baseReq.SSHPath, baseReq.SSHArgs)
 	secondKey := requestKey(collidingReq.SSHPath, collidingReq.SSHArgs)
-	s.sessions["first"] = &sessionRecord{ID: "first", TargetKey: firstKey}
-	s.sessions["second"] = &sessionRecord{ID: "second", TargetKey: secondKey}
+	s.sessions["first"] = &sessionRecord{TargetKey: firstKey}
+	s.sessions["second"] = &sessionRecord{TargetKey: secondKey}
 
 	s.releaseSession("first")
 	if s.targets[secondKey] != second {
@@ -396,7 +396,9 @@ func TestLoopbackPoolMatchesProvisionedRangeAndReusesReleasedAddresses(t *testin
 		s.targets[itoa(i)] = &targetRecord{ListenIP: ip}
 	}
 
-	if ip, err := s.allocateLoopbackIPLocked(); err == nil || ip != "" || !strings.Contains(err.Error(), "pool exhausted") {
+	if ip, err := s.allocateLoopbackIPLocked(); err == nil ||
+		ip != "" ||
+		!strings.Contains(err.Error(), "pool exhausted") {
 		t.Fatalf("allocation beyond pool = %q, %v", ip, err)
 	}
 
@@ -447,10 +449,18 @@ func TestLastSessionClosesLocalDaemon(t *testing.T) {
 		errCh <- (&Server{SocketPath: socket, Version: "test-version", LeaseTimeout: 100 * time.Millisecond}).Serve(ctx)
 	}()
 	waitForSocket(t, socket)
-	session, err := OpenSession(ctx, socket, Request{
-		SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: dnsAddr,
-		SessionID: "session-1", AppVersion: "test-version",
-	}, 10*time.Millisecond)
+	session, err := OpenSession(
+		ctx,
+		socket,
+		Request{
+			SSHPath:      "ssh",
+			Target:       "debian",
+			DomainSuffix: "it.sshx",
+			DNSAddr:      dnsAddr,
+			SessionID:    "session-1",
+			AppVersion:   "test-version",
+		},
+		10*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,10 +499,18 @@ func TestLocalDaemonWaitsForAllSessions(t *testing.T) {
 	waitForSocket(t, socket)
 	var sessions []*Session
 	for _, id := range []string{"session-1", "session-2"} {
-		session, err := OpenSession(ctx, socket, Request{
-			SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
-			SessionID: id, AppVersion: "test-version",
-		}, 10*time.Millisecond)
+		session, err := OpenSession(
+			ctx,
+			socket,
+			Request{
+				SSHPath:      "ssh",
+				Target:       "debian",
+				DomainSuffix: "it.sshx",
+				DNSAddr:      "127.0.0.1:0",
+				SessionID:    id,
+				AppVersion:   "test-version",
+			},
+			10*time.Millisecond)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -519,7 +537,10 @@ func TestLocalDaemonExpiresSessionWithoutHeartbeat(t *testing.T) {
 	socket := shortSocketPath(t)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- (&Server{SocketPath: socket, Version: "test-version", LeaseTimeout: 30 * time.Millisecond}).Serve(context.Background())
+		errCh <- (&Server{
+			SocketPath:   socket,
+			Version:      "test-version",
+			LeaseTimeout: 30 * time.Millisecond}).Serve(context.Background())
 	}()
 	waitForSocket(t, socket)
 	conn, err := net.Dial("unix", socket)
@@ -528,8 +549,15 @@ func TestLocalDaemonExpiresSessionWithoutHeartbeat(t *testing.T) {
 	}
 	defer conn.Close()
 	request := Request{
-		Type: TypeOpenSession, SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
-		SessionID: "session-1", AppVersion: "test-version", RuntimeID: identity.LocalRuntimeID, ProtocolVersion: protocol.Version,
+		Type:            TypeOpenSession,
+		SSHPath:         "ssh",
+		Target:          "debian",
+		DomainSuffix:    "it.sshx",
+		DNSAddr:         "127.0.0.1:0",
+		SessionID:       "session-1",
+		AppVersion:      "test-version",
+		RuntimeID:       identity.LocalRuntimeID,
+		ProtocolVersion: protocol.Version,
 	}
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		t.Fatal(err)
@@ -555,10 +583,18 @@ func TestLocalDaemonAllowsDifferentAppVersionsInOneRuntime(t *testing.T) {
 		errCh <- (&Server{SocketPath: socket, Version: "1.0.0"}).Serve(context.Background())
 	}()
 	waitForSocket(t, socket)
-	session, err := OpenSession(context.Background(), socket, Request{
-		SSHPath: "ssh", Target: "debian", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
-		SessionID: "session-1", AppVersion: "2.0.0",
-	}, 10*time.Millisecond)
+	session, err := OpenSession(
+		context.Background(),
+		socket,
+		Request{
+			SSHPath:      "ssh",
+			Target:       "debian",
+			DomainSuffix: "it.sshx",
+			DNSAddr:      "127.0.0.1:0",
+			SessionID:    "session-1",
+			AppVersion:   "2.0.0",
+		},
+		10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("open different app version: %v", err)
 	}
@@ -577,14 +613,26 @@ func TestLocalDaemonHandoffGraceAcceptsReplacementLease(t *testing.T) {
 	socket := shortSocketPath(t)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- (&Server{SocketPath: socket, Version: "test-version", HandoffGrace: 80 * time.Millisecond}).Serve(context.Background())
+		errCh <- (&Server{
+			SocketPath:   socket,
+			Version:      "test-version",
+			HandoffGrace: 80 * time.Millisecond}).Serve(context.Background())
 	}()
 	waitForSocket(t, socket)
 	open := func(leaseID string) *Session {
-		session, err := OpenSession(context.Background(), socket, Request{
-			SSHPath: "ssh", Target: "debian", TargetID: "stable-target", DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
-			LeaseID: leaseID, AppVersion: "test-version",
-		}, 10*time.Millisecond)
+		session, err := OpenSession(
+			context.Background(),
+			socket,
+			Request{
+				SSHPath:      "ssh",
+				Target:       "debian",
+				TargetID:     "stable-target",
+				DomainSuffix: "it.sshx",
+				DNSAddr:      "127.0.0.1:0",
+				LeaseID:      leaseID,
+				AppVersion:   "test-version",
+			},
+			10*time.Millisecond)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -623,10 +671,19 @@ func TestLocalDaemonHandoffGraceWaitsForAllTargets(t *testing.T) {
 	}()
 	waitForSocket(t, socket)
 	open := func(leaseID, targetID, target string) *Session {
-		session, err := OpenSession(ctx, socket, Request{
-			SSHPath: "ssh", Target: target, TargetID: targetID, DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
-			LeaseID: leaseID, AppVersion: "test-version",
-		}, 10*time.Millisecond)
+		session, err := OpenSession(
+			ctx,
+			socket,
+			Request{
+				SSHPath:      "ssh",
+				Target:       target,
+				TargetID:     targetID,
+				DomainSuffix: "it.sshx",
+				DNSAddr:      "127.0.0.1:0",
+				LeaseID:      leaseID,
+				AppVersion:   "test-version",
+			},
+			10*time.Millisecond)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -678,8 +735,12 @@ func TestPortMutationRequiresActiveSession(t *testing.T) {
 	}()
 	waitForSocket(t, socket)
 	_, err := ClientRequest(ctx, socket, Request{
-		Type: TypeEnsureTargetPort, SSHPath: "ssh", Target: "debian", RemotePort: 8080,
-		DomainSuffix: "it.sshx", DNSAddr: "127.0.0.1:0",
+		Type:         TypeEnsureTargetPort,
+		SSHPath:      "ssh",
+		Target:       "debian",
+		RemotePort:   8080,
+		DomainSuffix: "it.sshx",
+		DNSAddr:      "127.0.0.1:0",
 	})
 	if err == nil || !strings.Contains(err.Error(), "active session lease") {
 		t.Fatalf("error = %v", err)

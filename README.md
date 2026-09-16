@@ -12,6 +12,7 @@
 - 📁 **Bidirectional workspace mount** — direct CLI sessions can use remote tools on local files, and local tools on remote files.
 - 🔌 **Automatic port forwarding** — remote local listeners (loopback `127.0.0.1` and wildcard `0.0.0.0`; e.g., a dev server on `0.0.0.0:8080` or `localhost:8080`) are automatically detected and forwarded to your local machine.
 - 🌐 **Local domain binding** — access forwarded ports as `<host>.<your-user>.sshx:<port>` in your local browser, no manual `-L` flags needed.
+- 🛡️ **Remote egress proxy** — opt in to route proxy-aware remote tools through the local client's proxy or TUN-backed network stack.
 - 🐳 **Docker container support** — target running containers by name or ID: `sshx my-container`. Command bridge support works inside containers via `docker exec`.
 
 ## Table of Contents
@@ -99,7 +100,7 @@ Set `features.remoteFs: true` to expose the command initiator's workspace throug
 - VS Code/Cursor Remote-SSH integration sidecars stay remote-to-local only: those application sessions do not export a local workspace to the remote host.
 - With RemoteFS disabled, the command runs from the local home and receives `SSHX_REMOTE_CWD` plus `SSHX_REMOTE_FS=0`.
 
-Mounted trees permit reads, writes, and creation, but block file/directory deletion and rename in both directions. They can include sensitive files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust.
+Mounted trees permit reads, writes, and creation. Deletion (unlink/rmdir) is blocked; same-directory rename is allowed so editors can atomic-save; cross-directory rename remains blocked. They can include sensitive files such as shell configuration and SSH credentials, so enable `remoteFs` only for targets you trust.
 
 Set `FS_READ_ONLY=1` on the client when starting sshx to make the session mounts read-only:
 
@@ -162,6 +163,22 @@ ls /dev/macfuse*
 **macOS 15.4+ FSKit note:** macFUSE 5 provides a userspace FSKit backend that does not require a kernel extension, Recovery-mode security changes, or a restart. It is not transparent to the current sshx mount implementation and is not enabled yet: macFUSE requires the explicit `-o backend=fskit` option, FSKit only supports mount points below `/Volumes`, and several traditional mount options are unavailable. sshx currently creates private mounts below the runtime temporary directory and supplies VFS-oriented options. Supporting FSKit therefore requires a dedicated mount-path/options adapter, although the RemoteFS wire protocol and file-operation backend can remain unchanged.
 
 Absolute source paths are preserved as a hierarchy below sshx's private session directory, but absolute command arguments are not rewritten. RemoteFS does not expose special files/xattrs/ACLs or support Docker targets, FUSE-T, or FSKit. It is optimized for source trees and small files rather than large-file throughput.
+
+### 🛡️ Remote Egress Proxy (opt-in)
+
+Set `features.proxy: true` or run with `SSHX_USE_PROXY=1` to give the remote session an OpenSSH remote dynamic SOCKS endpoint. Traffic exits the laptop:
+
+```sh
+SSHX_USE_PROXY=1 sshx remote
+```
+
+sshx asks the existing ControlMaster to allocate a remote SOCKS listener with `ssh -O forward -R 127.0.0.1:0` (no local destination). OpenSSH then acts as a SOCKS server on the remote, and connections leave through the client. sshx overrides uppercase and lowercase `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` inside the remote session to `socks5h://127.0.0.1:<port>` so curl, Git, and other tools that only look at `HTTP_PROXY` still work. Existing `NO_PROXY` values are preserved and extended with remote loopback addresses.
+
+There is no custom local HTTP/SOCKS process, no per-session credentials, and no `SSHX_PROXY_URL` chain-through. DNS names sent through `socks5h://` are resolved on the laptop. A local TUN proxy naturally captures that laptop egress.
+
+The remote listener is bound only to `127.0.0.1` and uses a dynamically allocated port.
+
+This feature covers TCP applications that honor proxy environment variables, including tools such as curl, Git, and many package managers. It does not provide a remote TUN device, UDP/ICMP forwarding, PAC/system-GUI proxy discovery, or Docker target support.
 
 ### 🔌 Automatic Port Detection & Forwarding
 
@@ -340,6 +357,10 @@ features:
   # Requires FUSE on each machine receiving a mount.
   remoteFs: false
 
+  # Route proxy-aware remote TCP applications through the local client.
+  # Default: false. SSHX_USE_PROXY=0|1 overrides this value.
+  proxy: false
+
 commands:
   # Commands blocked from bridge execution.
   deny: []
@@ -366,7 +387,7 @@ commands:
 1. **Connection**: `sshx remote` opens a normal SSH session and starts a compatible runtime under `~/.sshx_server/runtimes/<RuntimeHomeID>`.
 2. **Sidecar channel**: One hidden SSH channel multiplexes command, port, heartbeat, and optional RemoteFS traffic. ContextID routes VS Code/Cursor terminals to a healthy live session.
 3. **Port sniffing**: The server reads `/proc/net/tcp*` (Linux) to detect loopback (`127.0.0.1` / `::1`) and wildcard (`0.0.0.0` / `::`) listeners.
-4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using `ssh -W`.
+4. **Forwarding**: Detected ports are forwarded through a single shared local daemon using OpenSSH `ssh -O forward -L`.
 5. **Domains**: The local DNS responder maps `<target>.<suffix>` → localhost. The browser's URL port selects the local forwarded port.
 
 When `sshx` is invoked for a **non-matching host** (no sshx config, or host not in scope), it first checks if the target resolves to a running Docker container. If neither SSH nor Docker matches, it `exec`s the real `ssh` directly — no daemon, no installation, no overhead.
@@ -380,6 +401,7 @@ When `sshx` is invoked for a **non-matching host** (no sshx config, or host not 
 - `sshx local ...` on a **client** (not inside a remote session) — errors immediately with a clear message. `local` is globally reserved.
 - `remoteFs` never silently falls back to an unmounted command. A failed FUSE mount fails the invocation.
 - Remote exports are anchored with Go's `os.Root`; path traversal and symlink escapes are rejected.
+- The remote egress proxy is OpenSSH remote dynamic SOCKS bound only to loopback.
 - Docker containers that aren't running or can't be reached are pure passthrough — sshx falls back to raw `ssh` with no side effects.
 - Unmatched hosts are pure passthrough — no files created, no processes started.
 

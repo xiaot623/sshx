@@ -20,6 +20,7 @@ type Features struct {
 	CommandBridge bool `yaml:"commandBridge"`
 	AutoForward   bool `yaml:"autoForward"`
 	RemoteFS      bool `yaml:"remoteFs"`
+	Proxy         bool `yaml:"proxy"`
 }
 
 type CommandPolicy struct {
@@ -41,9 +42,11 @@ func EnsureDefault(path string) error {
 	if path == "" {
 		return nil
 	}
-	if _, err := os.Stat(path); err == nil {
+	_, err := os.Stat(path)
+	if err == nil {
 		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -68,8 +71,6 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// applyFeatureEnvOverrides lets COMMANDBRIDGE / AUTOFORWARD / REMOTEFS=1|0
-// override the corresponding features from the config file.
 func applyFeatureEnvOverrides(cfg *Config) {
 	overrides := []struct {
 		env string
@@ -78,6 +79,7 @@ func applyFeatureEnvOverrides(cfg *Config) {
 		{"COMMANDBRIDGE", &cfg.Features.CommandBridge},
 		{"AUTOFORWARD", &cfg.Features.AutoForward},
 		{"REMOTEFS", &cfg.Features.RemoteFS},
+		{"SSHX_USE_PROXY", &cfg.Features.Proxy},
 	}
 	for _, o := range overrides {
 		v, ok := os.LookupEnv(o.env)
@@ -94,7 +96,7 @@ func applyFeatureEnvOverrides(cfg *Config) {
 }
 
 func (f Features) Enabled() bool {
-	return f.CommandBridge || f.AutoForward || f.RemoteFS
+	return f.CommandBridge || f.AutoForward || f.RemoteFS || f.Proxy
 }
 
 func (p CommandPolicy) Allows(argv []string) bool {

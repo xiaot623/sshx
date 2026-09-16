@@ -28,7 +28,18 @@ func WriteServerInfo(path, socketPath, token, appVersion string) error {
 	if appVersion == "" {
 		appVersion = version.Version
 	}
-	b, err := json.MarshalIndent(ServerInfo{Protocol: "unix", Address: socketPath, Token: token, Version: appVersion, RuntimeID: identity.RuntimeID, ProtocolMin: protocol.MinVersion, ProtocolMax: protocol.MaxVersion, PID: os.Getpid()}, "", "  ")
+	b, err := json.MarshalIndent(
+		ServerInfo{
+			Protocol:    "unix",
+			Address:     socketPath,
+			Token:       token,
+			Version:     appVersion,
+			RuntimeID:   identity.RuntimeID,
+			ProtocolMin: protocol.MinVersion,
+			ProtocolMax: protocol.MaxVersion,
+			PID:         os.Getpid()},
+		"",
+		"  ")
 	if err != nil {
 		return err
 	}

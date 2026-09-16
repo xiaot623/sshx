@@ -2,6 +2,8 @@
 
 package ports
 
-func ScanLoopbackListening() ([]int, error) {
-	return nil, ErrUnsupported
+import "errors"
+
+func ScanLoopbackListeners() ([]Listener, error) {
+	return nil, errors.New("port scanning is only supported on Linux servers")
 }

@@ -218,6 +218,9 @@ func TestRootBackendDisableDeleteKeepsWritesAndCreates(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hello"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "existing.txt"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(filepath.Join(root, "dir"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -241,13 +244,46 @@ func TestRootBackendDisableDeleteKeepsWritesAndCreates(t *testing.T) {
 	for operation, err := range map[string]error{
 		"unlink": backend.Unlink(ctx, "note.txt"),
 		"rmdir":  backend.Rmdir(ctx, "dir"),
-		"rename": backend.Rename(ctx, "note.txt", "renamed.txt"),
 	} {
 		if !errors.Is(err, syscall.EPERM) {
 			t.Fatalf("%s error = %v, want EPERM", operation, err)
 		}
 	}
-	for _, name := range []string{"note.txt", "dir", "created.txt"} {
+	if err := backend.Rename(ctx, "note.txt", "dir/note.txt"); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("cross-dir rename error = %v, want EPERM", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "note.txt")); err != nil {
+		t.Fatalf("note.txt was moved: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "dir", "note.txt")); !os.IsNotExist(err) {
+		t.Fatal("cross-dir rename created dest")
+	}
+	if err := backend.Rename(ctx, "note.txt", "renamed.txt"); err != nil {
+		t.Fatalf("same-dir rename: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "renamed.txt")); err != nil {
+		t.Fatalf("renamed dest missing: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "note.txt")); !os.IsNotExist(err) {
+		t.Fatal("rename source still present")
+	}
+	if err := os.WriteFile(filepath.Join(root, "temp.txt"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Rename(ctx, "temp.txt", "existing.txt"); err != nil {
+		t.Fatalf("overwrite rename: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "existing.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("overwrite content = %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "temp.txt")); !os.IsNotExist(err) {
+		t.Fatal("overwrite source still present")
+	}
+	for _, name := range []string{"dir", "created.txt", "renamed.txt", "existing.txt"} {
 		if _, err := os.Lstat(filepath.Join(root, name)); err != nil {
 			t.Fatalf("%s was removed: %v", name, err)
 		}

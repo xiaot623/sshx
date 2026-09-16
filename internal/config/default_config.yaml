@@ -4,6 +4,7 @@ features:
   commandBridge: true
   autoForward: true
   remoteFs: false
+  proxy: false
 
 commands:
   deny: []

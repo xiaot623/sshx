@@ -31,7 +31,8 @@ func TestTargetAndContextIDs(t *testing.T) {
 	if ContextID("install", TargetID(target), "vscode") == ContextID("install", TargetID(target), "cursor") {
 		t.Fatal("profiles must have distinct ContextIDs")
 	}
-	if RuntimeHomeID(TargetID(target)) == RuntimeHomeID(TargetID(Target{User: "root", Hostname: "other.example.com", Port: 22})) {
+	if RuntimeHomeID(TargetID(target)) ==
+		RuntimeHomeID(TargetID(Target{User: "root", Hostname: "other.example.com", Port: 22})) {
 		t.Fatal("targets must have distinct runtime home IDs")
 	}
 	if len(RuntimeHomeID(TargetID(target))) != 32 {
@@ -40,7 +41,8 @@ func TestTargetAndContextIDs(t *testing.T) {
 }
 
 func TestConfigProbeArgsDropsActionOptions(t *testing.T) {
-	got := ConfigProbeArgs([]string{"-T", "-D", "43210", "-L8080:localhost:80", "-o", "ControlPath=/tmp/x", "-p", "2222", "host", "bash"})
+	got := ConfigProbeArgs([]string{
+		"-T", "-D", "43210", "-L8080:localhost:80", "-o", "ControlPath=/tmp/x", "-p", "2222", "host", "bash"})
 	want := []string{"-p", "2222", "host"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ConfigProbeArgs = %#v, want %#v", got, want)

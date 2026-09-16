@@ -29,7 +29,6 @@ type dockerContainer struct {
 
 type dockerTarget struct {
 	dockerContainer
-	Ref string
 }
 
 func (r *Runner) resolveDockerTarget(ctx context.Context, parsed sshcompat.Parsed) (dockerTarget, bool, error) {
@@ -117,11 +116,11 @@ func matchDockerTarget(target string, containers []dockerContainer) (dockerTarge
 	}
 	if len(idMatches) == 1 {
 		c := idMatches[0]
-		return dockerTarget{dockerContainer: c, Ref: c.ID}, true, nil
+		return dockerTarget{dockerContainer: c}, true, nil
 	}
 	for _, c := range containers {
 		if c.Name == target {
-			return dockerTarget{dockerContainer: c, Ref: c.ID}, true, nil
+			return dockerTarget{dockerContainer: c}, true, nil
 		}
 	}
 	return dockerTarget{}, false, nil
@@ -136,12 +135,18 @@ func shortDockerID(id string) string {
 
 func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target dockerTarget, cfg config.Config, timeout time.Duration) int {
 	features := cfg.Features
+	if features.Proxy {
+		if cfg.Strict {
+			fmt.Fprintln(r.Stderr, "sshx: proxy does not support Docker targets")
+			return 1
+		}
+		fmt.Fprintln(r.Stderr, "sshx: proxy skipped for Docker target")
+	}
 	if features.RemoteFS {
 		fmt.Fprintln(r.Stderr, "sshx: remoteFs does not support Docker targets yet")
 		return 1
 	}
 	remoteHome := ""
-	remoteReady := false
 	if features.CommandBridge {
 		if err := recordDefaultVersionState(clientVersion()); err != nil {
 			if cfg.Strict {
@@ -151,36 +156,29 @@ func (r *Runner) runDocker(ctx context.Context, parsed sshcompat.Parsed, target 
 			fmt.Fprintf(r.Stderr, "sshx: version state skipped: %v\n", err)
 		}
 		remoteID := identity.TargetID(identity.Target{User: "docker", Hostname: target.ID, Port: 1})
-		{
-			remoteHome = remoteServerHome(remoteID)
-			r.commandPolicy = cfg.Commands
-			r.commandBridge = features.CommandBridge
-			if err := r.ensureDockerServer(ctx, target.Ref, features, remoteHome); err != nil {
-				if cfg.Strict {
-					fmt.Fprintf(r.Stderr, "sshx: docker server unavailable for %s: %v\n", target.Name, err)
-					return 1
-				}
-				fmt.Fprintf(r.Stderr, "sshx: docker server skipped for %s: %v\n", target.Name, err)
-			} else {
-				stopBridge, err := r.startDockerBridge(ctx, target.Ref, remoteHome)
-				if err != nil {
-					if cfg.Strict {
-						fmt.Fprintf(r.Stderr, "sshx: docker command bridge unavailable for %s: %v\n", target.Name, err)
-						return 1
-					}
-					fmt.Fprintf(r.Stderr, "sshx: docker command bridge skipped for %s: %v\n", target.Name, err)
-				} else {
-					remoteReady = true
-					defer stopBridge()
-				}
+		remoteHome = remoteServerHome(remoteID)
+		r.commandPolicy = cfg.Commands
+		r.commandBridge = features.CommandBridge
+		if err := r.ensureDockerServer(ctx, target.ID, features, remoteHome); err != nil {
+			if cfg.Strict {
+				fmt.Fprintf(r.Stderr, "sshx: docker server unavailable for %s: %v\n", target.Name, err)
+				return 1
 			}
+			fmt.Fprintf(r.Stderr, "sshx: docker server skipped for %s: %v\n", target.Name, err)
+		} else if stopBridge, err := r.startDockerBridge(ctx, target.ID, remoteHome); err != nil {
+			if cfg.Strict {
+				fmt.Fprintf(r.Stderr, "sshx: docker command bridge unavailable for %s: %v\n", target.Name, err)
+				return 1
+			}
+			fmt.Fprintf(r.Stderr, "sshx: docker command bridge skipped for %s: %v\n", target.Name, err)
+		} else {
+			defer stopBridge()
+			interactive := isInteractiveIO(r.Stdin, r.Stdout)
+			return r.execDockerWithTimeout(ctx, dockerSessionArgs(parsed, target.ID, remoteHome, interactive), timeout)
 		}
 	}
 	interactive := isInteractiveIO(r.Stdin, r.Stdout)
-	if remoteReady {
-		return r.execDockerWithTimeout(ctx, dockerSessionArgs(parsed, target.Ref, remoteHome, interactive), timeout)
-	}
-	return r.execDockerWithTimeout(ctx, dockerPlainArgs(parsed, target.Ref, interactive), timeout)
+	return r.execDockerWithTimeout(ctx, dockerPlainArgs(parsed, target.ID, interactive), timeout)
 }
 
 func (r *Runner) startDockerBridge(ctx context.Context, container string, remoteHome string) (func(), error) {
@@ -270,26 +268,8 @@ func (r *Runner) fetchDockerToken(ctx context.Context, container string, remoteH
 	return info.Token, nil
 }
 
-func (r *Runner) execDocker(ctx context.Context, args []string) int {
-	return r.execDockerWithTimeout(ctx, args, 0)
-}
-
 func (r *Runner) execDockerWithTimeout(ctx context.Context, args []string, timeout time.Duration) int {
-	commandCtx, cancel := withCommandTimeout(ctx, timeout)
-	defer cancel()
-	if err := r.Exec(commandCtx, r.DockerPath, args); err != nil {
-		if timeout > 0 && errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
-			fmt.Fprintf(r.Stderr, "sshx: command timed out after %s\n", timeout)
-			return 124
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
-		}
-		fmt.Fprintf(r.Stderr, "sshx: exec docker: %v\n", err)
-		return 1
-	}
-	return 0
+	return r.execWithTimeout(ctx, r.DockerPath, args, timeout, "exec docker")
 }
 
 func dockerSessionArgs(parsed sshcompat.Parsed, container string, remoteHome string, interactive bool) []string {

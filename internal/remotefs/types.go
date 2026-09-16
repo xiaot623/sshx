@@ -2,7 +2,6 @@ package remotefs
 
 import (
 	"context"
-	"io"
 	"time"
 )
 
@@ -127,10 +126,4 @@ type Mount interface {
 
 type MountDriver interface {
 	Mount(context.Context, string, Backend, MountOptions) (Mount, error)
-}
-
-type ReadWriteCloser interface {
-	io.Reader
-	io.Writer
-	io.Closer
 }

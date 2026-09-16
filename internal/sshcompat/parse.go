@@ -48,9 +48,6 @@ func Parse(args []string) Parsed {
 			break
 		}
 		if optionsWithRequiredValue[arg] && i+1 < len(out.Args) {
-			if arg == "-Q" {
-				out.InfoMode = true
-			}
 			i++
 			continue
 		}
@@ -62,7 +59,7 @@ func Parse(args []string) Parsed {
 }
 
 func isInfoMode(arg string) bool {
-	return arg == "-V" || arg == "-G" || arg == "-Q" || strings.HasPrefix(arg, "-Q")
+	return arg == "-V" || arg == "-G" || strings.HasPrefix(arg, "-Q")
 }
 
 func consumesAttachedValue(arg string) bool {
@@ -70,4 +67,19 @@ func consumesAttachedValue(arg string) bool {
 		return false
 	}
 	return optionsWithRequiredValue[arg[:2]]
+}
+
+func InsertBeforeTarget(parsed Parsed, options []string) []string {
+	if parsed.TargetIndex < 0 || parsed.TargetIndex > len(parsed.Args) {
+		return append([]string(nil), parsed.Args...)
+	}
+	insertAt := parsed.TargetIndex
+	if insertAt > 0 && parsed.Args[insertAt-1] == "--" {
+		insertAt--
+	}
+	out := make([]string, 0, len(parsed.Args)+len(options))
+	out = append(out, parsed.Args[:insertAt]...)
+	out = append(out, options...)
+	out = append(out, parsed.Args[insertAt:]...)
+	return out
 }

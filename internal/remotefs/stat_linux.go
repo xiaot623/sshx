@@ -29,14 +29,6 @@ func fileInfoToAttr(info fs.FileInfo) Attr {
 	return attr
 }
 
-func attrTimes(info fs.FileInfo) (time.Time, time.Time) {
-	stat, _ := info.Sys().(*syscall.Stat_t)
-	if stat == nil {
-		return info.ModTime(), info.ModTime()
-	}
-	return time.Unix(stat.Atim.Sec, stat.Atim.Nsec), time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec)
-}
-
 func statFS(path string) (StatFS, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
@@ -52,17 +44,4 @@ func statFS(path string) (StatFS, error) {
 		NameLen: uint32(stat.Namelen),
 		Frsize:  uint32(stat.Frsize),
 	}, nil
-}
-
-func fileMode(mode fs.FileMode) uint32 {
-	out := uint32(mode.Perm())
-	switch {
-	case mode.IsDir():
-		out |= syscall.S_IFDIR
-	case mode&fs.ModeSymlink != 0:
-		out |= syscall.S_IFLNK
-	default:
-		out |= syscall.S_IFREG
-	}
-	return out
 }

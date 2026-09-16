@@ -28,7 +28,7 @@ type execCall struct {
 }
 
 func sameVersionRemoteProbe() []byte {
-	return []byte("Linux\nx86_64\n" + version.Version + "\n" + version.Version + "\n" + identity.RuntimeID + "\n1\n")
+	return []byte("Linux\nx86_64\n" + identity.RuntimeID + "\n1\n")
 }
 
 func isolateHome(t *testing.T) {
@@ -124,6 +124,7 @@ func TestHelpFlagPrintsSSHXHelpThenOpenSSHHelp(t *testing.T) {
 		"local <command>",
 		"SSHX_CONFIG=<path>",
 		"COMMANDBRIDGE=0|1",
+		"SSHX_USE_PROXY=0|1",
 		"SSHX_REMOTE_BINARY=<path>",
 		"RUNTIME ENVIRONMENT (SET BY SSHX)",
 		"SSHX_WORKSPACE",
@@ -185,7 +186,7 @@ func TestRemoteRuntimeSocketPathFitsLinuxLimit(t *testing.T) {
 
 func TestSessionSSHArgsInjectsRemoteHomeForInteractiveShell(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"debian"})
-	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	got := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/test-id", nil)
 	if len(got) != 3 {
 		t.Fatalf("args = %#v", got)
 	}
@@ -202,7 +203,7 @@ func TestSessionSSHArgsInjectsRemoteHomeForInteractiveShell(t *testing.T) {
 
 func TestSessionSSHArgsDoesNotWrapSessionlessSSH(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"-N", "debian"})
-	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	got := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/test-id", nil)
 	if !reflect.DeepEqual(got, []string{"-N", "debian"}) {
 		t.Fatalf("args = %#v", got)
 	}
@@ -210,7 +211,7 @@ func TestSessionSSHArgsDoesNotWrapSessionlessSSH(t *testing.T) {
 
 func TestSessionSSHArgsRunsSingleRemoteCommandThroughShell(t *testing.T) {
 	parsed := sshcompat.Parse([]string{"debian", "echo ok; sshx local uname -s"})
-	got := sessionSSHArgs(parsed, "$HOME/.sshx_server/test-id")
+	got := sessionSSHArgsForBridge(parsed, "$HOME/.sshx_server/test-id", nil)
 	if len(got) != 2 || got[0] != "debian" {
 		t.Fatalf("args = %#v", got)
 	}
@@ -319,7 +320,7 @@ func TestEnsureRemoteServerInstallsClientVersionFromLocalDownload(t *testing.T) 
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\naarch64\n1.2.3-rc.0\n1.2.3-rc.0\n\n1\n"), nil
+		return []byte("Linux\naarch64\n\n1\n"), nil
 	}
 	r.DownloadBinary = func(_ context.Context, targetVersion, assetName string) (string, error) {
 		downloadedVersion = targetVersion
@@ -369,7 +370,7 @@ func TestEnsureRemoteServerKeepsCompatibleRuntimeAcrossAppVersions(t *testing.T)
 	var execCalls []execCall
 	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
-		return []byte("Linux\nx86_64\n1.2.3\n\n" + identity.RuntimeID + "\n1\n"), nil
+		return []byte("Linux\nx86_64\n" + identity.RuntimeID + "\n1\n"), nil
 	}
 	r.DownloadBinary = func(context.Context, string, string) (string, error) {
 		t.Fatal("binary should not be downloaded when installed binary already matches")
@@ -626,6 +627,85 @@ features:
 	}
 	if !bridgeStarted {
 		t.Fatal("bridge was not started")
+	}
+}
+
+func TestGlobalProxyFeatureStartsBridgeAndInjectsEnvironment(t *testing.T) {
+	isolateHome(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+features:
+  proxy: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var bridgeStarted bool
+	var delegated []string
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	r.ConfigPath = configPath
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return sameVersionRemoteProbe(), nil
+	}
+	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
+		bridgeStarted = true
+		return &BridgeSession{
+			SessionID: "test",
+			ProxyURL:  "socks5h://127.0.0.1:43123",
+			stop:      func() {},
+		}, nil
+	}
+	r.Exec = func(_ context.Context, _ string, args []string) error {
+		delegated = append([]string(nil), args...)
+		return nil
+	}
+	code := r.Run(context.Background(), []string{"remote", "env"})
+	if code != 0 || !bridgeStarted {
+		t.Fatalf("code = %d, bridgeStarted = %v", code, bridgeStarted)
+	}
+	joined := strings.Join(delegated, " ")
+	for _, want := range []string{"HTTP_PROXY=", "ALL_PROXY=", "127.0.0.1:43123", "NO_PROXY="} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("delegated command missing %q: %s", want, joined)
+		}
+	}
+}
+
+func TestNonStrictKeepsBridgeWhenProxyIsUnavailable(t *testing.T) {
+	isolateHome(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+features:
+  commandBridge: true
+  autoForward: true
+  proxy: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var delegated []string
+	var stderr bytes.Buffer
+	r := NewRunner(strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	r.ConfigPath = configPath
+	r.EnsureResolver = func(context.Context) error { return nil }
+	r.ExecOutput = func(context.Context, string, []string) ([]byte, error) {
+		return sameVersionRemoteProbe(), nil
+	}
+	r.StartBridge = func(context.Context, string, []string, string) (*BridgeSession, error) {
+		return &BridgeSession{SessionID: "test", stop: func() {}}, nil
+	}
+	r.Exec = func(_ context.Context, _ string, args []string) error {
+		delegated = append([]string(nil), args...)
+		return nil
+	}
+	code := r.Run(context.Background(), []string{"remote", "env"})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	joined := strings.Join(delegated, " ")
+	if !strings.Contains(joined, "SSHX_SERVER_HOME") || !strings.Contains(joined, "SSHX_SESSION_ID") {
+		t.Fatalf("fell back to raw SSH: %s", joined)
+	}
+	if strings.Contains(joined, "HTTP_PROXY=") || strings.Contains(joined, "ALL_PROXY=") {
+		t.Fatalf("injected proxy environment after skip: %s", joined)
 	}
 }
 

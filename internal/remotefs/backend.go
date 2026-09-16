@@ -33,14 +33,10 @@ func OpenRootBackend(path string) (*RootBackend, error) {
 	return OpenRootBackendWithOptions(path, RootBackendOptions{})
 }
 
-// OpenRootBackendExcluding hides paths below root. It is used to keep managed
-// sshx mount directories out of a home export, which would otherwise create a
-// recursive RemoteFS view during reverse commands.
-func OpenRootBackendExcluding(path string, excludedPaths ...string) (*RootBackend, error) {
-	return OpenRootBackendWithOptions(path, RootBackendOptions{}, excludedPaths...)
-}
-
-func OpenRootBackendWithOptions(path string, options RootBackendOptions, excludedPaths ...string) (*RootBackend, error) {
+func OpenRootBackendWithOptions(
+	path string,
+	options RootBackendOptions,
+	excludedPaths ...string) (*RootBackend, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -95,6 +91,19 @@ func cleanPath(name string) (string, error) {
 
 func isVisibleMode(mode fs.FileMode) bool {
 	return mode.IsRegular() || mode.IsDir() || mode&os.ModeSymlink != 0
+}
+
+func fileMode(mode fs.FileMode) uint32 {
+	out := uint32(mode.Perm())
+	switch {
+	case mode.IsDir():
+		out |= syscall.S_IFDIR
+	case mode&fs.ModeSymlink != 0:
+		out |= syscall.S_IFLNK
+	default:
+		out |= syscall.S_IFREG
+	}
+	return out
 }
 
 func (b *RootBackend) Lookup(_ context.Context, name string) (Attr, error) {
@@ -185,8 +194,6 @@ func localOpenFlags(flags OpenFlags) (int, error) {
 		local = os.O_WRONLY
 	case OpenRead | OpenWrite:
 		local = os.O_RDWR
-	default:
-		return 0, syscall.EINVAL
 	}
 	if flags&OpenCreate != 0 {
 		local |= os.O_CREATE
@@ -279,6 +286,14 @@ func (b *RootBackend) Mkdir(_ context.Context, name string, mode uint32) (Attr, 
 }
 
 func (b *RootBackend) Unlink(_ context.Context, name string) error {
+	return b.remove(name, false)
+}
+
+func (b *RootBackend) Rmdir(_ context.Context, name string) error {
+	return b.remove(name, true)
+}
+
+func (b *RootBackend) remove(name string, directory bool) error {
 	if b.options.DisableDelete {
 		return syscall.EPERM
 	}
@@ -290,34 +305,17 @@ func (b *RootBackend) Unlink(_ context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if info.IsDir() {
+	if directory {
+		if !info.IsDir() {
+			return syscall.ENOTDIR
+		}
+	} else if info.IsDir() {
 		return syscall.EISDIR
 	}
 	return b.root.Remove(name)
 }
 
-func (b *RootBackend) Rmdir(_ context.Context, name string) error {
-	if b.options.DisableDelete {
-		return syscall.EPERM
-	}
-	name, err := b.cleanPath(name)
-	if err != nil {
-		return err
-	}
-	info, err := b.root.Lstat(name)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return syscall.ENOTDIR
-	}
-	return b.root.Remove(name)
-}
-
 func (b *RootBackend) Rename(_ context.Context, oldName, newName string) error {
-	if b.options.DisableDelete {
-		return syscall.EPERM
-	}
 	oldName, err := b.cleanPath(oldName)
 	if err != nil {
 		return err
@@ -325,6 +323,11 @@ func (b *RootBackend) Rename(_ context.Context, oldName, newName string) error {
 	newName, err = b.cleanPath(newName)
 	if err != nil {
 		return err
+	}
+	// DisableDelete blocks unlink/rmdir and cross-directory rename (a move-out).
+	// Same-directory rename, including overwrite, is allowed for atomic editor saves.
+	if b.options.DisableDelete && filepath.Dir(oldName) != filepath.Dir(newName) {
+		return syscall.EPERM
 	}
 	return b.root.Rename(oldName, newName)
 }
@@ -413,7 +416,9 @@ func (b *RootBackend) Setattr(_ context.Context, name string, handle uint64, cha
 		if statErr != nil {
 			return Attr{}, statErr
 		}
-		atime, mtime := attrTimes(info)
+		current := fileInfoToAttr(info)
+		atime := time.Unix(0, current.AtimeNano)
+		mtime := time.Unix(0, current.MtimeNano)
 		if change.AtimeNano != nil {
 			atime = time.Unix(0, *change.AtimeNano)
 		}

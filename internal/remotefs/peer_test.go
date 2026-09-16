@@ -143,7 +143,11 @@ func TestPeerUsesPortableCreateTruncateAndExclusiveFlags(t *testing.T) {
 	if err := remote.Close(ctx, handle); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := remote.Open(ctx, "created.txt", OpenWrite|OpenCreate|OpenExclusive, 0o600); !errors.Is(err, syscall.EEXIST) {
+	if _, _, err := remote.Open(
+		ctx,
+		"created.txt",
+		OpenWrite|OpenCreate|OpenExclusive,
+		0o600); !errors.Is(err, syscall.EEXIST) {
 		t.Fatalf("exclusive create error = %v", err)
 	}
 	handle, _, err = remote.Open(ctx, "created.txt", OpenWrite|OpenTruncate, 0)
@@ -358,7 +362,11 @@ func TestPeerMountLifecycleCallbacks(t *testing.T) {
 			return nil
 		},
 	})
-	path, err := client.CreateMountAtWithOptions(context.Background(), "workspace", "Users/xiaot", MountOptions{ReadOnly: true})
+	path, err := client.CreateMountAtWithOptions(
+		context.Background(),
+		"workspace",
+		"Users/xiaot",
+		MountOptions{ReadOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +405,14 @@ func TestPeerRejectsExportsAfterClose(t *testing.T) {
 }
 
 func TestWireFrameRoundTripAndLimits(t *testing.T) {
-	frame := wireFrame{Type: frameRequest, ID: 42, Op: "write", MountID: "workspace", OpenFlags: OpenWrite | OpenCreate, ErrorCode: ErrorExists, Data: []byte("hello")}
+	frame := wireFrame{
+		Type: frameRequest,
+		ID: 42,
+		Op: "write",
+		MountID: "workspace",
+		OpenFlags: OpenWrite | OpenCreate,
+		ErrorCode: ErrorExists,
+		Data: []byte("hello")}
 	var buffer bytes.Buffer
 	if err := writeWireFrame(&buffer, frame); err != nil {
 		t.Fatal(err)
@@ -406,7 +421,11 @@ func TestWireFrameRoundTripAndLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != frame.ID || got.Op != frame.Op || got.OpenFlags != frame.OpenFlags || got.ErrorCode != frame.ErrorCode || !bytes.Equal(got.Data, frame.Data) {
+	if got.ID != frame.ID ||
+		got.Op != frame.Op ||
+		got.OpenFlags != frame.OpenFlags ||
+		got.ErrorCode != frame.ErrorCode ||
+		!bytes.Equal(got.Data, frame.Data) {
 		t.Fatalf("round trip = %#v", got)
 	}
 	frame.Data = make([]byte, MaxDataSize+1)

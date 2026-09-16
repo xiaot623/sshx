@@ -2,27 +2,28 @@
 
 package ports
 
-import "os"
+import (
+	"net"
 
-func ScanLoopbackListening() ([]int, error) {
-	tcp4, err := scanProcFile("/proc/net/tcp", false)
+	psnet "github.com/shirou/gopsutil/v4/net"
+)
+
+func ScanLoopbackListeners() ([]Listener, error) {
+	// "tcp" returns both IPv4 and IPv6 TCP sockets, including LISTEN.
+	conns, err := psnet.Connections("tcp")
 	if err != nil {
 		return nil, err
 	}
-	tcp6, err := scanProcFile("/proc/net/tcp6", true)
-	if err != nil {
-		return nil, err
-	}
-	return mergePorts(tcp4, tcp6), nil
-}
-
-func scanProcFile(path string, ipv6 bool) ([]int, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+	var found []Listener
+	for _, c := range conns {
+		if c.Status != "LISTEN" {
+			continue
 		}
-		return nil, err
+		l, ok := listenerFromAddr(net.ParseIP(c.Laddr.IP), int(c.Laddr.Port))
+		if !ok {
+			continue
+		}
+		found = append(found, l)
 	}
-	return parseProcNetTCP(string(b), ipv6)
+	return mergeListeners(found), nil
 }

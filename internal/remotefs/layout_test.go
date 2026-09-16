@@ -14,10 +14,17 @@ func TestResolveExportLayoutPreservesHomeHierarchy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if layout.RootPath != home || layout.RelativeCwd != filepath.Join("workspace", "sshx") || layout.MountPath != "Users/xiaot" {
+	if layout.RootPath != home ||
+		layout.RelativeCwd != filepath.Join("workspace", "sshx") ||
+		layout.MountPath != "Users/xiaot" {
 		t.Fatalf("layout = %#v", layout)
 	}
-	mountRoot := filepath.Join(string(filepath.Separator), "remote", "mounts", "session", filepath.FromSlash(layout.MountPath))
+	mountRoot := filepath.Join(
+		string(filepath.Separator),
+		"remote",
+		"mounts",
+		"session",
+		filepath.FromSlash(layout.MountPath))
 	workspace, err := WorkspacePathBelow(mountRoot, filepath.ToSlash(layout.RelativeCwd))
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +67,7 @@ func TestRootBackendExcludesManagedMountTree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(managed, "recursive"), []byte("hidden"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	backend, err := OpenRootBackendExcluding(root, managed)
+	backend, err := OpenRootBackendWithOptions(root, RootBackendOptions{}, managed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +81,9 @@ func TestRootBackendExcludesManagedMountTree(t *testing.T) {
 			t.Fatal("managed mount tree was visible")
 		}
 	}
-	if _, err := backend.Lookup(context.Background(), filepath.Join(".sshx_server", "id", "mounts", "recursive")); err == nil {
+	if _, err := backend.Lookup(
+		context.Background(),
+		filepath.Join(".sshx_server", "id", "mounts", "recursive")); err == nil {
 		t.Fatal("managed mount tree was directly accessible")
 	}
 }

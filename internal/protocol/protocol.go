@@ -20,7 +20,6 @@ const (
 	TypeCommandError  = "command.error"
 	TypePortObserved  = "port.observed"
 	TypePortGone      = "port.gone"
-	TypePortForward   = "port.forward"
 	TypeError         = "error"
 	TypeHeartbeat     = "heartbeat"
 	TypeHeartbeatAck  = "heartbeat.ack"
@@ -65,16 +64,6 @@ type Frame struct {
 	Host            string            `json:"host,omitempty"`
 }
 
-func Compatible(minVersion, maxVersion int) bool {
-	if minVersion == 0 {
-		minVersion = Version
-	}
-	if maxVersion == 0 {
-		maxVersion = Version
-	}
-	return minVersion <= MaxVersion && maxVersion >= MinVersion
-}
-
 func FrameCompatible(frame Frame) bool {
 	if frame.ProtocolMin == 0 && frame.ProtocolMax == 0 && frame.ProtocolVersion == 0 {
 		return false
@@ -86,7 +75,13 @@ func FrameCompatible(frame Frame) bool {
 	if maxVersion == 0 {
 		maxVersion = frame.ProtocolVersion
 	}
-	return Compatible(minVersion, maxVersion)
+	if minVersion == 0 {
+		minVersion = Version
+	}
+	if maxVersion == 0 {
+		maxVersion = Version
+	}
+	return minVersion <= MaxVersion && maxVersion >= MinVersion
 }
 
 type Encoder struct {

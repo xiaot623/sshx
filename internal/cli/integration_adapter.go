@@ -78,15 +78,22 @@ func (r *Runner) runIntegrationAdapter(ctx context.Context, invocation string, a
 		defer os.RemoveAll(controlDir)
 	}
 
-	mainParsedInput := sshcompat.Parse(stripControlOptions(integrationSessionSSHArgs(parsed, connection.ContextID, contextHome)))
+	mainParsedInput := sshcompat.Parse(stripControlOptions(integrationSessionSSHArgsWithProxy(
+		parsed,
+		connection.ContextID,
+		contextHome,
+		connection.SessionID,
+		cfg.Features.Proxy,
+		cfg.Strict,
+	)))
 	controlOptions := []string{"-o", "ControlMaster=no", "-S", controlPath}
 	if controlMaster {
 		controlOptions = []string{"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-S", controlPath}
 	}
-	mainArgs := insertBeforeTarget(mainParsedInput, controlOptions)
+	mainArgs := sshcompat.InsertBeforeTarget(mainParsedInput, controlOptions)
 
 	sidecarParsedInput := sshcompat.Parse(stripAuxiliaryActionOptions(stripControlOptions(parsed.Args)))
-	sidecarArgs := insertBeforeTarget(sidecarParsedInput, []string{"-o", "ControlMaster=no", "-o", "ControlPath=" + controlPath, "-o", "ClearAllForwardings=yes"})
+	sidecarArgs := sshcompat.InsertBeforeTarget(sidecarParsedInput, []string{"-o", "ControlMaster=no", "-o", "ControlPath=" + controlPath, "-o", "ClearAllForwardings=yes"})
 	sidecarBase := baseSSHArgs(sshcompat.Parse(sidecarArgs))
 
 	mainCtx, cancel := context.WithCancel(ctx)
@@ -164,6 +171,46 @@ func (r *Runner) runIntegrationSidecar(
 	sidecarRunner.integrationSidecar = true
 
 	sidecarFeatures := cfg.Features
+	sidecarFeatures.Proxy = false
+	transport := sshServerTransport{r: sidecarRunner, sshArgs: sshArgs}
+	contextHome := remoteContextHome(connection.TargetID, connection.ContextID)
+	proxyStateWritten := false
+	proxyTunnelActive := false
+	defer func() {
+		if proxyStateWritten {
+			removeIntegrationProxyState(transport, contextHome, connection.SessionID)
+		}
+	}()
+	if cfg.Features.Proxy {
+		tunnel, proxyErr := sidecarRunner.startProxyTunnel(ctx, sshArgs, controlPath)
+		if proxyErr != nil {
+			r.logIntegration(descriptor.Profile, proxyErr)
+			if err := writeIntegrationProxyState(ctx, transport, contextHome, connection.SessionID, proxyEnvironment{}, proxyErr); err != nil {
+				r.logIntegration(descriptor.Profile, fmt.Errorf("write proxy error state: %w", err))
+			} else {
+				proxyStateWritten = true
+			}
+			if cfg.Strict {
+				<-ctx.Done()
+				return
+			}
+		} else if err := writeIntegrationProxyState(ctx, transport, contextHome, connection.SessionID, tunnel.environment, nil); err != nil {
+			tunnel.Close()
+			r.logIntegration(descriptor.Profile, fmt.Errorf("write proxy environment: %w", err))
+			if cfg.Strict {
+				<-ctx.Done()
+				return
+			}
+		} else {
+			proxyStateWritten = true
+			proxyTunnelActive = true
+			defer tunnel.Close()
+		}
+	}
+	if !sidecarFeatures.Enabled() {
+		<-ctx.Done()
+		return
+	}
 	if sidecarRunner.autoForward {
 		if err := sidecarRunner.EnsureResolver(ctx); err != nil {
 			_, _ = fmt.Fprintf(logWriter, "%s resolver: %v\n", time.Now().UTC().Format(time.RFC3339Nano), err)
@@ -173,15 +220,24 @@ func (r *Runner) runIntegrationSidecar(
 	}
 	if err := sidecarRunner.ensureRemoteServer(ctx, sshArgs, sidecarFeatures, remoteHome); err != nil {
 		r.logIntegration(descriptor.Profile, fmt.Errorf("remote server: %w", err))
+		if proxyTunnelActive {
+			<-ctx.Done()
+		}
 		return
 	}
 	if err := sidecarRunner.ensureRemoteContextLauncher(ctx, sshArgs, connection, remoteHome, cfg.Features.RemoteFS); err != nil {
 		r.logIntegration(descriptor.Profile, fmt.Errorf("context launcher: %w", err))
+		if proxyTunnelActive {
+			<-ctx.Done()
+		}
 		return
 	}
 	sidecar, err := sidecarRunner.StartBridge(ctx, target, sshArgs, remoteHome)
 	if err != nil {
 		r.logIntegration(descriptor.Profile, fmt.Errorf("sidecar: %w", err))
+		if proxyTunnelActive {
+			<-ctx.Done()
+		}
 		return
 	}
 	defer sidecar.Stop()
@@ -266,21 +322,6 @@ func (r *Runner) execAdapterCommand(ctx context.Context, path string, args []str
 		}
 	}
 	return 1
-}
-
-func insertBeforeTarget(parsed sshcompat.Parsed, options []string) []string {
-	if parsed.TargetIndex < 0 || parsed.TargetIndex > len(parsed.Args) {
-		return append([]string(nil), parsed.Args...)
-	}
-	insertAt := parsed.TargetIndex
-	if insertAt > 0 && parsed.Args[insertAt-1] == "--" {
-		insertAt--
-	}
-	out := make([]string, 0, len(parsed.Args)+len(options))
-	out = append(out, parsed.Args[:insertAt]...)
-	out = append(out, options...)
-	out = append(out, parsed.Args[insertAt:]...)
-	return out
 }
 
 func stripControlOptions(args []string) []string {
@@ -486,27 +527,9 @@ func (r *Runner) logIntegration(profile integration.Profile, err error) {
 	if err == nil {
 		return
 	}
-	home, homeErr := os.UserHomeDir()
-	if homeErr != nil {
-		return
-	}
-	path := filepath.Join(integration.DefaultRoot(home), string(profile), "integration.log")
-	dir := filepath.Dir(path)
-	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
-		return
-	}
-	if chmodErr := os.Chmod(dir, 0o700); chmodErr != nil {
-		return
-	}
-	f, openErr := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if openErr != nil {
-		return
-	}
-	defer f.Close()
-	if chmodErr := f.Chmod(0o600); chmodErr != nil {
-		return
-	}
-	_, _ = fmt.Fprintf(f, "%s %v\n", time.Now().UTC().Format(time.RFC3339Nano), err)
+	w, closeLog := r.integrationLogWriter(profile)
+	defer closeLog()
+	_, _ = fmt.Fprintf(w, "%s %v\n", time.Now().UTC().Format(time.RFC3339Nano), err)
 }
 
 func (r *Runner) integrationLogWriter(profile integration.Profile) (io.Writer, func()) {

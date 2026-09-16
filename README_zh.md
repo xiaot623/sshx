@@ -12,6 +12,7 @@
 - 📁 **双向工作区挂载** — 普通 CLI 会话既可用远端工具操作本地文件，也可用本地工具操作远端文件。
 - 🔌 **自动端口转发** — 远程本地监听端口（回环 `127.0.0.1` 与通配 `0.0.0.0`；如在 `0.0.0.0:8080` 或 `localhost:8080` 上的开发服务器）被自动检测并转发到本地。
 - 🌐 **本地域名绑定** — 在本地浏览器中通过 `<主机>.<用户名>.sshx:<端口>` 访问转发端口，无需手动设置 `-L` 参数。
+- 🛡️ **远端出口代理** — 按需让远端工具通过本地客户端的代理或 TUN 网络栈访问外部网络。
 - 🐳 **Docker 容器支持** — 通过名称或 ID 直接连接运行中的容器：`sshx my-container`。命令桥可通过 `docker exec` 在容器内工作。
 
 ## 目录
@@ -162,6 +163,22 @@ ls /dev/macfuse*
 **macOS 15.4+ FSKit 说明：**macFUSE 5 提供纯用户态 FSKit 后端，不需要内核扩展、恢复模式安全设置或重启，但它对 sshx 当前的挂载实现并非零改动透明，因此尚未启用。macFUSE 要求显式传入 `-o backend=fskit`；FSKit 只允许挂载到 `/Volumes` 下，并且不支持多项传统 mount option。sshx 当前在运行时临时目录下创建私有挂载点，并传入面向 VFS 的选项。支持 FSKit 需要增加专用的挂载路径和选项适配层，但 RemoteFS 线协议与文件操作后端无需改变。
 
 来源绝对路径会作为层级保留在 sshx 的私有 session 目录下，但命令参数中的绝对路径不会被改写。RemoteFS 不暴露特殊文件、xattr/ACL，也不支持 Docker target、FUSE-T 或 FSKit。目标负载是源码树与小文件，不追求大文件吞吐。
+
+### 🛡️ 远端出口代理（按需开启）
+
+设置 `features.proxy: true` 或使用 `SSHX_USE_PROXY=1`，即可在远端会话中获得 OpenSSH 原生的远端动态 SOCKS 端点，流量从笔记本侧出口：
+
+```sh
+SSHX_USE_PROXY=1 sshx remote
+```
+
+sshx 在已有 ControlMaster 上执行 `ssh -O forward -R 127.0.0.1:0`（不带本地目的地址），由 OpenSSH 在远端充当 SOCKS 服务器，连接从客户端离开。远端会话内会覆盖大小写 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY` 为 `socks5h://127.0.0.1:<port>`，因此只读取 `HTTP_PROXY` 的 curl、Git 等工具也能走代理。已有 `NO_PROXY` 会保留，并追加远端回环地址。
+
+不再启动自定义本地 HTTP/SOCKS 进程，也没有每会话凭据或 `SSHX_PROXY_URL` 链式上游。通过 `socks5h://` 发送的域名在笔记本上解析；本机使用 TUN 时，该出口会被 TUN 自然接管。
+
+远端入口只绑定 `127.0.0.1`，端口由 OpenSSH 动态分配。
+
+该能力覆盖 curl、Git、常见包管理器等遵循代理环境变量的 TCP 应用；不提供远端 TUN、UDP/ICMP、PAC/系统 GUI 代理发现，也不支持 Docker target。
 
 ### 🔌 自动端口检测与转发
 
@@ -340,6 +357,10 @@ features:
   # 每个接收挂载的一端都需要 FUSE。
   remoteFs: false
 
+  # 让遵循代理变量的远端 TCP 应用通过本地客户端访问网络。
+  # 默认：false；SSHX_USE_PROXY=0|1 可覆盖此值。
+  proxy: false
+
 commands:
   # 阻止通过命令桥执行的命令列表。
   deny: []
@@ -366,7 +387,7 @@ commands:
 1. **连接**：`sshx remote` 打开正常 SSH 会话，并在 `~/.sshx_server/runtimes/<RuntimeHomeID>` 下启动兼容 runtime。
 2. **Sidecar 通道**：一条隐藏 SSH 通道复用命令、端口、心跳和可选 RemoteFS 流量；ContextID 将 VS Code/Cursor 终端路由到健康活动 session。
 3. **端口嗅探**：服务器读取 `/proc/net/tcp*`（Linux）来检测回环（`127.0.0.1` / `::1`）和通配（`0.0.0.0` / `::`）监听端口。
-4. **转发**：检测到的端口通过单个共享本地守护进程使用 `ssh -W` 转发。
+4. **转发**：检测到的端口通过单个共享本地守护进程使用 OpenSSH `ssh -O forward -L` 转发。
 5. **域名**：本地 DNS 应答器将 `<target>.<suffix>` 映射到 localhost。浏览器 URL 中的端口选择对应的本地转发端口。
 
 当 `sshx` 用于**不匹配的主机**时（无 sshx 配置或主机不在范围内），会先检查目标是否可解析为运行中的 Docker 容器。如果 SSH 和 Docker 都不匹配，则直接 `exec` 真正的 `ssh`——无守护进程，无安装，无开销。
@@ -380,6 +401,7 @@ commands:
 - 在**客户端**上执行 `sshx local ...`（非远程会话中）— 立即报错并给出清晰提示。`local` 是全局保留名称。
 - `remoteFs` 不会静默回退到未挂载的命令；FUSE 挂载失败即失败。
 - 远端导出使用 Go `os.Root` 锚定，拒绝路径穿越和符号链接逃逸。
+- 远端出口代理是 OpenSSH 远端动态 SOCKS，只绑定回环地址。
 - Docker 容器未运行或不可达时纯透传——sshx 回退到原始 `ssh`，无副作用。
 - 不匹配的主机纯透传——不创建文件，不启动进程。
 

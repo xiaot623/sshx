@@ -5,7 +5,8 @@ const type = process.argv.slice(2).find((arg) => !arg.startsWith("--"));
 const validTypes = ["patch", "minor", "major"];
 
 if (!type || !validTypes.includes(type)) {
-  console.error("\nError: Please specify a valid release type (patch, minor, or major)");
+  const allowed = `${validTypes.slice(0, -1).join(", ")}, or ${validTypes[validTypes.length - 1]}`;
+  console.error(`\nError: Please specify a valid release type (${allowed})`);
   console.error("\nUsage:");
   console.error("  npm run release:patch  # 0.0.1 -> 0.0.2");
   console.error("  npm run release:minor  # 0.0.1 -> 0.1.0");

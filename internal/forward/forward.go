@@ -4,32 +4,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 type Manager struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	sshPath   string
-	sshArgs   []string
-	transport func() (string, []string, bool)
-	stderr    io.Writer
+	ctx         context.Context
+	cancel      context.CancelFunc
+	transport   func() (string, []string, string)
+	execControl func(context.Context, string, []string) ([]byte, error)
 
 	mu       sync.Mutex
 	byRemote map[int]*Forward
-	active   map[net.Conn]struct{}
 	stopped  bool
-	wg       sync.WaitGroup
 }
 
 type Forward struct {
-	RemotePort int
-	LocalPort  int
-	ListenIP   string
-	listener   net.Listener
+	RemotePort  int
+	LocalPort   int
+	ListenIP    string
+	spec        string
+	sshPath     string
+	sshArgs     []string
+	controlPath string
+	listener    net.Listener
 }
 
 type Entry struct {
@@ -38,25 +38,18 @@ type Entry struct {
 	ListenIP   string
 }
 
-func NewManager(ctx context.Context, sshPath string, sshArgs []string, stderr io.Writer) *Manager {
-	return NewDynamicManager(ctx, func() (string, []string, bool) {
-		return sshPath, append([]string(nil), sshArgs...), sshPath != ""
-	}, stderr)
-}
-
-func NewDynamicManager(ctx context.Context, transport func() (string, []string, bool), stderr io.Writer) *Manager {
+func NewDynamicManager(ctx context.Context, transport func() (string, []string, string)) *Manager {
 	managerCtx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		ctx:       managerCtx,
-		cancel:    cancel,
-		transport: transport,
-		stderr:    stderr,
-		byRemote:  map[int]*Forward{},
-		active:    map[net.Conn]struct{}{},
+		ctx:         managerCtx,
+		cancel:      cancel,
+		transport:   transport,
+		execControl: execControlOutput,
+		byRemote:    map[int]*Forward{},
 	}
 }
 
-func (m *Manager) Ensure(remotePort int, listenIP string) (*Forward, error) {
+func (m *Manager) Ensure(remotePort int, listenIP string, remoteHost string) (*Forward, error) {
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
@@ -71,22 +64,53 @@ func (m *Manager) Ensure(remotePort int, listenIP string) (*Forward, error) {
 	if listenIP == "" {
 		return nil, errors.New("listen IP is required")
 	}
-	ln, err := net.Listen("tcp", net.JoinHostPort(listenIP, fmt.Sprint(remotePort)))
-	if err != nil {
-		return nil, err
+	sshPath, sshArgs, controlPath := m.transport()
+
+	var f *Forward
+	if controlPath != "" {
+		if sshPath == "" {
+			return nil, errors.New("ssh control transport is unavailable")
+		}
+		spec := LocalForwardSpec(listenIP, remotePort, remoteHost)
+		if err := m.controlOp(m.ctx, sshPath, sshArgs, controlPath, "forward", spec); err != nil {
+			m.mu.Lock()
+			existing := m.byRemote[remotePort]
+			m.mu.Unlock()
+			if existing != nil {
+				return existing, nil
+			}
+			return nil, err
+		}
+		f = &Forward{
+			RemotePort:  remotePort,
+			LocalPort:   remotePort,
+			ListenIP:    listenIP,
+			spec:        spec,
+			sshPath:     sshPath,
+			sshArgs:     append([]string(nil), sshArgs...),
+			controlPath: controlPath,
+		}
+	} else {
+		ln, err := net.Listen("tcp", net.JoinHostPort(listenIP, fmt.Sprint(remotePort)))
+		if err != nil {
+			return nil, err
+		}
+		f = &Forward{RemotePort: remotePort, LocalPort: remotePort, ListenIP: listenIP, listener: ln}
 	}
-	f := &Forward{RemotePort: remotePort, LocalPort: remotePort, ListenIP: listenIP, listener: ln}
 
 	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		m.drop(f)
+		return nil, errors.New("forward manager is stopped")
+	}
 	if existing := m.byRemote[remotePort]; existing != nil {
 		m.mu.Unlock()
-		_ = ln.Close()
+		m.abandon(f)
 		return existing, nil
 	}
 	m.byRemote[remotePort] = f
 	m.mu.Unlock()
-
-	go m.acceptLoop(f)
 	return f, nil
 }
 
@@ -106,7 +130,7 @@ func (m *Manager) Remove(remotePort int) {
 	delete(m.byRemote, remotePort)
 	m.mu.Unlock()
 	if f != nil {
-		_ = f.listener.Close()
+		m.drop(f)
 	}
 }
 
@@ -121,84 +145,51 @@ func (m *Manager) Stop() {
 	for _, f := range m.byRemote {
 		forwards = append(forwards, f)
 	}
-	connections := make([]net.Conn, 0, len(m.active))
-	for conn := range m.active {
-		connections = append(connections, conn)
-	}
 	m.byRemote = map[int]*Forward{}
 	m.mu.Unlock()
-	m.cancel()
 	for _, f := range forwards {
-		_ = f.listener.Close()
+		m.drop(f)
 	}
-	for _, conn := range connections {
-		_ = conn.Close()
-	}
-	m.wg.Wait()
+	m.cancel()
 }
 
-func (m *Manager) acceptLoop(f *Forward) {
-	for {
-		conn, err := f.listener.Accept()
-		if err != nil {
-			return
-		}
-		m.mu.Lock()
-		if m.stopped {
-			m.mu.Unlock()
-			_ = conn.Close()
-			return
-		}
-		m.active[conn] = struct{}{}
-		m.wg.Add(1)
-		m.mu.Unlock()
-		go func() {
-			defer m.wg.Done()
-			defer func() {
-				m.mu.Lock()
-				delete(m.active, conn)
-				m.mu.Unlock()
-			}()
-			m.handleConn(conn, f.RemotePort)
-		}()
+func (m *Manager) drop(f *Forward) {
+	m.abandon(f)
+	if f == nil || f.controlPath == "" || f.spec == "" || f.sshPath == "" {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = m.controlOp(ctx, f.sshPath, f.sshArgs, f.controlPath, "cancel", f.spec)
 }
 
-func (m *Manager) handleConn(conn net.Conn, remotePort int) {
-	defer conn.Close()
-	sshPath, sshArgs, ok := m.transport()
-	if !ok {
+// abandon releases an in-process listener without cancelling an OpenSSH
+// forward. Used when a racing Ensure lost the registration race: the winner
+// already owns the same -L spec, and -O cancel would tear it down.
+func (m *Manager) abandon(f *Forward) {
+	if f == nil || f.listener == nil {
 		return
 	}
-	args := make([]string, 0, len(sshArgs)+2)
-	args = append(args, "-W", fmt.Sprintf("127.0.0.1:%d", remotePort))
-	args = append(args, sshArgs...)
-	cmd := exec.CommandContext(m.ctx, sshPath, args...)
-	stdin, err := cmd.StdinPipe()
+	_ = f.listener.Close()
+	f.listener = nil
+}
+
+func (m *Manager) controlOp(
+	ctx context.Context,
+	sshPath string,
+	sshArgs []string,
+	controlPath,
+	operation,
+	spec string) error {
+	args := ControlOperationArgs(sshArgs, controlPath, operation, "L", spec)
+	output, err := m.execControl(ctx, sshPath, args)
 	if err != nil {
-		return
+		return controlForwardError(output, err)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-		return
-	}
-	cmd.Stderr = m.stderr
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		return
-	}
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(stdin, conn)
-		_ = stdin.Close()
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(conn, stdout)
-		done <- struct{}{}
-	}()
-	<-done
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
+	return nil
+}
+
+func execControlOutput(ctx context.Context, sshPath string, args []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, sshPath, args...)
+	return cmd.CombinedOutput()
 }

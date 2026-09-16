@@ -93,9 +93,9 @@ const a11y = locale === 'en'
       </div>
 
       <div class="feature-grid">
-        {content.features.items.map((feature) => (
+        {content.features.items.map((feature, index) => (
           <article class:list={['feature-card', feature.span === 'wide' && 'feature-card-wide', 'reveal']}>
-            <div class="card-number">{feature.number}</div>
+            <div class="card-number">0{index + 1}</div>
             <div class="feature-copy">
               <h3>{feature.title}</h3>
               <p>{feature.description}</p>

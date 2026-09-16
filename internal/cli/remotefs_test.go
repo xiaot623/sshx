@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,9 +12,119 @@ import (
 	"testing"
 
 	"github.com/xiaot623/sshx/internal/identity"
+	"github.com/xiaot623/sshx/internal/protocol"
 	"github.com/xiaot623/sshx/internal/remotefs"
 	"github.com/xiaot623/sshx/internal/sshcompat"
 )
+
+type stubMountDriver struct {
+	calls int
+}
+
+type stubMount struct {
+	path string
+	done chan error
+}
+
+func (d *stubMountDriver) Mount(_ context.Context, path string, _ remotefs.Backend, _ remotefs.MountOptions) (remotefs.Mount, error) {
+	d.calls++
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return nil, err
+	}
+	return &stubMount{path: path, done: make(chan error)}, nil
+}
+
+func (m *stubMount) Path() string       { return m.path }
+func (m *stubMount) Done() <-chan error { return m.done }
+func (m *stubMount) Unmount(context.Context) error {
+	select {
+	case <-m.done:
+	default:
+		close(m.done)
+	}
+	return nil
+}
+
+func TestRemoteMountManagerExecuteRequiresPriorOnMount(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	manager := newRemoteMountManager("session-1", false)
+	defer manager.Close()
+	if manager.initErr != nil {
+		t.Fatal(manager.initErr)
+	}
+	resp := manager.Execute(context.Background(), protocol.Frame{
+		Type:      protocol.TypeCommandExec,
+		ID:        "1",
+		SessionID: "session-1",
+		MountID:   "export-1",
+		MountPath: "Users/xiaot",
+		Cwd:       ".",
+		Argv:      []string{"true"},
+		RemoteFS:  true,
+	})
+	if resp.Type != protocol.TypeCommandError || !strings.Contains(resp.Error, "not available") {
+		t.Fatalf("response = %#v", resp)
+	}
+}
+
+func TestRemoteMountManagerOnMountThenExecute(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	manager := newRemoteMountManager("session-1", false)
+	defer manager.Close()
+	if manager.initErr != nil {
+		t.Fatal(manager.initErr)
+	}
+	driver := &stubMountDriver{}
+	manager.driver = driver
+	peer := &remotefs.Peer{}
+	mountPath, err := manager.OnMount(context.Background(), peer, "export-1", "Users/xiaot", remotefs.MountOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := manager.OnMount(context.Background(), peer, "export-1", "Users/xiaot", remotefs.MountOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != mountPath {
+		t.Fatalf("idempotent OnMount path = %q, want %q", again, mountPath)
+	}
+	if driver.calls != 1 {
+		t.Fatalf("Mount calls = %d, want 1", driver.calls)
+	}
+	workspace := filepath.Join(mountPath, "workspace", "sshx")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "note.txt"), []byte("from-remote"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resp := manager.Execute(context.Background(), protocol.Frame{
+		Type:      protocol.TypeCommandExec,
+		ID:        "1",
+		SessionID: "session-1",
+		MountID:   "export-1",
+		MountPath: "Users/xiaot",
+		Cwd:       "workspace/sshx",
+		Argv:      []string{"cat", "note.txt"},
+		RemoteFS:  true,
+	})
+	if resp.Type != protocol.TypeCommandResult {
+		t.Fatalf("response = %#v", resp)
+	}
+	stdout, err := base64.StdEncoding.DecodeString(resp.Stdout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdout) != "from-remote" {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	if err := manager.OnUnmount(context.Background(), "export-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.OnUnmount(context.Background(), "export-1"); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestLocalReverseMountsRootDetectsNestedCwd(t *testing.T) {
 	root := localReverseMountsRoot()

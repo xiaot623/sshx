@@ -167,13 +167,13 @@ func Install(ctx context.Context, profile Profile, opts InstallOptions) (Install
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return InstallResult{}, err
 	}
-	if !settingsExisted {
-		original = []byte("{}\n")
-	} else if info, statErr := os.Stat(settingsPath); statErr == nil {
-		settingsMode = info.Mode().Perm()
+	if settingsExisted {
+		if info, statErr := os.Stat(settingsPath); statErr == nil {
+			settingsMode = info.Mode().Perm()
+		}
 	}
 	settingsSource := original
-	if len(bytes.TrimSpace(settingsSource)) == 0 {
+	if !settingsExisted || len(bytes.TrimSpace(settingsSource)) == 0 {
 		settingsSource = []byte("{}\n")
 	}
 	previous, _, err := StringProperty(settingsSource, settingsKey)
@@ -246,7 +246,13 @@ func Install(ctx context.Context, profile Profile, opts InstallOptions) (Install
 	if err := validateProfile(staging, executable, descriptor); err != nil {
 		return InstallResult{}, err
 	}
-	if err := selfCheck(ctx, filepath.Join(binDir, "ssh"), filepath.Join(binDir, "scp"), upstreamSSH, upstreamSCP, run); err != nil {
+	if err := selfCheck(
+		ctx,
+		filepath.Join(binDir, "ssh"),
+		filepath.Join(binDir, "scp"),
+		upstreamSSH,
+		upstreamSCP,
+		run); err != nil {
 		return InstallResult{}, err
 	}
 
@@ -285,9 +291,6 @@ func Install(ctx context.Context, profile Profile, opts InstallOptions) (Install
 	if err := os.Rename(staging, profileRoot); err != nil {
 		return InstallResult{}, err
 	}
-	if err := validateProfile(profileRoot, executable, descriptor); err != nil {
-		return InstallResult{}, err
-	}
 	if err := atomicWrite(settingsPath, patched, settingsMode); err != nil {
 		return InstallResult{}, err
 	}
@@ -296,7 +299,9 @@ func Install(ctx context.Context, profile Profile, opts InstallOptions) (Install
 	if readErr != nil {
 		return InstallResult{}, readErr
 	}
-	if value, found, err := StringProperty(installedSettings, settingsKey); err != nil || !found || !samePath(value, finalSSH) {
+	if value, found, err := StringProperty(installedSettings, settingsKey); err != nil ||
+		!found ||
+		!samePath(value, finalSSH) {
 		if err == nil {
 			err = errors.New("remote.SSH.path verification failed")
 		}
@@ -329,7 +334,10 @@ func ReadDescriptor(path string) (Descriptor, error) {
 	if err := json.Unmarshal(b, &descriptor); err != nil {
 		return Descriptor{}, err
 	}
-	if descriptor.Schema != 1 || !validProfile(descriptor.Profile) || descriptor.SSHPath == "" || descriptor.SCPPath == "" {
+	if descriptor.Schema != 1 ||
+		!validProfile(descriptor.Profile) ||
+		descriptor.SSHPath == "" ||
+		descriptor.SCPPath == "" {
 		return Descriptor{}, errors.New("invalid sshx integration descriptor")
 	}
 	return descriptor, nil
@@ -343,7 +351,11 @@ func WriteDescriptor(path string, descriptor Descriptor) error {
 	return atomicWrite(path, append(b, '\n'), 0o600)
 }
 
-func findOpenSSH(ctx context.Context, preferred, executable string, lookPath func(string) (string, error), run func(context.Context, string, ...string) ([]byte, error)) (string, error) {
+func findOpenSSH(
+	ctx context.Context,
+	preferred, executable string,
+	lookPath func(string) (string, error),
+	run func(context.Context, string, ...string) ([]byte, error)) (string, error) {
 	candidates := []string{preferred}
 	if path, err := lookPath("ssh"); err == nil {
 		candidates = append(candidates, path)
@@ -451,7 +463,10 @@ func validateProfile(root, executable string, descriptor Descriptor) error {
 	return nil
 }
 
-func selfCheck(ctx context.Context, sshShim, scpShim, upstreamSSH, upstreamSCP string, run func(context.Context, string, ...string) ([]byte, error)) error {
+func selfCheck(
+	ctx context.Context,
+	sshShim, scpShim, upstreamSSH, upstreamSCP string,
+	run func(context.Context, string, ...string) ([]byte, error)) error {
 	want, _ := run(ctx, upstreamSSH, "-V")
 	got, _ := run(ctx, sshShim, "-V")
 	if !bytes.Equal(bytes.TrimSpace(got), bytes.TrimSpace(want)) {

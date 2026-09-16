@@ -15,6 +15,7 @@ features:
   commandBridge: true
   autoForward: true
   remoteFs: true
+  proxy: true
 commands:
   deny:
     - rm
@@ -26,7 +27,11 @@ commands:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward || !cfg.Features.RemoteFS {
+	if !cfg.Strict ||
+		!cfg.Features.CommandBridge ||
+		!cfg.Features.AutoForward ||
+		!cfg.Features.RemoteFS ||
+		!cfg.Features.Proxy {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 	if !cfg.Commands.Allows([]string{"uname", "-a"}) {
@@ -43,6 +48,7 @@ func clearFeatureEnv(t *testing.T) {
 	t.Setenv("COMMANDBRIDGE", "")
 	t.Setenv("AUTOFORWARD", "")
 	t.Setenv("REMOTEFS", "")
+	t.Setenv("SSHX_USE_PROXY", "")
 }
 
 func TestEnsureDefaultWritesEmbeddedConfig(t *testing.T) {
@@ -62,7 +68,11 @@ func TestEnsureDefaultWritesEmbeddedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Strict || !cfg.Features.CommandBridge || !cfg.Features.AutoForward || cfg.Features.RemoteFS {
+	if cfg.Strict ||
+		!cfg.Features.CommandBridge ||
+		!cfg.Features.AutoForward ||
+		cfg.Features.RemoteFS ||
+		cfg.Features.Proxy {
 		t.Fatalf("unexpected default config: %#v", cfg)
 	}
 }
@@ -108,6 +118,9 @@ func TestFeaturesEnabled(t *testing.T) {
 	if !(Features{RemoteFS: true}).Enabled() {
 		t.Fatal("remote fs should enable features")
 	}
+	if !(Features{Proxy: true}).Enabled() {
+		t.Fatal("proxy should enable features")
+	}
 }
 
 func TestFeatureEnvOverridesConfig(t *testing.T) {
@@ -124,11 +137,12 @@ features:
 	t.Setenv("COMMANDBRIDGE", "0")
 	t.Setenv("AUTOFORWARD", "0")
 	t.Setenv("REMOTEFS", "1")
+	t.Setenv("SSHX_USE_PROXY", "1")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Features.CommandBridge || cfg.Features.AutoForward || !cfg.Features.RemoteFS {
+	if cfg.Features.CommandBridge || cfg.Features.AutoForward || !cfg.Features.RemoteFS || !cfg.Features.Proxy {
 		t.Fatalf("env should override config: %#v", cfg.Features)
 	}
 }
@@ -137,11 +151,12 @@ func TestFeatureEnvAppliesWithoutConfigFile(t *testing.T) {
 	t.Setenv("COMMANDBRIDGE", "1")
 	t.Setenv("AUTOFORWARD", "0")
 	t.Setenv("REMOTEFS", "1")
+	t.Setenv("SSHX_USE_PROXY", "1")
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Features.CommandBridge || cfg.Features.AutoForward || !cfg.Features.RemoteFS {
+	if !cfg.Features.CommandBridge || cfg.Features.AutoForward || !cfg.Features.RemoteFS || !cfg.Features.Proxy {
 		t.Fatalf("env should set features without config: %#v", cfg.Features)
 	}
 }
@@ -158,11 +173,27 @@ features:
 	}
 	t.Setenv("COMMANDBRIDGE", "yes")
 	t.Setenv("AUTOFORWARD", "no")
+	t.Setenv("SSHX_USE_PROXY", "yes")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Features.CommandBridge || cfg.Features.AutoForward {
+	if !cfg.Features.CommandBridge || cfg.Features.AutoForward || cfg.Features.Proxy {
 		t.Fatalf("invalid env values should leave config unchanged: %#v", cfg.Features)
+	}
+}
+
+func TestProxyEnvCanDisableConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("features:\n  proxy: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSHX_USE_PROXY", "0")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Features.Proxy {
+		t.Fatal("SSHX_USE_PROXY=0 did not disable the config feature")
 	}
 }

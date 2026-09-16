@@ -17,8 +17,13 @@ func TestInstallCreatesOneBinaryShimsAndPreservesSettings(t *testing.T) {
 	writeExecutable(t, ssh, "#!/bin/sh\nif [ \"${1:-}\" = -V ]; then echo 'OpenSSH_9.9 test' >&2; exit 0; fi\nexit 0\n")
 	writeExecutable(t, scp, "#!/bin/sh\necho 'usage: scp test' >&2\nexit 1\n")
 	driver := filepath.Join(tools, "sshx-driver")
-	writeExecutable(t, driver, fmt.Sprintf("#!/bin/sh\ncase \"${0##*/}\" in ssh) exec %s \"$@\" ;; scp) exec %s \"$@\" ;; esac\nexit 2\n", shellTestQuote(ssh), shellTestQuote(scp)))
-	settings, err := SettingsPath(VSCode, InstallOptions{HomeDir: home, ConfigHome: filepath.Join(home, "config"), GOOS: "linux"})
+	writeExecutable(t, driver, fmt.Sprintf(
+		"#!/bin/sh\ncase \"${0##*/}\" in ssh) exec %s \"$@\" ;; scp) exec %s \"$@\" ;; esac\nexit 2\n",
+		shellTestQuote(ssh),
+		shellTestQuote(scp)))
+	settings, err := SettingsPath(
+		VSCode,
+		InstallOptions{HomeDir: home, ConfigHome: filepath.Join(home, "config"), GOOS: "linux"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +35,11 @@ func TestInstallCreatesOneBinaryShimsAndPreservesSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := InstallOptions{
-		HomeDir: home, ConfigHome: filepath.Join(home, "config"), GOOS: "linux", Executable: driver, NPMManaged: true,
+		HomeDir: home,
+		ConfigHome: filepath.Join(home, "config"),
+		GOOS: "linux",
+		Executable: driver,
+		NPMManaged: true,
 		LookPath: func(name string) (string, error) {
 			if name == "ssh" {
 				return ssh, nil
@@ -100,7 +109,10 @@ func TestInstallSelfCheckFailureLeavesSettingsUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Install(context.Background(), Cursor, InstallOptions{
-		HomeDir: home, ConfigHome: configHome, GOOS: "linux", Executable: driver,
+		HomeDir: home,
+		ConfigHome: configHome,
+		GOOS: "linux",
+		Executable: driver,
 		LookPath: func(name string) (string, error) {
 			if name == "ssh" {
 				return ssh, nil
@@ -129,12 +141,17 @@ func TestInstallRollsBackCommittedShimWhenSettingsWriteFails(t *testing.T) {
 	writeExecutable(t, scp, "#!/bin/sh\necho usage >&2\nexit 1\n")
 	driverOne := filepath.Join(tools, "driver-one")
 	driverTwo := filepath.Join(tools, "driver-two")
-	driverScript := fmt.Sprintf("#!/bin/sh\ncase \"${0##*/}\" in ssh) exec %s \"$@\" ;; scp) exec %s \"$@\" ;; esac\n", shellTestQuote(ssh), shellTestQuote(scp))
+	driverScript := fmt.Sprintf(
+		"#!/bin/sh\ncase \"${0##*/}\" in ssh) exec %s \"$@\" ;; scp) exec %s \"$@\" ;; esac\n",
+		shellTestQuote(ssh),
+		shellTestQuote(scp))
 	writeExecutable(t, driverOne, driverScript)
 	writeExecutable(t, driverTwo, driverScript)
 	configHome := filepath.Join(home, "config")
 	base := InstallOptions{
-		HomeDir: home, ConfigHome: configHome, GOOS: "linux",
+		HomeDir: home,
+		ConfigHome: configHome,
+		GOOS: "linux",
 		LookPath: func(name string) (string, error) {
 			if name == "ssh" {
 				return ssh, nil

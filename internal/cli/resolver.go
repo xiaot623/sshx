@@ -16,7 +16,7 @@ func (r *Runner) defaultEnsureResolver(ctx context.Context) error {
 	if runtime.GOOS != "darwin" {
 		return nil
 	}
-	suffix := strings.Trim(domainSuffix(), ".")
+	suffix := strings.Trim(defaultDomainSuffix(), ".")
 	if suffix == "" {
 		return errors.New("domain suffix is required")
 	}

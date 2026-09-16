@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,7 +27,11 @@ type testRemoteMount struct {
 	once sync.Once
 }
 
-func (d *captureRemoteMountDriver) Mount(_ context.Context, path string, backend remotefs.Backend, options remotefs.MountOptions) (remotefs.Mount, error) {
+func (d *captureRemoteMountDriver) Mount(
+	_ context.Context,
+	path string,
+	backend remotefs.Backend,
+	options remotefs.MountOptions) (remotefs.Mount, error) {
 	d.backend <- backend
 	d.options <- options
 	return &testRemoteMount{path: path, done: make(chan error)}, nil
@@ -71,20 +76,44 @@ func startRemoteFSServer(t *testing.T, drivers ...remotefs.MountDriver) (context
 	return ctx, socket, server
 }
 
-func connectRemoteFSPair(t *testing.T, ctx context.Context, socket string, execute func(context.Context, protocol.Frame) protocol.Frame) (*remotefs.Peer, <-chan error) {
+func dummyClientMountOptions(t *testing.T) remotefs.PeerOptions {
+	t.Helper()
+	dir := t.TempDir()
+	return remotefs.PeerOptions{
+		OnMount: func(_ context.Context, _ *remotefs.Peer, mountID, _ string, _ remotefs.MountOptions) (string, error) {
+			path := filepath.Join(dir, mountID)
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				return "", err
+			}
+			return path, nil
+		},
+		OnUnmount: func(context.Context, string) error { return nil },
+	}
+}
+
+func connectRemoteFSPair(
+	t *testing.T,
+	ctx context.Context,
+	socket string,
+	execute func(context.Context, protocol.Frame) protocol.Frame,
+	opts ...remotefs.PeerOptions) (*remotefs.Peer, <-chan error) {
 	t.Helper()
 	controlReady := make(chan error, 1)
 	controlErr := make(chan error, 1)
 	go func() {
-		controlErr <- RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{
-			Ready:      controlReady,
-			AppVersion: "test-version",
-			TargetID:   "target-1",
-			ContextID:  "context-1",
-			SessionID:  "session-1",
-			Allow:      func([]string) bool { return true },
-			Execute:    execute,
-		}, "secret")
+		controlErr <- RunClientConnWithOptions(
+			ctx,
+			mustDialUnix(t, socket),
+			ClientOptions{
+				Ready:      controlReady,
+				AppVersion: "test-version",
+				TargetID:   "target-1",
+				ContextID:  "context-1",
+				SessionID:  "session-1",
+				Allow:      func([]string) bool { return true },
+				Execute:    execute,
+			},
+			"secret")
 	}()
 	if err := <-controlReady; err != nil {
 		t.Fatal(err)
@@ -93,7 +122,16 @@ func connectRemoteFSPair(t *testing.T, ctx context.Context, socket string, execu
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := remotefs.Connect(ctx, conn, "session-1", "secret", remotefs.PeerOptions{})
+	peerOpts := dummyClientMountOptions(t)
+	if len(opts) > 0 {
+		if opts[0].OnMount != nil {
+			peerOpts.OnMount = opts[0].OnMount
+		}
+		if opts[0].OnUnmount != nil {
+			peerOpts.OnUnmount = opts[0].OnUnmount
+		}
+	}
+	peer, err := remotefs.Connect(ctx, conn, "session-1", "secret", peerOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +157,9 @@ func waitForRemoteFSPeer(t *testing.T, server *Server, sessionID string) {
 }
 
 func TestRemoteFSAcceptsLocalToRemoteMountForDirectSession(t *testing.T) {
-	driver := &captureRemoteMountDriver{backend: make(chan remotefs.Backend, 1), options: make(chan remotefs.MountOptions, 1)}
+	driver := &captureRemoteMountDriver{
+		backend: make(chan remotefs.Backend, 1),
+		options: make(chan remotefs.MountOptions, 1)}
 	ctx, socket, _ := startRemoteFSServer(t, driver)
 	clientPeer, _ := connectRemoteFSPair(t, ctx, socket, nil)
 	root := t.TempDir()
@@ -134,7 +174,11 @@ func TestRemoteFSAcceptsLocalToRemoteMountForDirectSession(t *testing.T) {
 	if err := clientPeer.RegisterBackend("local-export", backend); err != nil {
 		t.Fatal(err)
 	}
-	path, err := clientPeer.CreateMountAtWithOptions(ctx, "local-export", "Users/xiaot", remotefs.MountOptions{ReadOnly: true})
+	path, err := clientPeer.CreateMountAtWithOptions(
+		ctx,
+		"local-export",
+		"Users/xiaot",
+		remotefs.MountOptions{ReadOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,9 +248,19 @@ func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		result, err := RequestCommandForSessionWithMountOptions(
-			ctx, socket, []string{"read-remote"}, nil, nil, remoteRoot,
-			"session-1", true, true, time.Second, "secret",
+		result, err := RequestCommandForContextWithMountOptions(
+			ctx,
+			socket,
+			[]string{"read-remote"},
+			nil,
+			nil,
+			remoteRoot,
+			"",
+			"session-1",
+			true,
+			true,
+			time.Second,
+			"secret",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -223,18 +277,121 @@ func TestRequesterExportsRemoteCwdToExactClientSession(t *testing.T) {
 	}
 }
 
+func TestRequesterOffersClientMountOnceThenForwardsCommand(t *testing.T) {
+	ctx, socket, server := startRemoteFSServer(t)
+	var onMountCount atomic.Int32
+	var executeCount atomic.Int32
+	execute := func(_ context.Context, frame protocol.Frame) protocol.Frame {
+		executeCount.Add(1)
+		if frame.MountID == "" || frame.MountPath == "" {
+			return protocol.Frame{Type: protocol.TypeCommandError, ID: frame.ID, Error: "command.exec is missing mount identity"}
+		}
+		return protocol.Frame{
+			Type:   protocol.TypeCommandResult,
+			ID:     frame.ID,
+			Stdout: base64.StdEncoding.EncodeToString([]byte("ok"))}
+	}
+	mountDir := t.TempDir()
+	_, _ = connectRemoteFSPair(t, ctx, socket, execute, remotefs.PeerOptions{
+		OnMount: func(_ context.Context, _ *remotefs.Peer, mountID, _ string, _ remotefs.MountOptions) (string, error) {
+			onMountCount.Add(1)
+			path := filepath.Join(mountDir, mountID)
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				return "", err
+			}
+			return path, nil
+		},
+	})
+	waitForRemoteFSPeer(t, server, "session-1")
+	remoteRoot := t.TempDir()
+	for range 2 {
+		result, err := RequestCommandForContextWithMountOptions(
+			ctx,
+			socket,
+			[]string{"true"},
+			nil,
+			nil,
+			remoteRoot,
+			"",
+			"session-1",
+			true,
+			true,
+			time.Second,
+			"secret",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(result.Stdout) != "ok" {
+			t.Fatalf("stdout = %q", result.Stdout)
+		}
+	}
+	if got := onMountCount.Load(); got != 1 {
+		t.Fatalf("OnMount calls = %d, want 1", got)
+	}
+	if got := executeCount.Load(); got != 2 {
+		t.Fatalf("command.exec calls = %d, want 2", got)
+	}
+}
+
+func TestRequesterDoesNotForwardCommandWhenClientMountFails(t *testing.T) {
+	ctx, socket, server := startRemoteFSServer(t)
+	var executeCount atomic.Int32
+	execute := func(_ context.Context, frame protocol.Frame) protocol.Frame {
+		executeCount.Add(1)
+		return protocol.Frame{Type: protocol.TypeCommandResult, ID: frame.ID}
+	}
+	_, _ = connectRemoteFSPair(t, ctx, socket, execute, remotefs.PeerOptions{
+		OnMount: func(context.Context, *remotefs.Peer, string, string, remotefs.MountOptions) (string, error) {
+			return "", os.ErrPermission
+		},
+	})
+	waitForRemoteFSPeer(t, server, "session-1")
+	_, err := RequestCommandForContextWithMountOptions(
+		ctx,
+		socket,
+		[]string{"true"},
+		nil,
+		nil,
+		t.TempDir(),
+		"",
+		"session-1",
+		true,
+		true,
+		time.Second,
+		"secret",
+	)
+	if err == nil {
+		t.Fatal("expected mount.create failure to stop command.exec")
+	}
+	if executeCount.Load() != 0 {
+		t.Fatalf("command.exec calls = %d, want 0", executeCount.Load())
+	}
+}
+
 func TestRequesterRoutesToExactSessionWithMultipleClients(t *testing.T) {
 	ctx, socket, _ := startRemoteFSServer(t)
 	startClient := func(sessionID string) {
 		ready := make(chan error, 1)
 		go func() {
-			_ = RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{
-				Ready: ready, AppVersion: "test-version", TargetID: "target-1", ContextID: "context-1", SessionID: sessionID,
-				Allow: func([]string) bool { return true },
-				Execute: func(_ context.Context, frame protocol.Frame) protocol.Frame {
-					return protocol.Frame{Type: protocol.TypeCommandResult, ID: frame.ID, Stdout: base64.StdEncoding.EncodeToString([]byte(sessionID))}
+			_ = RunClientConnWithOptions(
+				ctx,
+				mustDialUnix(t, socket),
+				ClientOptions{
+					Ready:      ready,
+					AppVersion: "test-version",
+					TargetID:   "target-1",
+					ContextID:  "context-1",
+					SessionID:  sessionID,
+					Allow:      func([]string) bool { return true },
+					Execute: func(_ context.Context, frame protocol.Frame) protocol.Frame {
+						return protocol.Frame{
+							Type:   protocol.TypeCommandResult,
+							ID:     frame.ID,
+							Stdout: base64.StdEncoding.EncodeToString([]byte(sessionID))}
+					},
 				},
-			}, "secret")
+				"secret")
 		}()
 		if err := <-ready; err != nil {
 			t.Fatal(err)
@@ -242,7 +399,19 @@ func TestRequesterRoutesToExactSessionWithMultipleClients(t *testing.T) {
 	}
 	startClient("session-1")
 	startClient("session-2")
-	result, err := RequestCommandForSessionWithTimeout(ctx, socket, []string{"which-session"}, nil, nil, "", "session-2", false, time.Second, "secret")
+	result, err := RequestCommandForContextWithMountOptions(
+		ctx,
+		socket,
+		[]string{"which-session"},
+		nil,
+		nil,
+		"",
+		"",
+		"session-2",
+		false,
+		false,
+		time.Second,
+		"secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,13 +425,24 @@ func TestRequesterSelectsHealthySessionByContext(t *testing.T) {
 	startClient := func(contextID, sessionID string) {
 		ready := make(chan error, 1)
 		go func() {
-			_ = RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{
-				Ready: ready, AppVersion: "test-version", TargetID: "target-1", ContextID: contextID, SessionID: sessionID,
-				Allow: func([]string) bool { return true },
-				Execute: func(_ context.Context, frame protocol.Frame) protocol.Frame {
-					return protocol.Frame{Type: protocol.TypeCommandResult, ID: frame.ID, Stdout: base64.StdEncoding.EncodeToString([]byte(sessionID))}
+			_ = RunClientConnWithOptions(
+				ctx,
+				mustDialUnix(t, socket),
+				ClientOptions{
+					Ready:      ready,
+					AppVersion: "test-version",
+					TargetID:   "target-1",
+					ContextID:  contextID,
+					SessionID:  sessionID,
+					Allow:      func([]string) bool { return true },
+					Execute: func(_ context.Context, frame protocol.Frame) protocol.Frame {
+						return protocol.Frame{
+							Type:   protocol.TypeCommandResult,
+							ID:     frame.ID,
+							Stdout: base64.StdEncoding.EncodeToString([]byte(sessionID))}
+					},
 				},
-			}, "secret")
+				"secret")
 		}()
 		if err := <-ready; err != nil {
 			t.Fatal(err)
@@ -271,7 +451,18 @@ func TestRequesterSelectsHealthySessionByContext(t *testing.T) {
 	startClient("context-a", "session-a")
 	startClient("context-b", "session-b")
 	result, err := RequestCommandForContextWithMountOptions(
-		ctx, socket, []string{"which-context"}, nil, nil, "", "context-b", "", false, false, time.Second, "secret",
+		ctx,
+		socket,
+		[]string{"which-context"},
+		nil,
+		nil,
+		"",
+		"context-b",
+		"",
+		false,
+		false,
+		time.Second,
+		"secret",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -285,13 +476,24 @@ func TestRequesterRetriesAnotherSessionInContextAfterClientDrops(t *testing.T) {
 	ctx, socket, server := startRemoteFSServer(t)
 	ready := make(chan error, 1)
 	go func() {
-		_ = RunClientConnWithOptions(ctx, mustDialUnix(t, socket), ClientOptions{
-			Ready: ready, AppVersion: "test-version", TargetID: "target-1", ContextID: "context-1", SessionID: "healthy-session",
-			Allow: func([]string) bool { return true },
-			Execute: func(_ context.Context, frame protocol.Frame) protocol.Frame {
-				return protocol.Frame{Type: protocol.TypeCommandResult, ID: frame.ID, Stdout: base64.StdEncoding.EncodeToString([]byte(frame.SessionID))}
+		_ = RunClientConnWithOptions(
+			ctx,
+			mustDialUnix(t, socket),
+			ClientOptions{
+				Ready:      ready,
+				AppVersion: "test-version",
+				TargetID:   "target-1",
+				ContextID:  "context-1",
+				SessionID:  "healthy-session",
+				Allow:      func([]string) bool { return true },
+				Execute: func(_ context.Context, frame protocol.Frame) protocol.Frame {
+					return protocol.Frame{
+						Type:   protocol.TypeCommandResult,
+						ID:     frame.ID,
+						Stdout: base64.StdEncoding.EncodeToString([]byte(frame.SessionID))}
+				},
 			},
-		}, "secret")
+			"secret")
 	}()
 	if err := <-ready; err != nil {
 		t.Fatal(err)
@@ -315,7 +517,18 @@ func TestRequesterRetriesAnotherSessionInContextAfterClientDrops(t *testing.T) {
 	server.mu.Unlock()
 
 	result, err := RequestCommandForContextWithMountOptions(
-		ctx, socket, []string{"which-session"}, nil, nil, "", "context-1", "", false, false, time.Second, "secret",
+		ctx,
+		socket,
+		[]string{"which-session"},
+		nil,
+		nil,
+		"",
+		"context-1",
+		"",
+		false,
+		false,
+		time.Second,
+		"secret",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -331,10 +544,21 @@ func TestRequesterRejectsMismatchedSessionIdentity(t *testing.T) {
 	defer conn.Close()
 	encoder := protocol.NewEncoder(conn)
 	decoder := protocol.NewDecoder(conn)
-	if err := encoder.Encode(protocol.Frame{Type: protocol.TypeHello, Role: protocol.RoleRequester, ProtocolVersion: protocol.Version, RuntimeID: identity.RuntimeID, Token: "secret", SessionID: "session-1"}); err != nil {
+	if err := encoder.Encode(protocol.Frame{
+		Type:            protocol.TypeHello,
+		Role:            protocol.RoleRequester,
+		ProtocolVersion: protocol.Version,
+		RuntimeID:       identity.RuntimeID,
+		Token:           "secret",
+		SessionID:       "session-1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := encoder.Encode(protocol.Frame{Type: protocol.TypeCommandExec, ID: "req-1", RequestID: "req-1", Argv: []string{"true"}, SessionID: "session-2"}); err != nil {
+	if err := encoder.Encode(protocol.Frame{
+		Type:      protocol.TypeCommandExec,
+		ID:        "req-1",
+		RequestID: "req-1",
+		Argv:      []string{"true"},
+		SessionID: "session-2"}); err != nil {
 		t.Fatal(err)
 	}
 	response, err := decoder.Decode()
